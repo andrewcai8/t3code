@@ -1,10 +1,7 @@
 /**
  * BoxFleetClient - the host's fleet RPC connection to one of its cloud boxes.
- *
- * The host reaches a box with the box's broker token, the admin credential it
- * minted when it prepared the box. It trades that token for a WebSocket
- * ticket, then speaks the same `fleet.*` RPCs a desktop window speaks to the
- * server it relays for.
+ * Trades the box's broker token for a WebSocket ticket, then speaks the same `fleet.*` RPCs a
+ * desktop window speaks to the server it relays for.
  *
  * @module BoxFleetClient
  */

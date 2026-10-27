@@ -18,16 +18,18 @@ export const pairingRedemptionLayer = Layer.effect(
     const presentation = yield* ClientCapabilities.ClientPresentation;
     const httpClient = yield* HttpClient.HttpClient;
     return PairingRedemption.of({
-      redeem: (input) =>
+      redeem: Effect.fn("PairingRedemption.redeem")((input) =>
         preparePairingRegistration(input).pipe(
           Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
           Effect.provideService(HttpClient.HttpClient, httpClient),
         ),
-      sessionGrant: (prepared) =>
+      ),
+      sessionGrant: Effect.fn("PairingRedemption.sessionGrant")((prepared) =>
         fetchEnvironmentSessionState({ prepared, signer: Option.none() }).pipe(
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Effect.option,
         ),
+      ),
     });
   }),
 );

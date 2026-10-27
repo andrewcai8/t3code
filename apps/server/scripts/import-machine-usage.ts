@@ -1,16 +1,8 @@
 /**
- * Uploads this machine's usage history to a T3 host, so the host's Usage page counts a machine
- * no client connects to. It runs the server's own usage scanner over the provider homes in this
- * machine's T3 settings, then replaces what the host keeps for this machine.
- *
- *   node apps/server/scripts/import-machine-usage.ts --dry-run
- *   node apps/server/scripts/import-machine-usage.ts --origin https://host \
- *     --pairing-token-file ~/.t3/audit/secrets/host-pairing-token
- *
- * The machine's T3 home is only read. The scanner keeps its rate table and parse cache under
- * `--cache-dir`, which also keeps usage from transcripts a CLI has since cleaned up, as a local
- * server would. The bearer is cached beside the pairing token (0600) until it expires. Tokens
- * never reach stdout.
+ * Uploads this machine's usage history to a T3 host so its Usage page counts a machine no client
+ * connects to, using the server's own scanner. Only reads this machine's T3 home; tokens never reach stdout.
+ * Usage: node apps/server/scripts/import-machine-usage.ts [--dry-run] --origin https://host \
+ *   --pairing-token-file <file> [--cache-dir <dir>]
  */
 import * as NodeOS from "node:os";
 
@@ -44,6 +36,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
 
 import * as ServerSecretStore from "../src/auth/ServerSecretStore.ts";
 import * as BackgroundPolicy from "../src/background/BackgroundPolicy.ts";
@@ -118,6 +111,7 @@ const scanHistory = Effect.fn("import-machine-usage.scanHistory")(function* (inp
         settingsLayer,
         Layer.mergeAll(
           AntigravityUsage.layer,
+          MuseUsageHome.layer,
           CursorUsageAccounts.layer.pipe(
             Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
           ),
@@ -133,9 +127,15 @@ const scanHistory = Effect.fn("import-machine-usage.scanHistory")(function* (inp
         Layer.succeed(
           BoxUsageStore,
           BoxUsageStore.of({
-            replace: () => Effect.void,
-            list: () => Effect.succeed([]),
-            prune: () => Effect.void,
+            replace: Effect.fn("BoxUsageStore.replace")(function () {
+              return Effect.void;
+            }),
+            list: Effect.fn("BoxUsageStore.list")(function () {
+              return Effect.succeed([]);
+            }),
+            prune: Effect.fn("BoxUsageStore.prune")(function () {
+              return Effect.void;
+            }),
           }),
         ),
       ),

@@ -1,9 +1,7 @@
 /**
- * Usage windows for `claude setup-token` logins, the accounts cloud hosts run
- * chats on. Their token carries inference scope only, so `get_usage` reports
- * no windows. A turn's `rate_limit_event` carries them instead, every window
- * under the untyped `unifiedWindows` with no top-level utilization, so the
- * capabilities probe spends one throwaway turn to read them.
+ * Usage windows for `claude setup-token` logins, the accounts cloud hosts run chats on. Their token
+ * carries inference scope only, so `get_usage` reports no windows; a turn's `rate_limit_event`
+ * carries them under `unifiedWindows`, so the capabilities probe spends one throwaway turn.
  *
  * @module provider/Layers/claudeSetupTokenUsage
  */

@@ -1,11 +1,7 @@
 /**
- * HomeService - owns Home, the fleet-wide agent thread, on a desktop-hosted
- * server.
- *
- * Home's state (its thread and what it watches) lives in server settings, so
- * every client sees it with the settings stream it already has. The grant is
- * "this thread is `home.threadId`", read on every call: turning Home off or
- * starting fresh takes the old thread's reach away at once.
+ * HomeService - owns Home, the fleet-wide agent thread, on a desktop-hosted server. Its state lives
+ * in server settings so every client sees it. The grant is "this thread is `home.threadId`", read
+ * on every call: turning Home off or starting fresh takes the old thread's reach away at once.
  *
  * @module HomeService
  */
@@ -176,11 +172,9 @@ const make = Effect.gen(function* () {
   const withLock = <A, E>(effect: Effect.Effect<A, E>) => lock.withPermits(1)(effect);
 
   /**
-   * Stops a former Home once its grant is gone, so it does not keep working
-   * next to the new Home. Best effort: the grant already moved. Holding the
-   * queue commits under the orchestrator's thread lock, which also starts
-   * queued runs, so after it no queued turn can start; a turn that started
-   * before it is the active run, which is then interrupted.
+   * Stops a former Home once its grant is gone. Best effort: the grant already moved. Holding the
+   * queue commits under the orchestrator's thread lock, which also starts queued runs, so after it no
+   * queued turn can start; a turn that started before it is the active run, which is interrupted.
    */
   const stopFormerHome = Effect.fn("HomeService.stopFormerHome")(
     function* (threadId: ThreadId) {
@@ -240,8 +234,8 @@ const make = Effect.gen(function* () {
   return HomeService.of({
     available,
 
-    enable: (input) =>
-      withLock(
+    enable: Effect.fn("HomeService.enable")(function* (input) {
+      return yield* withLock(
         Effect.gen(function* () {
           yield* requireAvailable;
           const home = yield* readHome;
@@ -252,7 +246,8 @@ const make = Effect.gen(function* () {
           yield* writeHome({ ...home, threadId });
           return { threadId };
         }),
-      ),
+      );
+    }),
 
     disable: withLock(
       Effect.gen(function* () {
@@ -287,28 +282,30 @@ const make = Effect.gen(function* () {
       }),
     ),
 
-    isHome: (threadId) =>
-      available
+    isHome: Effect.fn("HomeService.isHome")(function (threadId) {
+      return available
         ? readHome.pipe(
             Effect.map((home) => home.threadId === threadId),
             Effect.orElseSucceed(() => false),
           )
-        : Effect.succeed(false),
+        : Effect.succeed(false);
+    }),
 
-    updateWatches: (homeThreadId, update) =>
-      withLock(
+    updateWatches: Effect.fn("HomeService.updateWatches")(function* (homeThreadId, update) {
+      return yield* withLock(
         Effect.gen(function* () {
           const home = yield* readHome;
           if (home.threadId === null) return yield* fail("Home is off.");
           if (home.threadId !== homeThreadId) return yield* fail("This thread is no longer Home.");
           return yield* writeHome(update(home));
         }),
-      ),
+      );
+    }),
 
     // Under the lock, so turning Home off or starting fresh cannot slip in
     // between choosing the Home thread and waking it.
-    report: ({ events }) =>
-      withLock(
+    report: Effect.fn("HomeService.report")(function* ({ events }) {
+      return yield* withLock(
         Effect.gen(function* () {
           const home = yield* readHome;
           if (home.threadId === null) return;
@@ -332,7 +329,8 @@ const make = Effect.gen(function* () {
             watches: home.watches.filter((watch) => !ended.has(watchKey(watch))),
           }).pipe(Effect.ignore);
         }),
-      ),
+      );
+    }),
   });
 });
 

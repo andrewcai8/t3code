@@ -104,14 +104,14 @@ const handler = Effect.gen(function* () {
   const control = yield* EnvironmentControl.EnvironmentControl;
   const origin = yield* control
     .namespaceProxyOrigin(route.leaseId)
-    .pipe(Effect.catch(() => Effect.succeed(null)));
+    .pipe(Effect.orElseSucceed(() => null));
   if (!origin) return HttpServerResponse.text("Not Found", { status: 404 });
   const resolved = resolveProvisionedEnvironmentTarget(url.value, origin);
   if (!resolved) return HttpServerResponse.text("Not Found", { status: 404 });
   if (isWebSocketUpgrade(request))
     return yield* proxyWebSocket(request, resolved.target.toString().replace(/^http/, "ws"));
   return yield* proxyHttp(request, resolved.target).pipe(
-    Effect.catch(() => Effect.succeed(HttpServerResponse.text("Bad Gateway", { status: 502 }))),
+    Effect.orElseSucceed(() => HttpServerResponse.text("Bad Gateway", { status: 502 })),
   );
 });
 

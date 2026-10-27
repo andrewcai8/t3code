@@ -18,6 +18,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../home/FleetBroker.ts";
 import * as FleetService from "../home/FleetService.ts";
@@ -183,7 +184,7 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
     Layer.mock(Project.ProjectService)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     Layer.mock(GitVcsDriver.GitVcsDriver)({}),
-    NodeServices.layer,
+    DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
     ServerConfig.layerTest(process.cwd(), { prefix: "t3-cloud-reach-" }).pipe(
       Layer.provide(NodeServices.layer),
     ),

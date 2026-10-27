@@ -91,12 +91,10 @@ const refused = (
 ): EnvironmentProvisionSwitchAccountResult => ({ kind: "refused", reason, message });
 
 /**
- * Moves a box onto another host account of the provider `threadId` runs on, and continues the
- * chat's run when a usage limit stopped it. The account that hit the limit, and every account a
- * chat on this box hit a limit on before, stays out of rotation until it resets, so a run of
- * switches ends once no account is left. A run is handled once: every outcome but a busy chat,
- * failures included, records it, so upkeep never retries it on each sweep and the box can sleep.
- * A refusal leaves the box itself as it was.
+ * Moves a box onto another host account of the provider `threadId` runs on, and continues the run
+ * when a usage limit stopped it. Accounts that hit a limit stay out of rotation until reset.
+ * A run is handled once: every outcome but a busy chat records it, so upkeep never retries it and
+ * the box can sleep. A refusal leaves the box as it was.
  */
 export async function switchLeaseAccount(
   lease: ProvisionedLease,

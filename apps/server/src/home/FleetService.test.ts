@@ -5,6 +5,7 @@ import {
   type ExecutionEnvironmentDescriptor,
   type Project as ContractProject,
   ProjectId,
+  RunId,
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ServerCommand,
@@ -13,11 +14,11 @@ import {
   ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
@@ -83,9 +84,10 @@ const setup = (
         }),
         Layer.mock(Project.ProjectService)({
           getById: (projectId) =>
-            Effect.succeed(
-              Option.some({ id: projectId, workspaceRoot: `/${projectId}` } as ContractProject),
-            ),
+            Effect.succeedSome({
+              id: projectId,
+              workspaceRoot: `/${projectId}`,
+            } as ContractProject),
         }),
         Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
           namedProjectsRoot: "/projects",
@@ -125,6 +127,11 @@ const setup = (
                 { id: toolCallId, kind: "dynamic_tool_call", status: "pending" },
               ],
               turnItems: [],
+            } as never),
+          sendToThread: () =>
+            Effect.succeed({
+              run: { id: RunId.make("run"), status: "running" },
+              delivery: "started",
             } as never),
           dispatch: (command) => {
             dispatched.push(command);
@@ -339,5 +346,17 @@ it.effect("only launches with a Home launch id it was given", () => {
       })
       .pipe(Effect.asVoid, Effect.flip);
     expect(error.code).toBe("invalid_request");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("returns a ready link for the thread it sends to", () => {
+  const { layer } = setup();
+  return Effect.gen(function* () {
+    const fleet = yield* FleetService.FleetService;
+    const result = yield* fleet.execute({
+      actor,
+      request: { op: "threads.send", input: { threadId, message: "Keep going" } },
+    });
+    expect(result).toMatchObject({ threadId, link: formatThreadLink(threadId, "worker") });
   }).pipe(Effect.provide(layer));
 });

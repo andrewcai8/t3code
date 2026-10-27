@@ -121,34 +121,24 @@ const TERMINAL_STATES: ReadonlySet<ProvisionOperation["state"]["kind"]> = new Se
 const isRequestConflict = Schema.is(ProvisionRequestConflict);
 const decodeRequestId = Schema.decodeUnknownEffect(ProvisionRequestId);
 /**
- * The message crosses a trust boundary so it stays deliberately vague, but the
- * cause is attached to the instance so the host-side boundary that already logs
- * `cause` reports something usable. `Effect.mapError(safeError)` and
- * `catch: safeError` both hand it the original error, so most sites carry it
- * without changing.
+ * The message crosses a trust boundary so it stays vague, but the cause is attached to the instance
+ * so the host-side boundary that logs `cause` reports something usable.
  */
 const safeError = () =>
   new EnvironmentControlError({
     message: "Cloud provisioning could not be reconciled. Retry the same request.",
   });
 /**
- * Keeps the cause of a failure in the host log.
- *
- * The message that leaves this module stays deliberately vague because it
- * crosses a trust boundary, but every redaction below discards the cause
- * entirely, which leaves nothing to debug from — a provisioning failure becomes
- * indistinguishable from any other. This only taps, so it cannot change what a
+ * Keeps the cause of a failure in the host log. The message stays vague because it crosses a trust
+ * boundary, but every redaction below discards the cause. This only taps, so it cannot change what a
  * caller sees or the error type it sees it as.
  */
 const logCause = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.tapError(effect, (cause) => Effect.logError("provisioning failed", { cause }));
 /**
- * Carries a cause past a `catch` that has to keep the contract errors typed.
- *
- * Those catches must return `ProvisionRefused`, `ProvisionRequestConflict` and
- * `ProvisionRetentionError` unchanged so the narrowing below still works, which
- * leaves nowhere to log from — wrapping instead keeps the cause until a tap can
- * read it, and unwrapping restores exactly the error the callers already expect.
+ * Carries a cause past a `catch` that has to keep the contract errors typed. Those catches must
+ * return `ProvisionRefused`, `ProvisionRequestConflict` and `ProvisionRetentionError` unchanged, so
+ * wrapping keeps the cause until a tap can read it, and unwrapping restores the original error.
  */
 class UnexpectedCause {
   readonly cause: unknown;
@@ -360,7 +350,7 @@ export function makeProvisionControl(
           : { status: "failed", reason: "The box refused the turn." },
       );
     },
-    Effect.catch(() => Effect.succeed("pending" as const)),
+    Effect.orElseSucceed(() => "pending" as const),
   );
   /** Starts a chat's first turn now, retrying briefly while its box is not answering yet. */
   const settleChat = (operation: ProvisionOperation) =>

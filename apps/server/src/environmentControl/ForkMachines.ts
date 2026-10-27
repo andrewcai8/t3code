@@ -3,14 +3,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - a Modal copy's outputs pass through a scratch file on the host.
 /**
  * ForkMachines - the cloud provider side of t3_fork_run: copies of a chat's machine.
- *
- * WorkerForks decides what runs where and for how long; this port does each step on the
- * provider. `layer` copies a chat's machine on its own provider, E2B or Modal, by capturing it
- * once per batch and starting every copy from that capture, so all of a batch's jobs see the
- * chat's machine as it was when the batch started, and each copy carries this host's tags for
- * the sweep.
- *
- * @module ForkMachines
+ * WorkerForks decides what runs where; this port does each step on the provider. `layer` copies a
+ * chat's machine on its own provider (E2B or Modal) by capturing it once per batch and starting
+ * every copy from that capture. Each copy carries this host's tags for the sweep.
  */
 import {
   CommandExitError,
@@ -203,14 +198,10 @@ export const captureBatch = (host: string, snapshotName: string): string | null 
 };
 
 /**
- * Makes a fresh copy run nothing but the job. A copy from a full capture is the chat's whole
- * machine, memory included: its T3 server and agents, running. Left running, the copy's server
- * would answer as the chat and its agents would keep working and billing the provider. So before
- * any job runs, the copy records the environment the chat's agent sees (see
- * guestAgentEnvironment.ts) and kills every process its user owns. The server runs as that user,
- * and the check below refuses a copy where it survived. A copy booted from a disk capture has
- * nothing to kill, and this only confirms it. Either way the copy starts with no network and gets
- * it back only after this, so nothing it inherited can reach the host, GitHub or a provider.
+ * Makes a fresh copy run nothing but the job. A full-capture copy is the chat's whole machine with
+ * its server and agents running, which would answer as the chat and keep billing the provider. So
+ * the copy records the agent's environment (see guestAgentEnvironment.ts), kills every process its
+ * user owns, and a check refuses a copy where the server survived. It has no network until then.
  */
 const QUIET = String.raw`
 import json, os, pathlib, shutil, signal, time
@@ -249,11 +240,9 @@ shutil.rmtree(stash, ignore_errors=True)
 `;
 
 /**
- * Keeps the chat's /tmp for a copy booted from disk, whose boot empties /tmp. Run on the chat's
- * machine just before its capture: it hardlinks every file under /tmp into the stash, which sits
- * on the same disk and so takes no space, and the capture carries it. The stash is removed from
- * the chat's machine right after the capture, and any older one first. Files the chat's user
- * cannot link, such as other users', are left out and counted.
+ * Keeps the chat's /tmp for a copy booted from disk, whose boot empties /tmp. Run just before the
+ * capture, it hardlinks every file under /tmp into a stash on the same disk (no extra space); the
+ * stash is removed right after the capture. Files the chat's user cannot link are left out, counted.
  */
 const STASH = String.raw`
 import json, os, shutil, sys
@@ -440,11 +429,10 @@ const decodeDiskCapture = Schema.decodeUnknownSync(
 );
 
 /**
- * Captures only a sandbox's disk, so copies boot fresh from it rather than resuming its memory.
- * Copies need nothing from memory: everything they would inherit there is killed anyway. And a
- * memory image saved while the box was pinned at full CPU can be impossible to place, which
- * fails every copy. E2B offers this per team (`memory: false`, which its SDK does not expose yet);
- * answers null where the team does not have it, and the caller takes a full snapshot.
+ * Captures only a sandbox's disk, so copies boot fresh from it rather than resuming memory. Copies
+ * need nothing from memory, and a memory image saved while the box was pinned at full CPU can be
+ * impossible to place. E2B offers this per team (`memory: false`, not in its SDK yet); answers null
+ * where the team lacks it, and the caller takes a full snapshot.
  */
 async function captureDisk(apiKey: string, sandboxId: string, name: string, signal: AbortSignal) {
   const response = await fetch(
@@ -727,8 +715,8 @@ export const layer = Layer.effect(
     );
 
     const e2b = ForkMachines.of({
-      settings: (repository) =>
-        control.controlConfig.pipe(
+      settings: Effect.fn("ForkMachines.settings")(function (repository) {
+        return control.controlConfig.pipe(
           Effect.map((config) =>
             config === null
               ? null
@@ -738,10 +726,11 @@ export const layer = Layer.effect(
                 },
           ),
           Effect.mapError((cause) => new ForkMachineError({ step: "settings", cause })),
-        ),
+        );
+      }),
 
-      capture: (sandboxId, tag) =>
-        attempt("capture", async (e2b, signal, apiKey) => {
+      capture: Effect.fn("ForkMachines.capture")(function (sandboxId, tag) {
+        return attempt("capture", async (e2b, signal, apiKey) => {
           const { network, state } = await e2b.Sandbox.getInfo(sandboxId, { signal });
           if (state !== "running") throw new Error("The chat's machine is not running");
           const name = `${capturePrefix(tag.host)}${tag.batchId}`;
@@ -772,16 +761,18 @@ export const layer = Layer.effect(
             ...(network?.denyOut ? { denyOut: network.denyOut } : {}),
           });
           return snapshotId;
-        }),
+        });
+      }),
 
-      release: (captureId) =>
-        attempt("capture", async (e2b) => {
+      release: Effect.fn("ForkMachines.release")(function (captureId) {
+        return attempt("capture", async (e2b) => {
           networks.delete(captureId);
           await deleteSnapshot(e2b, captureId);
-        }),
+        });
+      }),
 
-      start: (captureId, tag, lifetimeMs) =>
-        attempt("start", async (e2b, signal) => {
+      start: Effect.fn("ForkMachines.start")(function (captureId, tag, lifetimeMs) {
+        return attempt("start", async (e2b, signal) => {
           const sandbox = await e2b.Sandbox.create(captureId, {
             signal,
             requestTimeoutMs: 300_000,
@@ -814,13 +805,15 @@ export const layer = Layer.effect(
               ? new ForkMachineError({ step: error.step, cause: error.cause, busy: true })
               : error,
           ),
-        ),
+        );
+      }),
 
-      othersRunning: (_captureId, host) =>
-        listRunning.pipe(Effect.map((running) => othersOf(host, running))),
+      othersRunning: Effect.fn("ForkMachines.othersRunning")(function (_captureId, host) {
+        return listRunning.pipe(Effect.map((running) => othersOf(host, running)));
+      }),
 
-      run: (forkId, job) =>
-        copyOf("run", forkId).pipe(
+      run: Effect.fn("ForkMachines.run")(function (forkId, job) {
+        return copyOf("run", forkId).pipe(
           Effect.flatMap((sandbox) =>
             Effect.tryPromise({
               try: async () =>
@@ -828,20 +821,22 @@ export const layer = Layer.effect(
               catch: (cause) => new ForkMachineError({ step: "run", cause }),
             }),
           ),
-        ),
+        );
+      }),
 
-      upload: (forkId, input) =>
-        copyOf("upload", forkId).pipe(
+      upload: Effect.fn("ForkMachines.upload")(function (forkId, input) {
+        return copyOf("upload", forkId).pipe(
           Effect.flatMap((sandbox) =>
             Effect.tryPromise({
               try: async () => decodeUpload(await exec(sandbox, python(UPLOAD, input), 3_700_000)),
               catch: (cause) => new ForkMachineError({ step: "upload", cause }),
             }),
           ),
-        ),
+        );
+      }),
 
-      copyBack: (forkId, input) =>
-        copyOf("copy", forkId).pipe(
+      copyBack: Effect.fn("ForkMachines.copyBack")(function (forkId, input) {
+        return copyOf("copy", forkId).pipe(
           Effect.flatMap((fork) =>
             attempt("copy", async (e2b) => {
               await exec(fork, python(PACK, { cwd: input.cwd, paths: input.paths }), 600_000);
@@ -862,11 +857,12 @@ export const layer = Layer.effect(
               return { kind: "copied" as const };
             }),
           ),
-        ),
+        );
+      }),
 
       // E2B answers false for a sandbox already gone.
-      kill: (forkId) =>
-        attempt("kill", async (e2b) => {
+      kill: Effect.fn("ForkMachines.kill")(function (forkId) {
+        return attempt("kill", async (e2b) => {
           running.delete(forkId);
           await e2b.Sandbox.kill(forkId);
         }).pipe(
@@ -876,10 +872,11 @@ export const layer = Layer.effect(
               cause: error.cause,
             }),
           ),
-        ),
+        );
+      }),
 
-      sweep: (host, remove) =>
-        attempt("sweep", async (e2b) => {
+      sweep: Effect.fn("ForkMachines.sweep")(function (host, remove) {
+        return attempt("sweep", async (e2b) => {
           // Everything is listed before anything is removed, so removing never shifts a page.
           const copies: Array<string> = [];
           const listed = e2b.Sandbox.list({
@@ -919,47 +916,58 @@ export const layer = Layer.effect(
             captures: captures.length,
             failed: results.filter((result) => result.status === "rejected").length,
           };
-        }),
+        });
+      }),
     });
     const modal = yield* modalMachines;
     return ForkMachines.of({
       settings: e2b.settings,
-      capture: (sandboxId, tag) =>
-        modal
-          .capture(sandboxId, tag)
-          .pipe(
-            Effect.flatMap((captureId) =>
-              captureId === null ? e2b.capture(sandboxId, tag) : Effect.succeed(captureId),
-            ),
+      capture: Effect.fn("ForkMachines.capture")(function (sandboxId, tag) {
+        return modal.capture(sandboxId, tag).pipe(
+          Effect.filterOrElse(
+            (captureId) => !(captureId === null),
+            (_captureId) => e2b.capture(sandboxId, tag),
           ),
-      release: (captureId) =>
-        modal.owns(captureId) ? modal.release(captureId) : e2b.release(captureId),
-      start: (captureId, tag, lifetimeMs) =>
-        modal.owns(captureId)
+        );
+      }),
+      release: Effect.fn("ForkMachines.release")(function (captureId) {
+        return modal.owns(captureId) ? modal.release(captureId) : e2b.release(captureId);
+      }),
+      start: Effect.fn("ForkMachines.start")(function (captureId, tag, lifetimeMs) {
+        return modal.owns(captureId)
           ? modal.start(captureId, tag, lifetimeMs)
-          : e2b.start(captureId, tag, lifetimeMs),
-      othersRunning: (captureId, host) =>
-        modal.owns(captureId) ? Effect.succeed(null) : e2b.othersRunning(captureId, host),
-      run: (forkId, job) => (modal.owns(forkId) ? modal.run(forkId, job) : e2b.run(forkId, job)),
-      upload: (forkId, input) =>
-        modal.owns(forkId) ? modal.upload(forkId, input) : e2b.upload(forkId, input),
-      copyBack: (forkId, input) =>
-        modal.owns(forkId) ? modal.copyBack(forkId, input) : e2b.copyBack(forkId, input),
-      kill: (forkId) => (modal.owns(forkId) ? modal.kill(forkId) : e2b.kill(forkId)),
-      sweep: (host, remove) =>
-        Effect.all([
+          : e2b.start(captureId, tag, lifetimeMs);
+      }),
+      othersRunning: Effect.fn("ForkMachines.othersRunning")(function (captureId, host) {
+        return modal.owns(captureId) ? Effect.succeed(null) : e2b.othersRunning(captureId, host);
+      }),
+      run: Effect.fn("ForkMachines.run")(function (forkId, job) {
+        return modal.owns(forkId) ? modal.run(forkId, job) : e2b.run(forkId, job);
+      }),
+      upload: Effect.fn("ForkMachines.upload")(function (forkId, input) {
+        return modal.owns(forkId) ? modal.upload(forkId, input) : e2b.upload(forkId, input);
+      }),
+      copyBack: Effect.fn("ForkMachines.copyBack")(function (forkId, input) {
+        return modal.owns(forkId) ? modal.copyBack(forkId, input) : e2b.copyBack(forkId, input);
+      }),
+      kill: Effect.fn("ForkMachines.kill")(function (forkId) {
+        return modal.owns(forkId) ? modal.kill(forkId) : e2b.kill(forkId);
+      }),
+      sweep: Effect.fn("ForkMachines.sweep")(function (host, remove) {
+        return Effect.all([
           e2b.sweep(host, remove),
           // A host without Modal has no Modal copies to sweep.
           modal
             .sweep(host, remove)
-            .pipe(Effect.catch(() => Effect.succeed({ forks: 0, captures: 0, failed: 0 }))),
+            .pipe(Effect.orElseSucceed(() => ({ forks: 0, captures: 0, failed: 0 }))),
         ]).pipe(
           Effect.map(([onE2b, onModal]) => ({
             forks: onE2b.forks + onModal.forks,
             captures: onE2b.captures + onModal.captures,
             failed: onE2b.failed + onModal.failed,
           })),
-        ),
+        );
+      }),
     });
   }),
 );

@@ -22,6 +22,7 @@ export function ProvisionCancellations() {
     for (const draftId of disposed) forgetProvisionedSandbox(draftId);
   });
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Subscribe to cancelled-provision signals and poll every 30s to dispose their boxes; both are released on unmount.
   useEffect(() => {
     let draining = false;
     const drain = async () => {

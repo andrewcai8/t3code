@@ -1,9 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - the shim is a file beside the `t3` command ForkExec links.
 /**
- * A `bun` in `~/.local/bin`, beside `t3`, that sends a plain, large `bun test` from an agent
- * to `t3 fork-exec` on a host with worktree forks, and runs everything else, or anything it is
- * unsure of, with the real bun. A user's own `~/.local/bin/bun` is moved aside to
- * `.bun.t3-real` and put back when the shim is removed.
+ * A `bun` in `~/.local/bin`, beside `t3`, that sends a plain, large `bun test` from an agent to
+ * `t3 fork-exec` on a host with worktree forks, and runs everything else with the real bun. A
+ * user's own `bun` is moved aside to `.bun.t3-real` and put back when the shim is removed.
  *
  * @module bunShim
  */
@@ -25,11 +24,8 @@ export interface BunShimSettings {
 /**
  * Routes only when the first word is `test`, a T3 server advertises its socket (terminals strip
  * T3CODE_*, so this is an agent), no skip variable is set, and every other word is an existing
- * directory or a flag that writes nothing; a sandbox's writes never come back, so `-u` or
- * `--coverage` must run here. A run named by directories routes only when they hold at least
- * `minTestFiles` test files, since a copy takes about ten seconds to start. Counting stops there,
- * and a directory find cannot read counts short, so that run stays here. 75 means nothing
- * started, so the real bun runs it; any other code, 70 included, is the result.
+ * directory or a flag that writes nothing (a copy's writes never come back). Directories must hold
+ * `minTestFiles` test files. 75 means nothing started, so the real bun runs it; other codes are the result.
  */
 const script = (binDir: string, owner: string, settings: BunShimSettings) => `#!/bin/sh
 ${MARKER}
@@ -129,10 +125,9 @@ const observe = (path: string, owner: string) => {
 
 /**
  * Makes `binDir/bun` the shim of the T3 home `owner` (`want` set) or not (null), from what is on
- * disk now. Each step leaves a state the next run recognizes, so a crash between two renames is
- * repaired at the next start. A foreign `bun` with a `.bun.t3-real` already beside it is ambiguous
- * and left alone, and so is a shim another T3 home installed: a dev server on the same machine
- * must not remove the shim of the server that uses it.
+ * disk now. Each step leaves a state the next run recognizes, so a crash between renames is
+ * repaired at the next start. A foreign `bun` with a `.bun.t3-real` beside it is ambiguous and left
+ * alone, as is a shim another T3 home installed.
  */
 export const reconcileBunShim = (
   binDir: string,

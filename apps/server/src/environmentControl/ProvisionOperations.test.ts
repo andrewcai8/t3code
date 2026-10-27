@@ -27,7 +27,7 @@ import { Provisioning, ProvisionProviderError, ProvisionProviderPorts } from "./
 
 const decodeRequest = Schema.decodeUnknownEffect(DurableProvisionRequest);
 
-const request = Schema.decodeUnknownSync(DurableProvisionRequest)({
+const request = Schema.decodeSync(DurableProvisionRequest)({
   requestId: "908e75d5-01ec-483f-9858-3ac1fa8c7b23",
   provider: "e2b",
   providerInstanceId: "codex",

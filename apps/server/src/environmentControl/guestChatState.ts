@@ -26,15 +26,10 @@ export const DERIVED_HOME_PATHS = [
 ] as const;
 
 /**
- * Guest verbs that move a chat between a Mac and its off-box snapshot and keep
- * the repository's cache template honest. JSON in on stdin, JSON out on
- * stdout, convergent when rerun after a crash at any point.
- *
- * The cache volume is mounted at `mount`; the chat's root is `mount/root`,
- * the same path on every Mac, because absolute paths are baked into the
- * journal, worktree links, venvs and build trees. The template is a sealed
- * copy of a pristine root at `mount/template`, valid only while
- * `mount/template.json` (written last) describes it.
+ * Guest verbs that move a chat between a Mac and its off-box snapshot and keep the repository's
+ * cache template honest. JSON on stdin and stdout; convergent when rerun after a crash.
+ * The chat's root is `mount/root`, the same path on every Mac, because absolute paths are baked
+ * into the journal, worktree links, venvs and build trees.
  */
 const guestChatStateScript = String.raw`
 import base64, contextlib, fcntl, hashlib, io, json, os, pathlib, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time, urllib.request, uuid
@@ -1014,11 +1009,10 @@ export async function restoreChat(
 }
 
 /**
- * Snapshots the chat and PUTs it to a signed URL. `final` stops the T3 server
- * (and the agents it runs) first so the snapshot is exact; `live` copies under
- * a running server. Returns `unchanged` without uploading when the root still
- * matches `previousFingerprint`. Refuses a root with no preparation journal,
- * so a scrubbed or sealed root can never be saved over a chat.
+ * Snapshots the chat and PUTs it to a signed URL. `final` stops the T3 server (and its agents)
+ * first so the snapshot is exact; `live` copies under a running server. Returns `unchanged` when
+ * the root still matches `previousFingerprint`. Refuses a root with no preparation journal, so a
+ * scrubbed or sealed root can never be saved over a chat.
  */
 export function saveChat(
   port: RemotePreparationPort,

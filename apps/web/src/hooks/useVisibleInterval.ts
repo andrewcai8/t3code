@@ -7,6 +7,7 @@ import { useEffect, useEffectEvent } from "react";
 export function useVisibleInterval(callback: () => void, ms: number, enabled: boolean): void {
   const tick = useEffectEvent(callback);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Own a visibility-gated interval and the document listener that restarts it; both are released on change or unmount.
   useEffect(() => {
     if (!enabled) return;
     let timer: ReturnType<typeof setInterval> | undefined;

@@ -202,6 +202,7 @@ vi.mock("../state/entities", () => ({
   useProjects: () => [],
   useThread: () => null,
 }));
+vi.mock("../state/olderSettledShelf", () => ({ readUnloadedThreadCount: () => 0 }));
 vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
   primaryServerSettingsAtom: "primary-settings",
@@ -211,7 +212,7 @@ vi.mock("../uiStateStore", () => ({
   legacyProjectCwdPreferenceKey: () => "remote-project",
   useUiStateStore: () => [],
 }));
-vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
+vi.mock("./useSettings", () => ({ getClientSettings: () => ({}) }));
 
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useNewThreadHandler } from "./useHandleNewThread";

@@ -22,16 +22,10 @@ import {
 } from "./ProvisionPreparation.ts";
 
 /**
- * Per repository, a box that already cloned the repository and ran its prepare
- * commands, kept for new chats to start from. A chat only fetches its own
- * revision and reruns the (now incremental) prepare commands.
- *
- * On E2B the base is a snapshot, which outlives the box it was taken from and
- * starts any number of chats. On Namespace, which cannot snapshot a Mac, it is
- * a spare: the build's own stopped Devbox, which exactly one chat claims.
- *
- * The upkeep loop is the only writer of a record. Chat freezes only read it,
- * and a chat takes a spare through `makeSpareClaims`.
+ * Per repository, a box that already cloned it and ran its prepare commands, kept for new chats to
+ * start from. On E2B the base is a snapshot that starts any number of chats; on Namespace, which
+ * cannot snapshot a Mac, it is a spare Devbox that exactly one chat claims. The upkeep loop is the
+ * only writer of a record; chat freezes only read it.
  */
 export const WarmBaseSeed = Schema.Struct({
   providerInstanceId: EnvironmentProvisionInput.fields.providerInstanceId,

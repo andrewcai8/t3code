@@ -25,7 +25,7 @@ function adoptHostChat(
   const snapshot = withHostChat(current.snapshot, chat);
   return snapshot === null
     ? null
-    : { snapshot: Option.some(snapshot), status: "cached", error: current.error };
+    : { ...current, snapshot: Option.some(snapshot), status: "cached" };
 }
 
 /**

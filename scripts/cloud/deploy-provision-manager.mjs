@@ -55,12 +55,9 @@ await NodeFSP.mkdir(output, { recursive: true, mode: 0o700 });
 const config = JSON.parse(await NodeFSP.readFile(values.config, "utf8"));
 
 const MANAGER_BASE_DIR = "/home/user/manager-state";
-// A TTL, not an idle timer: E2B pauses the manager this long after creation
-// and again after each auto-resume, however busy it is. Long enough that one
-// wake covers a provision (about a minute) and a child's bootstrap with room
-// to spare; short enough that a manager nobody is using pauses within the
-// hour instead of billing for a day. Paused, it costs nothing and the next
-// request wakes it in well under a second.
+// A TTL, not an idle timer: E2B pauses the manager this long after creation and after each
+// auto-resume, however busy it is. Long enough that one wake covers a provision and a child's
+// bootstrap; short enough that an unused manager pauses within the hour instead of billing for a day.
 const MANAGER_TIMEOUT_MS = 30 * 60_000;
 
 // Packing reads every credential before paying for a sandbox, so a missing
@@ -99,14 +96,10 @@ const revision = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], { c
   .toString()
   .trim();
 
-// Reusing a sandbox matters on a retry: the artifact upload is the slow step,
-// and a failure part way through would otherwise strand the box it created.
-// The manager pauses when its timeout lapses and any request wakes it, which
-// is what lets it create boxes while the operator's laptop is asleep. Without
-// auto-resume a paused manager answers 502 until something connects to it.
-// A websocket alone is enough: measured against a paused manager, an rpc
-// client that opens a socket with no prior fetch got its answer back in 1.4s
-// to 2.0s across three attempts. So no client needs a wake-up request first.
+// Reusing a sandbox matters on a retry: the artifact upload is the slow step. The manager pauses
+// when its timeout lapses and any request wakes it, so it can create boxes while the operator's
+// laptop sleeps; without auto-resume a paused manager answers 502. A websocket alone is enough to
+// wake it (measured 1.4s to 2.0s), so no client needs a wake-up request first.
 const sandbox = values.sandbox
   ? await Sandbox.connect(values.sandbox, { apiKey, timeoutMs: MANAGER_TIMEOUT_MS })
   : await Sandbox.create(templateId, {

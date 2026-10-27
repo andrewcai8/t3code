@@ -20,6 +20,7 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import type * as ServerConfig from "../config.ts";
+import type * as DocumentText from "../provider/DocumentText.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import type * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import type * as ThreadManagementService from "./ThreadManagementService.ts";
@@ -74,6 +75,7 @@ export const makeHostLaunchThread = Effect.gen(function* () {
     | ThreadLaunchService.ThreadLaunchService
     | FileSystem.FileSystem
     | ServerConfig.ServerConfig
+    | DocumentText.DocumentText
   >();
   return Effect.fn("environment.orchestration.launchThread")(function* (
     payload: OrchestrationV2ThreadLaunchInput,

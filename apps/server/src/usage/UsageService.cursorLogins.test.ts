@@ -15,6 +15,7 @@ import {
 import type { UsageRecord } from "@t3tools/provider-core/server/usage";
 import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -108,6 +109,7 @@ const readSummary = (
           Layer.succeed(CursorAccountReader.CursorAccountReader, { read: readAccount }),
         ),
         Layer.provideMerge(AntigravityUsage.layer),
+        Layer.provideMerge(MuseUsageHome.layer),
         Layer.provideMerge(ProviderHostLive.layer),
         Layer.provideMerge(CodexUsageHistory.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
         Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),

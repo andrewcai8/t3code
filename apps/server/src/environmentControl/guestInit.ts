@@ -86,12 +86,10 @@ while True:
 `;
 
 /**
- * Defines `init_served()`, whether the box's entrypoint serves `T3_INIT_SOCKET` (default
- * `GUEST_INIT_SOCKET`); `spawn_detached(argv, env, cwd, log_path)`, which starts a process that
- * outlives the guest script and returns its pid, through the entrypoint when it serves the socket
- * and detached here otherwise, as on E2B; and `run_attached(argv, cwd, env, timeout)`, which runs a
- * command through the entrypoint and returns its output once it exits, so whatever it leaves
- * running descends from the entrypoint. `run_attached` needs `CommandTimeout`.
+ * Defines `init_served()`, whether the box's entrypoint serves `T3_INIT_SOCKET`;
+ * `spawn_detached(argv, env, cwd, log_path)`, which starts a process that outlives the guest script
+ * (through the entrypoint when it serves the socket, detached here otherwise, as on E2B); and
+ * `run_attached(argv, cwd, env, timeout)`, which needs `CommandTimeout`.
  */
 export const spawnDetachedScript = String.raw`
 def init_socket():

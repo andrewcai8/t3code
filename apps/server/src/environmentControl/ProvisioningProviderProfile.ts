@@ -289,10 +289,9 @@ const rankDriverAccounts = (
 
 /**
  * The account a cloud box moves its driver onto once the one it runs on is spent: the best ranked
- * account of the driver whose login can leave this machine, skipping the excluded accounts, any
- * account of the same subscription as one of them (by email), and any known to be spent. A usage
- * reading can be half an hour old, so the account that just hit its limit is excluded by the
- * caller rather than trusted to read as spent. None when no account qualifies.
+ * account of the driver whose login can leave this machine, skipping excluded accounts, any account
+ * of the same subscription (by email), and any known spent. A usage reading can be half an hour old,
+ * so the caller excludes the account that just hit its limit. None when no account qualifies.
  */
 export const resolveSwitchProfile = Effect.fn("resolveSwitchProfile")(function* (
   settings: ServerSettings,
@@ -328,17 +327,10 @@ export const resolveSwitchProfile = Effect.fn("resolveSwitchProfile")(function* 
 });
 
 /**
- * The accounts a new cloud environment runs, the routed one first.
- *
- * Each driver runs on its account with the largest share of usage left once
- * its active sessions are counted (`rankAccounts`), walking down the ranking past any account whose login cannot leave this
- * machine or would expire before the run could use it. The requested driver must resolve to some account; every other
- * driver comes along when one of its accounts is portable and is left off
- * the guest otherwise, so one unusable login never blocks the chat asked for.
- * `providerInstanceId` names the driver when `agentDriver` is absent and wins
- * ties, which keeps a manager with no usage data on the account the user saw.
- * `pinAccount` skips the ranking for the requested driver and runs on
- * `providerInstanceId` or refuses.
+ * The accounts a new cloud environment runs, the routed one first. Each driver runs on its account
+ * with the largest share of usage left (`rankAccounts`), skipping any whose login cannot leave this
+ * machine or would expire before the run. The requested driver must resolve to some account.
+ * `pinAccount` skips the ranking for it and runs on `providerInstanceId` or refuses.
  */
 export type ProvisioningProviderProfiles = readonly [
   primary: ProvisioningProviderProfile,
@@ -377,9 +369,7 @@ export const resolveProvisioningProfiles = Effect.fn("resolveProvisioningProfile
     }
     // The hinted account's refusal carries the fix the user can act on.
     const refusal = refusals.find(({ instanceId }) => instanceId === hint) ?? refusals[0];
-    return refusal
-      ? yield* Effect.fail(refusal.failure)
-      : Option.none<ProvisioningProviderProfile>();
+    return refusal ? yield* refusal.failure : Option.none<ProvisioningProviderProfile>();
   });
   const driver = input.agentDriver ?? instances[hint]?.driver;
   // A pinned account is never swapped for another, so one known to be spent refuses here

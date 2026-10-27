@@ -6,19 +6,10 @@ interface GuardableStream {
 }
 
 /**
- * Stop a failed write on this process's stderr from killing the process.
- *
- * The desktop app runs the server as a child with piped stdio, so its stderr
- * can start failing with `EIO` while the process is otherwise healthy. The
- * server's own output goes through the logger and survives that, but Node
- * prints process warnings itself from `node:internal/process/warning`, whose
- * `writeOut` calls `console.error` with no error handling. That makes any
- * warning, including one Node raises on its own, a fatal uncaught exception
- * once stderr is unwritable.
- *
- * Wrapping the write leaves Node's warning formatting and `--trace-warnings`
- * alone and only removes the ability to crash. A swallowed write reports
- * success so callers do not wait on a `drain` event that will never arrive.
+ * Stop a failed write on this process's stderr from killing the process. The desktop app runs the
+ * server with piped stdio, so stderr can fail with `EIO`, and Node prints warnings through
+ * `console.error` with no error handling, making any warning fatal. A swallowed write reports
+ * success so callers do not wait on a `drain` event that never arrives.
  */
 export const guardStderr = (stream: GuardableStream): void => {
   const write = stream.write.bind(stream);

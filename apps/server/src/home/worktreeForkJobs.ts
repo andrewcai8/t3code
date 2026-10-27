@@ -1,16 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - small records beside this host's state, written in place.
 /**
- * What a restarted server needs to adopt a worktree fork whose command was already running
- * (WorktreeForks.ts). A server is usually killed rather than shut down, so nothing here waits for
- * a clean exit: each record is written whole before its command's banner and renamed into place,
- * and is gone only once the job has ended.
- *
- * `<stateDir>/worktree-forks/jobs/<job>/` holds a job's `job.json` and, once its outputs start
- * coming back, a `copy-back` marker created exclusively, so a stale record or a second server
- * never copies them twice. Batches keep `batch.json` in their results directory, so
- * t3_fork_status answers across a restart too.
- *
- * @module worktreeForkJobs
+ * What a restarted server needs to adopt a worktree fork whose command was already running. A server
+ * is usually killed rather than shut down, so each record is written whole before its command's
+ * banner and renamed into place, and is gone only once the job has ended. A `copy-back` marker is
+ * created exclusively, so a second server never copies outputs twice.
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";

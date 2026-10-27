@@ -9,7 +9,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -19,7 +18,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import { RepositoryIdentityResolver } from "../project/RepositoryIdentityResolver.ts";
 import * as ScheduledCloudFire from "./ScheduledCloudFire.ts";
 
-const task = Schema.decodeUnknownSync(ScheduledTask)({
+const task = Schema.decodeSync(ScheduledTask)({
   id: "scheduled-task:nightly",
   title: "Nightly triage",
   prompt: "Triage new issues.",
@@ -128,9 +127,10 @@ const fireWith = (results: ReadonlyArray<EnvironmentProvisionResult>) =>
           }),
           Layer.mock(ProjectService.ProjectService)({
             getById: () =>
-              Effect.succeed(
-                Option.some({ workspaceRoot: "/work/widgets", repositoryIdentity: null } as never),
-              ),
+              Effect.succeedSome({
+                workspaceRoot: "/work/widgets",
+                repositoryIdentity: null,
+              } as never),
           }),
           Layer.mock(RepositoryIdentityResolver)({
             resolve: (cwd) =>

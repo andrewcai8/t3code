@@ -46,18 +46,10 @@ const asDriver = (entry: ProviderInstanceEntry): ProviderInstanceEntry => ({
 });
 
 /**
- * The picker rail for a draft that starts a cloud environment: one entry per
- * cloud-capable driver, labeled as the driver rather than an account, because
- * the manager routes the provision to whichever account of that driver has the
- * most usage left. The entry is a real local instance so its id can ride along
- * as the provision hint. Its models are the hint's own; every account of a driver
- * serves the same catalog, and a union would offer models the hint cannot fall
- * back to.
- *
- * The row is ready whenever the hint is usable, meaning not known to be signed
- * out. The box runs the agent, not this host, so a host probe that timed out
- * says nothing about the chat, and the manager refuses with the reason when no
- * account's login can be copied.
+ * The picker rail for a draft that starts a cloud environment: one entry per cloud-capable driver,
+ * labeled as the driver because the manager routes to the account with the most usage left. The entry
+ * is a real local instance so its id rides along as the provision hint, with the hint's own models.
+ * Ready whenever the hint is not known signed out: the box, not this host, runs the agent.
  */
 export function cloudProviderEntries(
   entries: ReadonlyArray<ProviderInstanceEntry>,
@@ -70,10 +62,8 @@ export function cloudProviderEntries(
 
 /**
  * The picker rail of an environment that picks each chat's account itself
- * (`autoPickProviderAccounts`): each routed driver once, as the driver, in
- * place of its accounts; other drivers' instances as they are. The selected
- * account stands for its driver when usable, so a thread shows the account it
- * runs on and a follow-up names it.
+ * (`autoPickProviderAccounts`): each routed driver once, in place of its accounts. The selected
+ * account stands for its driver when usable, so a thread shows the account it runs on.
  */
 export function accountPickedProviderEntries(
   entries: ReadonlyArray<ProviderInstanceEntry>,

@@ -19,7 +19,7 @@ const CHAT_UPKEEP_INTERVAL = Duration.minutes(1);
  * pause. A failed step is logged and retried on the next tick, and never skips
  * another step or stops the other loop.
  */
-export const runLeaseUpkeep = (input: {
+export const runLeaseUpkeep = Effect.fn("runLeaseUpkeep")(function (input: {
   readonly reapExpiredLeases: () => Promise<void>;
   readonly syncLeaseUsage: () => Promise<void>;
   /** Periodic saves and deadline releases of instance-engine chats. */
@@ -33,7 +33,7 @@ export const runLeaseUpkeep = (input: {
   /** Starts each awake box's pending first turn. Never fails. */
   readonly settleChats: Effect.Effect<void>;
   readonly boxUsage: Pick<BoxUsageStore["Service"], "prune">;
-}) => {
+}) {
   const repeat = (tick: Effect.Effect<void>) =>
     tick.pipe(
       Effect.catchDefect((cause) => Effect.logError("cloud lease upkeep failed", { cause })),
@@ -75,4 +75,4 @@ export const runLeaseUpkeep = (input: {
     concurrency: 4,
     discard: true,
   });
-};
+});

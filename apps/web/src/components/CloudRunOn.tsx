@@ -54,12 +54,8 @@ function option(provider: ProvisionProvider): { value: string; label: string } {
 }
 
 /**
- * Whether the composer should offer a choice of machine.
- *
- * More than one machine is the obvious reason. Being able to create one is the other, and it is
- * the case that matters most: an install with a single machine would otherwise hide the control
- * that adds a second, so the first cloud machine could never be created from the place machines
- * are chosen.
+ * Whether the composer should offer a choice of machine: more than one machine, or being able to
+ * create one. A single-machine install must still show the control that adds a second.
  */
 export function shouldOfferEnvironmentChoice(input: {
   environmentCount: number;
@@ -229,7 +225,6 @@ export function CloudBaseBranchSelector({
       onSelectItem={select}
       value={value}
       query={query}
-      resultsQuery={deferredQuery}
       onQueryChange={setQuery}
       hasNextPage={false}
       isFetchingNextPage={false}

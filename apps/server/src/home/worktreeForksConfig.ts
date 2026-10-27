@@ -1,9 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - a small private file read once at startup.
 /**
  * `<stateDir>/worktree-forks.json`: a self-hosted server's own Modal backend for fork-exec and
- * t3_fork_run (see WorktreeForks.ts). The file holds a Modal token, so it lives beside
- * settings.json rather than in settings, which are sent to clients, and like
- * environment-control.json it is the operator's to keep private.
+ * t3_fork_run. It holds a Modal token, so it lives beside settings.json rather than in settings,
+ * which are sent to clients, and is the operator's to keep private.
  *
  * @module worktreeForksConfig
  */

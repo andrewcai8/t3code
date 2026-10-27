@@ -39,11 +39,10 @@ function newThreadProject(
 type ThreadRouteParams = ReactNavigation.RootParamList["Thread"];
 
 /**
- * "New thread in project" and "New thread on branch". Both open on the project's copy off any
- * box. On a host that runs no agents but can provision, they start a cloud machine on the host
- * instead of a draft the host would refuse. Drafts open through `selectThreadRoute`, the caller's
- * way into the Thread route. The latest configs, boxes and selector are read when a callback
- * runs, so the callbacks stay stable for the layouts using them.
+ * "New thread in project" and "New thread on branch". On a host that runs no agents but can
+ * provision they start a cloud machine instead of a draft the host would refuse; drafts open through
+ * `selectThreadRoute`. Latest configs and boxes are read when a callback runs, so callbacks stay
+ * stable for the layouts using them.
  */
 export function useNewThreadNavigation(selectThreadRoute: (params: ThreadRouteParams) => void) {
   const navigation = useNavigation();
@@ -51,6 +50,7 @@ export function useNewThreadNavigation(selectThreadRoute: (params: ThreadRoutePa
   const groupingSettings = useMobileProjectGroupingSettings();
   const boxes = useOtherChatBoxes();
   const latest = useRef({ serverConfigs, boxes, groupingSettings, selectThreadRoute });
+  // oxlint-disable-next-line t3code/react-effect-budget -- Publishes the latest inputs to a ref after commit so the navigation callbacks stay stable.
   useLayoutEffect(() => {
     latest.current = { serverConfigs, boxes, groupingSettings, selectThreadRoute };
   }, [serverConfigs, boxes, groupingSettings, selectThreadRoute]);

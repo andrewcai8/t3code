@@ -1,32 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalConsoleInEffect:off globalDate:off globalDateInEffect:off globalErrorInEffectFailure:off globalTimers:off - an operator CLI that drives git, tar and the local filesystem directly and reports to the terminal.
 /**
- * Moves a chat between this Mac and a cloud box with its agent's memory: the checkout exactly as
- * it is on disk, and the agent's native Claude session, so the agent continues the same
- * conversation instead of reading a summary of it.
- *
- *   node scripts/cloud/move-chat.ts to-cloud --thread <local thread id> --message-file first.md \
- *     [--include .env --include-cap-mb 50]
- *   node scripts/cloud/move-chat.ts to-local --sandbox <e2b sandbox id> --worktree <dir> \
- *     --claude-config-dir ~/.claude
- *   node scripts/cloud/move-chat.ts carry --sandbox <e2b sandbox id> --thread <local thread id> \
- *     [--dry-run]
- *
- * to-cloud reads the local desktop app's database read-only, pushes the snapshot to
- * `handoff/move-*`, provisions an E2B box on the manager for it, imports the session there with
- * the box's own agent session importer, and sends the first message. Re-running it with the same
- * thread picks up where an interrupted run stopped.
- *
- * Both to-cloud (unless --no-carry) and carry also copy what the agent used outside its checkout,
- * found in its session record, to the same absolute paths on the box, plus the repo's Claude memory.
- *
- *   node scripts/cloud/move-chat.ts restore --environment <environment id> [--uri s3://bucket/prefix] \
- *     [--account <host account>] [--message <extra text>] [--dry-run]
- *
- * restore brings back a cloud chat whose box is lost or will not resume, from the backup the host
- * took before the box slept: it reads `<uri>/<environment>/backups/latest/` with this Mac's AWS
- * credentials, provisions a fresh box on the backup branch (or the chat's branch when nothing was
- * unsaved), imports the chat's Claude session there as to-cloud does, and tells the agent what came
- * back. `--uri` defaults to the host config's workerForks.outputsUri.
+ * Moves a chat between this Mac and a cloud box with its agent's memory: the checkout exactly as it
+ * is on disk and the agent's native Claude session, so it continues the same conversation.
+ * Usage: node scripts/cloud/move-chat.ts to-cloud|to-local|carry|restore (see parseArgs for flags).
+ * restore rebuilds a chat whose box is lost from the host's backup, with this Mac's AWS credentials.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";

@@ -1,11 +1,7 @@
 /**
  * Moves one of this server's provider instances onto another account while it runs, for the host
- * that provisioned this machine. The new login takes effect without a restart: the instance is
- * rebuilt from settings, and the moving chat's live provider session is released so its next turn
- * starts a fresh CLI process that resumes the same native session.
- *
- * Only the moving chat's session restarts. Other chats on the instance keep their running process
- * on the old login until it next releases.
+ * that provisioned this machine. The instance is rebuilt from settings and only the moving chat's
+ * live session is released, so its next turn resumes the same native session on the new login.
  *
  * @module provider/ProviderAccountSwitch
  */
@@ -284,7 +280,9 @@ const make = Effect.gen(function* () {
   });
 
   return ProviderAccountSwitch.of({
-    switchAccount: (input) => switching.withPermits(1)(switchAccount(input)),
+    switchAccount: Effect.fn("ProviderAccountSwitch.switchAccount")(function (input) {
+      return switching.withPermits(1)(switchAccount(input));
+    }),
   });
 });
 

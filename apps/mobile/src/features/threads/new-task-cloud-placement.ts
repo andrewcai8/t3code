@@ -30,9 +30,14 @@ export type NewChatPlacement = ReturnType<typeof newChatPlacement>;
 export function newChatScopeTarget(
   scope: HomeProjectScope,
   preferredEnvironmentId: EnvironmentId | null,
+  connectedEnvironmentIds: ReadonlySet<EnvironmentId>,
   placement: NewChatPlacement,
 ): EnvironmentProject | null {
-  const requested = getProjectScopeSelectionTarget(scope, preferredEnvironmentId);
+  const requested = getProjectScopeSelectionTarget(
+    scope,
+    preferredEnvironmentId,
+    connectedEnvironmentIds,
+  );
   return newChatProject({
     requested: scopeProjectRef(requested.environmentId, requested.id),
     projects: scope.projects,
@@ -95,19 +100,18 @@ export function defaultNewTaskEnvironmentId(input: {
 
 /**
  * The machine the new-task flow points at: the one picked, unless it is gone or another chat's
- * box, and then the default. A queued task being edited stays on its own machine, box or not.
+ * box, and then the default.
  */
 export function resolveNewTaskEnvironmentId(
   input: Parameters<typeof defaultNewTaskEnvironmentId>[0] & {
     readonly boxes: OtherChatBoxes;
     readonly picked: EnvironmentId | null;
-    readonly pinned: boolean;
   },
 ): EnvironmentId | null {
   const { picked } = input;
   return picked !== null &&
     input.projects.some((project) => project.environmentId === picked) &&
-    (input.pinned || !input.boxes.has(picked))
+    !input.boxes.has(picked)
     ? picked
     : defaultNewTaskEnvironmentId(input);
 }
@@ -182,11 +186,10 @@ export type NewThreadStart =
   | { readonly kind: "environment"; readonly environmentId: EnvironmentId };
 
 /**
- * How a new thread in `project` starts, by the same rules as the web composer. A host that runs
- * no agents but can provision refuses a draft on itself, and a new thread never joins another
- * chat's box, so either starts a fresh cloud machine for the project's repository on that host.
- * With no cloud machine to start, it moves to the first of `environments` that can take it, else
- * opens a draft on the project as before.
+ * How a new thread in `project` starts, by the web composer's rules. A host that runs no agents but
+ * can provision refuses a draft on itself, and a new thread never joins another chat's box, so either
+ * starts a fresh cloud machine there. Otherwise it moves to the first of `environments` that can
+ * take it, else opens a draft on the project.
  */
 export function resolveNewThreadStart(input: {
   readonly project: Pick<EnvironmentProject, "environmentId" | "repositoryIdentity">;

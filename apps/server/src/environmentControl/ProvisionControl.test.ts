@@ -260,7 +260,7 @@ it.effect("a request the host ended on its own tells the caller why", () =>
   ),
 );
 
-const namespaceInput = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+const namespaceInput = Schema.decodeSync(EnvironmentProvisionInput)({
   requestId: "9c1f2d6e-7d0a-4a7f-9d4e-2b1c3a5e7f90",
   provider: "namespace",
   providerInstanceId: "codex",
@@ -895,7 +895,7 @@ it.effect(
     ),
 );
 
-const chatInput = Schema.decodeUnknownSync(EnvironmentProvisionInput)({
+const chatInput = Schema.decodeSync(EnvironmentProvisionInput)({
   requestId: "7a1d2c3b-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
   provider: "namespace",
   providerInstanceId: "codex",

@@ -35,7 +35,7 @@ afterEach(() => {
 const providerEndAt = (timeoutSeconds: number, drift: boolean) =>
   new Date(NOW + timeoutSeconds * 1000 + (drift ? 60_000 : 0)).toISOString();
 
-const request = Schema.decodeUnknownSync(DurableProvisionRequest)({
+const request = Schema.decodeSync(DurableProvisionRequest)({
   requestId: "26d53765-3f84-4688-90f6-7c7d26b890cc",
   provider: "e2b",
   providerInstanceId: "codex",

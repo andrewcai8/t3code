@@ -98,10 +98,7 @@ export class ManagedProjectFolders extends Context.Service<
       readonly text: string;
     }) => Effect.Effect<Option.Option<string>, ScratchFolderError>;
     readonly namedProjectsRoot: string;
-    /**
-     * The folder is removed when the create fails or is cancelled before the
-     * project exists, never once another project owns it.
-     */
+    /** Removes failed/cancelled creations' folders only while no project owns them. */
     readonly createNamedProject: (input: { readonly name: string }) => Effect.Effect<
       {
         readonly projectId: ProjectId;
@@ -164,10 +161,7 @@ function escapeXml(value: string): string {
     .replaceAll('"', "&quot;");
 }
 
-/**
- * It lives at `assets/icon.svg`, a path ProjectFaviconResolver already checks,
- * so every machine that clones the project shows the same icon.
- */
+// ProjectFaviconResolver finds assets/icon.svg on every clone.
 function namedProjectIconSvg(name: string): string {
   const words = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   const initials =
@@ -210,7 +204,7 @@ const HOME_SECTION = `${HOME_SECTION_START}
 
 You are Home, the user's agent for their whole T3 Code fleet. The user talks to you in this thread. You act for them in every project on every environment they have connected.
 
-- \`t3_environment_list\` lists the environments you can reach. Pass \`environmentId\` to \`orchestrator_capabilities\`, \`t3_project_list\`, \`t3_thread_list\`, \`t3_thread_read\`, \`t3_thread_launch\`, \`t3_thread_send\`, \`t3_thread_interrupt\`, \`t3_thread_organize\`, \`t3_thread_update\` (rename only) and the \`t3_pending_request_*\` tools to act in another environment. Omit it to act in this one.
+- \`t3_environment_list\` lists the environments you can reach. Pass \`environmentId\` to \`orchestrator_capabilities\`, \`t3_project_list\`, \`t3_thread_list\`, \`t3_thread_read\`, \`t3_thread_launch\`, \`t3_thread_send\`, \`t3_thread_interrupt\`, \`t3_thread_organize\`, \`t3_thread_update\` (rename only) and \`t3_pending_request\` to act in another environment. Omit it to act in this one.
 - To start work, launch a normal thread with \`t3_thread_launch\` and pass a \`projectId\` from \`t3_project_list\`, or \`scratch:true\`. It shows in the user's sidebar and they can steer it. Use \`delegate_task\` only for short helper work of your own.
 - Link every thread in this environment that you mention as \`[title](t3-thread://v1/<threadId>)\`, with the threadId exactly as returned, so the user can click to open it. A link only opens threads in this environment, so name a thread in another environment by its title and environment. Never show raw ids in place of a title.
 - Threads you launch are watched for you. When a watched thread completes, fails, asks a question or needs an approval, you get a short report in this thread. Use \`t3_thread_watch\` to watch other threads or every thread. Rely on these reports instead of polling with \`t3_thread_wait\`.
@@ -255,7 +249,6 @@ function describeCommitFailure(stderr: string): string {
 
 const isVcsProcessSpawnError = Schema.is(VcsProcessSpawnError);
 
-// Spawning a `git` that is not on PATH fails with NotFound, on Windows too.
 const isGitMissing = (error: GitManagerServiceError) =>
   error._tag === "GitManagerError" &&
   isVcsProcessSpawnError(error.cause) &&
@@ -271,10 +264,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const crypto = yield* Crypto.Crypto;
 
-  /**
-   * Each folder is created without `recursive`, so creating it is the claim: of
-   * two racers for one name, one gets AlreadyExists and moves on to the next.
-   */
+  // Non-recursive mkdir atomically claims a name; racers move on after AlreadyExists.
   const claimFreeFolder = Effect.fnUntraced(function* <E>(
     folderFor: (attempt: number) => Effect.Effect<Option.Option<string>, E>,
     onError: (folder: string, cause: PlatformError.PlatformError) => E,
@@ -294,9 +284,7 @@ const make = Effect.gen(function* () {
     }
   });
 
-  // Inside a checkout (a dev worktree's .t3, a dotfiles home) the folder would
-  // inherit the repo's git status and checkpoints, so Scratch is offered only
-  // when the data dir is outside any work tree.
+  // Scratch inside a checkout would inherit its git status and checkpoints; require a data dir outside work trees.
   const [probe, invalidate] = yield* Effect.cachedInvalidateWithTTL(
     gitWorkflow.isRepository(config.baseDir).pipe(
       Effect.catchIf(isGitMissing, () => Effect.succeed(false)),
@@ -338,8 +326,7 @@ const make = Effect.gen(function* () {
           workspaceRoot,
         })
         .pipe(
-          // bootstrap looks the root up before taking the workspace lock, so a
-          // racing create loses with a conflict that names the winner.
+          // bootstrap reads before locking; racing creates return the winner in a conflict.
           Effect.catchTags({
             ProjectConflictError: (conflict) =>
               Effect.succeed({
@@ -397,9 +384,9 @@ const make = Effect.gen(function* () {
     return yield* claimFreeFolder(
       (attempt) =>
         attempt === 1
-          ? Effect.succeed(Option.some(folderFor(id.slice(-8))))
+          ? Effect.succeedSome(folderFor(id.slice(-8)))
           : attempt === 2
-            ? Effect.succeed(Option.some(fullFolder))
+            ? Effect.succeedSome(fullFolder)
             : crypto.randomUUIDv4().pipe(
                 Effect.map((uuid) => Option.some(`${fullFolder}-${uuid.slice(0, 8)}`)),
                 Effect.mapError((cause) => new ScratchFolderError({ folder: fullFolder, cause })),
@@ -462,7 +449,7 @@ const make = Effect.gen(function* () {
       path.join(cwd, "assets", "icon.svg"),
       namedProjectIconSvg(name),
     );
-    // Named and forced so a global ignore rule (say `*.svg`) cannot drop one.
+    // Force explicit filenames so global ignore rules cannot drop them.
     yield* git.execute({
       operation: "ManagedProjectFolders.add",
       cwd,
@@ -507,11 +494,7 @@ const make = Effect.gen(function* () {
         workspaceRoot,
       })
       .pipe(
-        // A rejected create leaves the folder unused, so remove it. An
-        // interrupt can land after the create is committed, and a conflict
-        // means another project owns the folder, so it stays then; the owner
-        // is checked again first, since deleting another project's files is
-        // never acceptable.
+        // Re-check ownership before deleting rejected creations; interruption after commit or conflicts can leave an owner.
         Effect.tapError((error) =>
           error._tag === "ProjectConflictError"
             ? Effect.void
@@ -617,13 +600,14 @@ const make = Effect.gen(function* () {
     namedProjectsRoot,
     createNamedProject,
     homeRoot: Effect.succeed(homeFolder),
-    isInHomeFolder: (candidate) =>
-      Effect.sync(() => {
+    isInHomeFolder: Effect.fn("ManagedProjectFolders.isInHomeFolder")(function (candidate) {
+      return Effect.sync(() => {
         const relative = path.relative(path.resolve(homeFolder), path.resolve(candidate));
         // Only a leading ".." segment leaves the folder; "..notes" is a name inside it.
         const leaves = relative === ".." || relative.startsWith(`..${path.sep}`);
         return !leaves && !path.isAbsolute(relative);
-      }),
+      });
+    }),
     ensureHomeProject,
   });
 });

@@ -1,18 +1,8 @@
 /**
  * End to end for Namespace Mac chats on the instance engine, against a manager whose repository
- * entry sets `namespace.engine: "instance"` (scripts/cloud/local-manager.sh with the engine set in
- * its copied config). Every chat starts from a first turn the host sends after its caller left.
- *
- *   node apps/server/scripts/mac-chat-e2e.ts --origin http://127.0.0.1:PORT \
- *     --pairing-token-file .t3/manager/pairing-token --manager-state .t3/manager/userdata \
- *     --manager-log .t3/manager/manager.log --repo andrewcai8/t3code --report /tmp/mac-e2e.json
- *
- * Runs, in order: a new chat on a cache miss, the builder Mac it asks for committing a template,
- * release while idle, a new chat on a hit, resume onto a new Mac with its worktree, checkpoints,
- * transcripts and environment id compared byte for byte, a Mac destroyed out of band that comes
- * back from its last periodic save, and dispose. Then it checks that no Mac, builder, snapshot or
- * chat record is left and releases the cache volume. Tokens and pairing URLs never reach stdout or
- * the report.
+ * sets `namespace.engine: "instance"` (see scripts/cloud/local-manager.sh). Covers new chat, release,
+ * resume onto a new Mac, an out-of-band destroy and dispose, then checks nothing is left behind.
+ * Usage: node apps/server/scripts/mac-chat-e2e.ts --origin <url> --pairing-token-file <file> --manager-state <dir> --manager-log <file> --repo <owner/name> --report <file>
  */
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off cryptoRandomUUID:off globalConsole:off globalTimers:off - an operator lever that drives a live manager and Namespace, reporting as it goes.
 import * as NodeCrypto from "node:crypto";

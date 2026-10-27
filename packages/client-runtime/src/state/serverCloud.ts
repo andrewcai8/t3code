@@ -34,12 +34,10 @@ export function createServerCloudAtoms<R, E>(
         providers: ProvisionProvider.literals,
       }).pipe(Effect.timeout("20 seconds")),
   });
-  // Asks about every saved environment, by id and by the address it is dialed at, so a host also
-  // lists the saved ones that were its boxes and are gone, even one it disposed before it kept the
-  // box's id. It also asks for each box's chat, naming the ones this runtime already holds so only
-  // newer chats come back. The key stays `{}` so every reader shares one fetch per host; the ids are
-  // read when it runs. Settings uses `provisionedEnvironments`, which never lists
-  // gone boxes or chats.
+  // Asks about every saved environment, by id and by dial address, so a host also lists saved boxes it
+  // has since disposed, and names the chats this runtime holds so only newer ones come back. The key
+  // stays `{}` so every reader shares one fetch per host; ids are read when it runs. Settings uses
+  // `provisionedEnvironments`, which never lists gone boxes or chats.
   const provisionedBoxLists = createEnvironmentQueryAtomFamily(runtime, {
     label: "environment-data:cloud:provisioned-box-lists",
     staleTimeMs: 5_000,

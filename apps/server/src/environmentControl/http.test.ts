@@ -37,6 +37,7 @@ import {
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderAccountSwitch from "../provider/ProviderAccountSwitch.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { EnvironmentControl } from "./EnvironmentControl.ts";
 import { environmentControlBodyLimitLayer, environmentControlHttpApiLayer } from "./http.ts";
@@ -79,6 +80,7 @@ it.effect(
           controlConfig: Effect.succeed(null),
           modalForkSource: () => Effect.succeed(null),
           modalBoxes: Effect.succeed(null),
+          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
           provisionedSkills: Effect.succeed(undefined),
           listProvisioned: () => Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),
@@ -132,7 +134,7 @@ it.effect(
             Layer.mock(ThreadManagementService.ThreadManagementService)({}),
             Layer.mock(ProviderAccountSwitch.ProviderAccountSwitch)({}),
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-provision-http-" }),
-          ).pipe(Layer.provideMerge(NodeServices.layer)),
+          ).pipe(Layer.provideMerge(DocumentText.layer), Layer.provideMerge(NodeServices.layer)),
         ),
         Layer.provide(auth),
         Layer.provide(environmentControlBodyLimitLayer),
@@ -275,7 +277,7 @@ it.effect("the launch-thread route checks scope and tells a refused launch from 
           Layer.mock(ThreadManagementService.ThreadManagementService)({}),
           Layer.mock(ProviderAccountSwitch.ProviderAccountSwitch)({}),
           ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-thread-http-" }),
-        ).pipe(Layer.provideMerge(NodeServices.layer)),
+        ).pipe(Layer.provideMerge(DocumentText.layer), Layer.provideMerge(NodeServices.layer)),
       ),
       Layer.provide(auth),
     );

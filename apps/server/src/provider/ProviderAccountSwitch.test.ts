@@ -22,6 +22,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -170,6 +171,7 @@ const claudeDriver = (
     | FileSystem.FileSystem
     | Path.Path
     | Crypto.Crypto
+    | ChildProcessSpawner.ChildProcessSpawner
   >;
 
 /**

@@ -12,7 +12,7 @@ import {
 } from "../../state/use-remote-environment-registry";
 import { NewCloudMachineForm } from "../connection/NewCloudMachineForm";
 import { useCreateCloudMachine } from "../connection/useCreateCloudMachine";
-import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 
 type NewTaskCloudMachineRouteParams = {
   /** The host that starts the machine: the project's own host, or the host of the box it is on. */
@@ -51,13 +51,14 @@ function NewTaskCloudMachine({
 }: NewTaskCloudMachineRouteParams) {
   const managerId = EnvironmentId.make(environmentId);
   const navigation = useNavigation();
-  const { selectThreadRoute } = useAdaptiveWorkspaceLayout();
+  const selectDetail = useSelectWorkspaceDetail();
   const insets = useSafeAreaInsets();
   const manager = useSavedRemoteConnection(managerId);
   const { connectedEnvironments } = useRemoteConnectionStatus();
   // Leaving is allowed while the machine starts: it keeps starting and appears under
   // Connections, but nothing opens a draft for a screen the user left or moved past.
   const mounted = useRef(true);
+  // oxlint-disable-next-line t3code/react-effect-budget -- Tracks whether this screen is still mounted so a machine that finishes after the user left opens nothing.
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -71,19 +72,22 @@ function NewTaskCloudMachine({
       if (!mounted.current || !navigation.isFocused()) return;
       const title = readProject(projectRef)?.title;
       // Selecting the thread route also dismisses this overlay.
-      selectThreadRoute({
-        draft: {
-          requestId: uuidv4(),
-          environmentId: projectRef.environmentId,
-          projectId: projectRef.projectId,
-          ...(title ? { title } : {}),
-          // The branch carries over by name. The draft checks it out on the machine and stays
-          // on the default branch when it cannot, rather than closing after the wait.
-          ...(branch ? { branch, branchOptional: "1" } : {}),
+      selectDetail({
+        name: "Thread",
+        params: {
+          draft: {
+            requestId: uuidv4(),
+            environmentId: projectRef.environmentId,
+            projectId: projectRef.projectId,
+            ...(title ? { title } : {}),
+            // The branch carries over by name. The draft checks it out on the machine and stays
+            // on the default branch when it cannot, rather than closing after the wait.
+            ...(branch ? { branch, branchOptional: "1" } : {}),
+          },
         },
       });
     },
-    [branch, navigation, selectThreadRoute],
+    [branch, navigation, selectDetail],
   );
   const creation = useCreateCloudMachine({ managerId, connectedEnvironments, onCreated });
 

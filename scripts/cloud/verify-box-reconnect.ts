@@ -1,45 +1,9 @@
+// @effect-diagnostics effectFnOpportunity:off - the stores and gateway here are in-memory doubles.
 /**
- * Proves a cloud chat's box reconnects by itself after its manager pauses it. The script runs the
- * web client's own connection stack (client-runtime `Connection.layerWithOptions`: registry,
- * supervisor, resolver, RPC session) in Node with in-memory platform services. The manager is
- * the platform's primary environment; the box is paired through `ConnectionOnboarding` the way
- * the web join flow saves it, as a bearer connection marked `box: { managerId }`.
- *
- *   node scripts/cloud/verify-box-reconnect.ts --origin http://127.0.0.1:<port> \
- *     --pairing-token-file .t3/manager/pairing-token --provider e2b --report ./reconnect.json
- *
- * It provisions one box, demands it like an open chat, waits for `connected`, pauses the box
- * through the manager, and then only watches: no retry, no resume. Every supervisor state change
- * of the box and the manager prints one line and lands in the report. `--dry-run` stops once the
- * box first connects. The box is disposed on every path, and the exit code is nonzero unless the
- * box came back.
- *
- * Presence comes from the same signals the web reports: the app's visibility, and an input when
- * the user opens the chat. `--reopen` closes the chat before the pause and opens it again after,
- * the way a user comes back to a paused chat, and fails unless a resume reaches the host within
- * 30 seconds of opening it. `--cut-host-mid-wake` reconnects the manager while the box's resume
- * is in flight, closing the session under it, and fails unless the box still comes back.
- *
- * `--second-client` proves a second device lists and opens a chat it never paired. Client A
- * provisions the box with a chat whose first turn the host starts, waits for the chat's thread,
- * closes it and pauses the box through the host. Client B, a fresh catalog paired only to the
- * host, follows the host's list: the chat is listed with A's thread and title. The chat is
- * unsettled and its user present, so the host wakes the box ahead of them while B never dials
- * it. B then opens the chat: it pairs once through the host and connects, and its thread loads.
- * A fresh runtime over B's storage opens it again with the same pairing, and after the box is
- * disposed B's sync stops dialing it.
- *
- * `--lease <leaseId>` runs client B against a chat that already exists, provisioning nothing and
- * disposing nothing. It finds the chat whose box is that lease in the host's list, checks it is
- * listed with its title while the box stays paused and undialed, opens it (the box wakes, pairs
- * once through the host and connects), checks the thread loads with its messages, sends one turn
- * the way the web composer starts one, and waits for a reply and a settled run. A box made on an
- * older runtime must come back on the host's pinned build: the client never sees an unsupported
- * protocol, and the box's descriptor afterwards reports protocol 2. Each check lands in `checks`.
- *
- * The manager bearer is cached beside the pairing token (0600), shared with smoke-cloud-chat.ts.
- * Tokens and pairing URLs never reach stdout or the report; URLs in failure details lose their
- * query and fragment.
+ * Proves a cloud chat's box reconnects by itself after its manager pauses it, using the web client's
+ * own connection stack in Node. Provisions a box, pauses it through the manager, then only watches.
+ * Flags: --dry-run, --reopen, --cut-host-mid-wake, --second-client, --lease <id> (see parseArgs).
+ * Tokens and pairing URLs never reach stdout or the report; the box is disposed on every path.
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";

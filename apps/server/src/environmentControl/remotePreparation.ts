@@ -35,11 +35,9 @@ export interface RemotePreparationInput {
   /** Closed-set shell command from guestProviderInstallCommand. Runs in the isolated home. */
   readonly providerInstall?: string | undefined;
   /**
-   * Closed-set shell command from guestToolInstallCommand. Best effort, run
-   * after providerInstall and capped at 180 seconds; a failure records a
-   * `toolInstallFailed` phase instead of failing preparation. Excluded from
-   * the intent hash so a root prepared before it existed picks the tools up
-   * on its next prepare.
+   * Closed-set shell command from guestToolInstallCommand. Best effort, run after providerInstall and
+   * capped at 180 seconds; a failure records a `toolInstallFailed` phase instead of failing
+   * preparation. Excluded from the intent hash so an older root picks the tools up on its next prepare.
    */
   readonly toolInstall?: string | undefined;
   /**
@@ -49,11 +47,10 @@ export interface RemotePreparationInput {
    */
   readonly prepareCommands?: ReadonlyArray<string> | undefined;
   /**
-   * The operator's shell environment when the request was frozen, added to
-   * `prepareCommands`' environment only. A frozen manifest keeps these values;
-   * current ones arrive through `setup`. Excluded from the intent hash like
-   * `toolInstall`. Any value of 8 or more characters, here or in `setup`, is
-   * replaced by `***` in the failures setup reports.
+   * The operator's shell environment when the request was frozen, added to `prepareCommands`'
+   * environment only. A frozen manifest keeps these values; current ones arrive through `setup`.
+   * Excluded from the intent hash like `toolInstall`. Values of 8 or more characters are replaced by
+   * `***` in the failures setup reports.
    */
   readonly prepareEnvironment?:
     | ReadonlyArray<{ readonly name: string; readonly value: string }>
@@ -115,11 +112,10 @@ export const RemotePreparationReady = Schema.Struct({
 });
 export type RemotePreparationReady = typeof RemotePreparationReady.Type;
 const decodeReady = Schema.decodeUnknownSync(Schema.fromJsonString(RemotePreparationReady));
-// Decoded apart from RemotePreparationReady because that type flows into the
-// persisted ProvisionReadiness state. RemotePreparationInput stays unchanged for
-// a similar reason: the Python hashes the whole spec into `intent` and compares
-// it against a journal on the guest, so adding an input field would invalidate
-// every in-flight preparation root.
+// Decoded apart from RemotePreparationReady because that type flows into the persisted
+// ProvisionReadiness state. RemotePreparationInput stays unchanged because the Python hashes the
+// whole spec into `intent` and compares it with a journal on the guest, so a new input field would
+// invalidate every in-flight preparation root.
 const decodePhases = Schema.decodeUnknownSync(
   Schema.fromJsonString(
     Schema.Struct({
@@ -211,13 +207,10 @@ const decodeSealed = Schema.decodeUnknownSync(
 );
 
 /**
- * Turns a prepared root into a warm base a snapshot can carry: stops its T3
- * server and removes everything that is one box's identity (journal, broker
- * token, T3 home, installed files), keeping the runtime's verified record in
- * `warm.json` and the checkout as a never-opened `workspace.partial`. The next
- * preparation of this root adopts both. Converges when rerun after a crash at
- * any point. Processes a prepare command left running carry no T3 identity and
- * stay.
+ * Turns a prepared root into a warm base a snapshot can carry: stops its T3 server and removes
+ * everything that is one box's identity, keeping the runtime's verified record in `warm.json` and the
+ * checkout as a never-opened `workspace.partial`. Converges when rerun after a crash. Processes a
+ * prepare command left running carry no T3 identity and stay.
  */
 export async function sealWarmBase(
   port: RemotePreparationPort,
@@ -316,11 +309,10 @@ export const brokerTokenTtl = "7d";
 export const PROVISION_BROKER_SUBJECT = "provision-broker";
 
 /**
- * Keeps a root's broker token usable for as long as its box lives, which has
- * no deadline by default. It renews with the CLI of the build that is serving,
- * which its supervisor records in server.json, or, for a server started before
- * that, reads off the running process. Needs `atomic`, `run_bounded`,
- * `base64`, `fcntl`, `json`, `os`, `pathlib` and `time`.
+ * Keeps a root's broker token usable for as long as its box lives. It renews with the CLI of the
+ * build that is serving, which the supervisor records in server.json, or reads it off the running
+ * process for an older server. Needs `atomic`, `run_bounded`, `base64`, `fcntl`, `json`, `os`,
+ * `pathlib` and `time`.
  */
 const brokerTokenFunctions = String.raw`
 BROKER_TTL = ${JSON.stringify(brokerTokenTtl)}
@@ -395,17 +387,10 @@ ${brokerTokenFunctions}
 `;
 
 /**
- * Keeps a full disk from stopping a box's T3 server, which must write to save the chat. On Linux
- * a reserve file holds space the guard gives back when the disk runs low; it also clears package
- * caches the agent can download again. While watching, below T3_DISK_GUARD_DEPS_BYTES (10 GiB), it
- * deletes untracked node_modules from git checkouts under the root, oldest checkout first until
- * there is room, skipping the chat's workspace, any checkout changed in the last hour, and any a
- * process works in. Package stores that make installs cheap are only cleared with the other
- * caches, below 1 GiB. `once` runs before the server starts: it frees room, or sets the reserve
- * aside when there is plenty, and stays quick so a wake does not wait on it. `watch` only gives
- * room back, checking every 30 seconds until it finds the server stopped, one watcher per box.
- * Arguments: root, home, mode, and for `watch` the path of the guard's lock.
- * T3_DISK_GUARD_LOW_BYTES overrides the 1 GiB low-disk threshold.
+ * Keeps a full disk from stopping a box's T3 server, which must write to save the chat. On Linux a
+ * reserve file holds space the guard gives back when the disk runs low, and below
+ * T3_DISK_GUARD_DEPS_BYTES (10 GiB) it deletes untracked node_modules from idle checkouts, oldest
+ * first. `once` runs before the server starts; `watch` checks every 30 seconds, one per box.
  */
 export const diskGuardScript = String.raw`
 import fcntl,json,os,pathlib,shutil,subprocess,sys,time

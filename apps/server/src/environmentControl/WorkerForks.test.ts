@@ -43,13 +43,10 @@ const box = (
   }) as unknown as DiscoveredProvisionedEnvironment;
 
 /**
- * A provider where copies live until killed. A job's command picks its outcome: `exit N` exits
- * N, `hang` times out, `lose` loses its copy, `wait` holds until `gate` opens. A chat of `acme/api`
- * starts its services with `redis-server --daemonize yes`, which its jobs' output names. `holdStarts` makes
- * each copy's start wait on its gate. Output paths
- * starting with `big` are over any copy-back cap; `gone` does not exist. A machine whose sandbox id
- * starts with `modal` is copied on Modal; every other on E2B, whose account runs `setOthers`
- * sandboxes besides this host's copies.
+ * A provider where copies live until killed. A job's command picks its outcome: `exit N`, `hang`
+ * times out, `lose` loses its copy, `wait` holds until `gate` opens. `holdStarts` makes each copy's
+ * start wait on its gate. Output paths starting with `big` are over any copy-back cap; `gone` does
+ * not exist. A sandbox id starting with `modal` is copied on Modal; every other on E2B.
  */
 const provider = (settings: ForkMachines.WorkerForkSettings = {}) =>
   Effect.gen(function* () {

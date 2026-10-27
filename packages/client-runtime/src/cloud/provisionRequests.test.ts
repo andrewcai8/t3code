@@ -45,31 +45,37 @@ function uuidSequence() {
 /** The store's clock: retries wait here until the test fires them, so nothing depends on real time. */
 function manualScheduler() {
   const pending = new Set<() => void>();
+  let firing = false;
+  let onScheduled: (() => void) | null = null;
+  const fire = (callback: () => void) => {
+    if (pending.delete(callback)) callback();
+  };
   return {
     pending,
     schedule: (callback: () => void) => {
       pending.add(callback);
+      if (firing) queueMicrotask(() => fire(callback));
+      onScheduled?.();
       return () => {
         pending.delete(callback);
       };
     },
-    /** Yields until the store has scheduled its next retry. */
-    async untilScheduled() {
-      for (let tick = 0; pending.size === 0 && tick < 1_000; tick++) await Promise.resolve();
+    /** Resolves once the store has scheduled its next retry. */
+    untilScheduled() {
+      if (pending.size > 0) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        onScheduled = () => {
+          onScheduled = null;
+          resolve();
+        };
+      });
     },
     /** Fires every retry as soon as it is scheduled until `outcome` settles. */
     async runUntil(outcome: Promise<unknown>) {
-      const done = outcome.then(
-        () => "done" as const,
-        () => "done" as const,
-      );
-      for (let tick = 0; tick < 10_000; tick++) {
-        for (const callback of pending) {
-          pending.delete(callback);
-          callback();
-        }
-        if ((await Promise.race([done, Promise.resolve("tick" as const)])) === "done") return;
-      }
+      firing = true;
+      for (const callback of pending) queueMicrotask(() => fire(callback));
+      await outcome.catch(() => undefined);
+      firing = false;
     },
   };
 }

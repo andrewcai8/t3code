@@ -83,8 +83,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       if (state.enrichmentGeneration !== generation) {
         return [null, state] as const;
       }
-      // Enrichment derives from the snapshot it was handed; a runtime usage
-      // update that landed since must not be reverted by it.
+      // Enrichment must not revert usage updates newer than its input snapshot.
       const merged = withUsageLimits(nextSnapshot, state.snapshot.usageLimits);
       if (Equal.equals(state.snapshot, merged)) {
         return [null, state] as const;
@@ -156,8 +155,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         const generation = input.enrichSnapshot
           ? state.enrichmentGeneration + 1
           : state.enrichmentGeneration;
-        // A failed read keeps the last good limits only for the same account,
-        // and they keep the workspace they were read for.
+        // Failed reads retain limits only for the same account and original workspace.
         const previous = state.snapshot.auth;
         const differs = (a: string | undefined, b: string | undefined) =>
           a !== undefined && b !== undefined && a !== b;

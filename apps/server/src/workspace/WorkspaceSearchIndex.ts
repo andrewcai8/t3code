@@ -25,16 +25,9 @@ import type {
 } from "@t3tools/contracts";
 import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
 
-// fff-node stays external to the CLI bundle because it dlopens a native
-// library, and a static `import` of an external package is a hard error inside
-// a Node single-executable (only built-ins resolve there).
-//
-// `createRequire` cannot load it either. The package publishes `exports` with
-// an `import` condition and no `require` one, so every CJS resolution of it
-// fails with ERR_PACKAGE_PATH_NOT_EXPORTED, including subpaths. The repo's pnpm patch adds one,
-// but a cloud box's runtime installs the package with npm, unpatched. A dynamic
-// import is the only form that resolves, and it still reads from the real
-// filesystem at runtime rather than being inlined.
+// fff-node's native library stays external. Single-executables reject static imports of
+// external packages, and its `exports` has no `require` condition (a cloud box installs it
+// unpatched with npm), so only a dynamic import resolves it from disk.
 let fffNode: Promise<typeof import("@ff-labs/fff-node")> | undefined;
 const loadFffNode = () => (fffNode ??= import("@ff-labs/fff-node"));
 
@@ -261,11 +254,7 @@ function mapContentMatchRanges(
   }));
 }
 
-/**
- * Whole-word filtering happens after the grep rather than by wrapping the pattern in boundary
- * regex: consuming boundaries such as `(?:^|\W)` swallow the separator between adjacent matches
- * and widen the reported ranges, and `\b` cannot match punctuation-edged queries at all.
- */
+// Post-filter whole words: consuming boundary regexes swallow adjacent separators and widen ranges; \b misses punctuation edges.
 function isWholeWordRange(
   line: string,
   range: { readonly start: number; readonly end: number },
@@ -316,9 +305,7 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
       FileFinder.create({
         basePath: cwd,
         disableMmapCache: true,
-        // Content indexing costs scan CPU and memory, so only the on-demand
-        // content-search index pays for it; path-only consumers (file tree,
-        // composer path search, file picker) keep the lightweight index.
+        // Content indexing costs CPU/memory; path-only consumers use the lightweight index.
         disableContentIndexing: variant !== "content",
         aiMode: false,
         enableFsRootScanning: true,
@@ -503,8 +490,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   )(function* (input) {
     const { searchQuery, regexMode } = buildContentSearchQuery(input);
     const deadline = performance.now() + CONTENT_SEARCH_TIME_BUDGET_MS;
-    // Grep cursors advance by file, so whole-word post-filtering needs enough
-    // raw candidates from the current file before moving to the next one.
+    // Grep cursors advance per file; whole-word filtering needs enough raw candidates before advancing.
     const rawPageSize = input.wholeWord
       ? Math.max(input.limit, CONTENT_SEARCH_MAX_MATCHES_PER_FILE)
       : input.limit;
@@ -568,9 +554,7 @@ function parseWorkspaceSearchIndexKey(key: string): {
   };
 }
 
-/**
- * @public Service construction is part of the canonical Effect module API.
- */
+/** @public */
 export const layer = (key: string) => {
   const { cwd, variant } = parseWorkspaceSearchIndexKey(key);
   return Layer.effect(WorkspaceSearchIndex, make(cwd, variant));

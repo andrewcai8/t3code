@@ -40,6 +40,7 @@ export function CloudBoxes() {
   const catalogReady = useAtomValue(environmentCatalog.catalogValueAtom).isReady;
   const markBoxes = useAtomCommand(environmentCatalog.markBoxes);
   const syncHostBoxes = useAtomCommand(environmentCatalog.syncHostBoxes);
+  // oxlint-disable-next-line t3code/react-effect-budget -- Marks this device's leased boxes in the catalog once it is ready; the lease store is external.
   useEffect(() => {
     if (!catalogReady) return;
     void markBoxes(provisionedSandboxLeases.boxes());
@@ -48,6 +49,7 @@ export function CloudBoxes() {
   const hosts = useCloudHosts();
   const hostIds = hosts.map((host) => host.environmentId);
   const lists = useAtomValue(serverEnvironment.hostBoxLists(hostIds));
+  // oxlint-disable-next-line t3code/react-effect-budget -- Syncs each host's box listing into the catalog whenever the listing changes.
   useEffect(() => {
     void syncHostBoxes(lists);
   }, [lists, syncHostBoxes]);

@@ -1,14 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - a fast-path CLI that loads nothing heavy.
 /**
- * `t3 fork-exec [--timeout <seconds>] [--size <name>] [--input <path>]... [--output <path>]...
- * -- <command>`: runs a command in a throwaway copy of this machine or worktree and prints its
- * output and exit code as if it ran here (see home/ForkExec.ts). An input is a file or directory
- * the copy gets at the same path; an output comes back to the same path once the command exits.
- *
- * Exit codes: the command's own, 124 when it timed out, 70 when its copy was lost, and 75 when no
- * copy could start, so a wrapper can run the command here instead. When the socket closes under a
- * running copy, as when T3 Code restarts, it rejoins the job for up to ten minutes and exits as the
- * command did; only a job it cannot rejoin is lost.
+ * `t3 fork-exec [--timeout <s>] [--size <name>] [--input <path>]... [--output <path>]... -- <command>`
+ * runs a command in a throwaway copy of this machine or worktree (see home/ForkExec.ts).
+ * Exit codes: the command's own, 124 timed out, 70 copy lost, 75 no copy could start (run it here).
+ * If the socket closes under a running copy it rejoins the job for up to ten minutes.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";

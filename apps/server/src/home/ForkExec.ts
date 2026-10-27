@@ -1,16 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no Unix socket server.
 /**
- * ForkExec - runs one shell command in a throwaway copy of this machine or worktree, for any
- * process on it.
- *
- * Whole-repo checks (typechecks, full test suites, builds) push a machine into swap, which stalls
- * every agent on it. `t3 fork-exec -- <command>` hands the command to this service over a Unix
- * socket in T3 home, which only processes on this machine can open. On a cloud box it runs the
- * command as a one-job t3_fork_run batch for the machine's own chat, the one actor its host accepts
- * for forks, waits for it, and answers with the job's exit code and output. On a self-hosted
- * server with worktree forks (WorktreeForks.ts) it runs it in a Modal copy of the caller's
- * worktree, with the output live. Subagents, scripts and every provider reach it the same way, so
- * nothing has to be taught to use it.
+ * ForkExec - runs one shell command in a throwaway copy of this machine or worktree, for any process
+ * on it. `t3 fork-exec -- <command>` hands the command to this service over a Unix socket in T3 home.
+ * On a cloud box it runs as a one-job t3_fork_run batch; with worktree forks (WorktreeForks.ts), in a Modal copy.
  *
  * @module ForkExec
  */
@@ -263,7 +255,7 @@ export const layer = Layer.effectDiscard(
     const relays = onCloudBox && platform === "linux";
     if (!relays && !forks.enabled) return;
     const path = forkExecSocketPath(baseDir);
-    const context = yield* Effect.context<Backends>();
+    const runFork = Effect.runForkWith(yield* Effect.context<Backends>());
     // Each caller's request runs detached from this layer, so shutdown ends them itself.
     const sockets = new Set<NodeNet.Socket>();
     const requests = new Set<Fiber.Fiber<void>>();
@@ -290,7 +282,7 @@ export const layer = Layer.effectDiscard(
         socket.off("data", onData);
         // Its first step waits a tick: run synchronously, it could reach a shutdown before it
         // is registered below.
-        const fiber = Effect.runForkWith(context)(
+        const fiber = runFork(
           Effect.andThen(
             Effect.yieldNow,
             decodeRequest(newline === -1 ? "" : buffered.slice(0, newline)),
@@ -304,7 +296,7 @@ export const layer = Layer.effectDiscard(
         );
         requests.add(fiber);
         fiber.addObserver(() => requests.delete(fiber));
-        socket.once("close", () => Effect.runFork(Fiber.interrupt(fiber)));
+        socket.once("close", () => runFork(Fiber.interrupt(fiber)));
       };
       socket.on("data", onData);
       socket.on("error", () => socket.destroy());

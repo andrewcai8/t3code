@@ -65,20 +65,9 @@ export function boxMachine(request: DurableProvisionRequest): CloudMachineKind {
 
 /**
  * Discovery reads retained identities without renewing leases or issuing credentials. Of the
- * `known` environments, those that were this host's boxes and are gone come back as `disposed`,
- * matched by the environment id the box itself reported. A row disposed before that id was kept
- * is matched by the address one of `addresses` dials it at instead.
- *
- * With `chats`, a box that is not disposed also carries its owner's chat, unless the client holds
- * it at that sequence or a newer one. Without, no chat is sent.
- *
- * Each box also carries its cleanup under `afterDays`, the host's cloud machine cleanup setting.
- *
- * A removed box lists as `disposed` with the time it stays restorable, when it is one of `known`,
- * and with `removed` even when it is not.
- *
- * With `readable`, only boxes of those providers are listed, for a client that cannot decode the
- * others.
+ * `known` environments, this host's boxes that are gone come back as `disposed` (with the time they
+ * stay restorable if removed). With `chats`, a live box carries its owner's chat; `readable` limits
+ * the listing to providers the client can decode.
  */
 export const listProvisionedEnvironments = Effect.fn("ProvisionDiscovery.list")(
   function* (

@@ -161,7 +161,7 @@ describe("provisioned environment gateway", () => {
                 }
               }
             }),
-          ).pipe(Effect.catchCause(() => Effect.void));
+          ).pipe(Effect.ignoreCause);
           return HttpServerResponse.empty();
         }),
       );

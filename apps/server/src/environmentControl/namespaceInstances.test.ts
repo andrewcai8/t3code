@@ -159,7 +159,7 @@ function makeMacWorld() {
   return { macs, createRequests, nscCalls, instances: makeNamespaceInstances({ compute, nsc }) };
 }
 
-const neverExisted = Schema.decodeUnknownSync(InstanceId)("never-existed");
+const neverExisted = Schema.decodeSync(InstanceId)("never-existed");
 const cacheSpec = {
   labels: { "t3.chat": "chat-1", "t3.repo": "megpt-mono" },
   cache: { tag: "t3-megpt-mono", mountPoint: "/Volumes/t3", sizeGb: 100 },

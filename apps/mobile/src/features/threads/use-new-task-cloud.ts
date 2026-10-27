@@ -41,8 +41,6 @@ type NewTaskEnvironmentPick = Omit<NewTaskCloud, "boxStart"> & {
  */
 export function useNewTaskEnvironmentPick(input: {
   readonly picked: EnvironmentId | null;
-  /** A queued task being edited stays on its own machine, box or not. */
-  readonly pinned: boolean;
   readonly projects: ReadonlyArray<EnvironmentProject>;
   /** The flow outlives its draft screen, so demand holds only while a draft is open. */
   readonly active: boolean;
@@ -58,8 +56,7 @@ export function useNewTaskEnvironmentPick(input: {
     placement,
   });
   useBoxDemand(input.active ? selectedEnvironmentId : null);
-  const blockedBox =
-    input.picked !== null && !input.pinned && boxes.has(input.picked) ? input.picked : null;
+  const blockedBox = input.picked !== null && boxes.has(input.picked) ? input.picked : null;
   return { selectedEnvironmentId, boxes, placement, blockedBox };
 }
 
@@ -125,6 +122,7 @@ export function useNewTaskCloud(input: {
           }),
     [blockedBoxProject, boxes, projects, savedConnectionsById, serverConfigs],
   );
+  // oxlint-disable-next-line t3code/react-effect-budget -- Moves the draft to the matching project on the box's environment once that project is known.
   useEffect(() => {
     if (boxStart?.kind !== "environment" || blockedBoxProject === null) return;
     const match = resolveEnvironmentProjectMatch(
@@ -147,6 +145,7 @@ export function useCloudMachineInsteadOfBox(
   const navigation = useNavigation();
   const start = boxStart?.kind === "cloud-machine" && !input.incomingShareId ? boxStart : null;
   const { branch } = input;
+  // oxlint-disable-next-line t3code/react-effect-budget -- Replaces this route with a fresh cloud machine screen when the flow leaves another chat's box; navigation is external.
   useEffect(() => {
     if (!start) return;
     navigation.dispatch(

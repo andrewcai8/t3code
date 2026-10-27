@@ -1,8 +1,7 @@
 /**
- * The Codex driver's view of the login in an instance's `auth.json`: when a
- * status probe should ask Codex to refresh it, when a login Codex still calls
- * signed in is dead, and, on a cloud-only host, an hourly refresh that does
- * not wait for a client to trigger a probe.
+ * The Codex driver's view of the login in an instance's `auth.json`: when a status probe should ask
+ * Codex to refresh it, when a login Codex still calls signed in is dead, and, on a cloud-only host,
+ * an hourly refresh that does not wait for a client probe.
  *
  * @module provider/Drivers/codexHostLogin
  */

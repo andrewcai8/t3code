@@ -9,6 +9,7 @@ import { resumeCloudSends } from "./cloudSends";
  * the pairing and welcome routes.
  */
 export function CloudCoordinators({ authenticated }: { authenticated: boolean }) {
+  // oxlint-disable-next-line t3code/react-effect-budget -- Resume the cloud sends a reload cut off once the session is authenticated.
   useEffect(() => {
     if (authenticated) resumeCloudSends();
   }, [authenticated]);

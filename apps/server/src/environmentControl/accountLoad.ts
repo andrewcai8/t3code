@@ -44,15 +44,9 @@ export const readLocalAccountLoad = (sql: SqlClient.SqlClient) =>
 
 /**
  * Sessions already running on each account, for routing a new cloud chat.
- *
- * A cloud box counts once against each account it runs, its chat's and
- * every companion driver's: the ones routing froze into its request, or the
- * ones an account switch moved it to since. It counts from the moment
- * its request is saved, minutes before it is ready, so a launch right after
- * another sees the first one's accounts as taken. A box being cancelled no
- * longer counts. A local thread counts once while it has a run in flight on
- * its provider instance: queued, preparing, starting, running or waiting. A source that cannot be read counts as zero, so routing
- * degrades to usage alone instead of refusing.
+ * A cloud box counts once per account it runs, from the moment its request is saved until it is
+ * cancelled; a local thread counts once while a run is in flight on its provider instance.
+ * A source that cannot be read counts as zero, so routing degrades to usage alone.
  */
 export const readAccountLoad = (
   leases: Pick<ProvisionedLeaseRegistry, "awake">,

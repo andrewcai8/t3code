@@ -189,7 +189,7 @@ const CHAT_PROJECT: OrchestrationProjectShell = {
   updatedAt: "2026-10-01T00:00:00.000Z",
 };
 // Decoded, as the host's listing is, so its defaulted fields match the listed copy.
-const CHAT_THREAD = Schema.decodeUnknownSync(OrchestrationV2ThreadShell)({
+const CHAT_THREAD = Schema.decodeSync(OrchestrationV2ThreadShell)({
   ...v2ThreadShell,
   id: ThreadId.make("thread-cloud-chat"),
   projectId: CHAT_PROJECT.id,
@@ -560,6 +560,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
                 Stream.die(new Error("Config is not used by registry tests.")),
               ready: Effect.void,
               probe: Effect.void,
+              inboundFrames: Effect.succeed(0),
               closed: Deferred.await(closed),
             } satisfies RpcSession.RpcSession),
             () => Ref.update(releasedSessions, (count) => count + 1),
@@ -2074,17 +2075,16 @@ describe("EnvironmentRegistry", () => {
             credential: BEARER_CREDENTIAL,
           }),
         );
-        const followedPhase = yield* Ref.make<SupervisorConnectionState["phase"] | null>(null);
+        const followedPhases = yield* Queue.unbounded<SupervisorConnectionState["phase"]>();
         const followerSees = Effect.fn("followerSees")(function* (
           phase: SupervisorConnectionState["phase"],
         ) {
-          for (let turn = 0; turn < 100 && (yield* Ref.get(followedPhase)) !== phase; turn += 1) {
-            yield* Effect.yieldNow;
-          }
-          return yield* Ref.get(followedPhase);
+          let seen = yield* Queue.take(followedPhases);
+          while (seen !== phase) seen = yield* Queue.take(followedPhases);
+          return seen;
         });
         yield* registry.stateChanges(BEARER_TARGET.environmentId).pipe(
-          Stream.runForEach((state) => Ref.set(followedPhase, state.phase)),
+          Stream.runForEach((state) => Queue.offer(followedPhases, state.phase)),
           Effect.forkScoped,
         );
         expect(yield* followerSees("connected")).toBe("connected");

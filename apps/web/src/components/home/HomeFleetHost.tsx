@@ -43,6 +43,7 @@ function HomeHub({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const settings = useAtomValue(serverEnvironment.settingsValueAtom(environmentId));
   const home = settings?.home ?? DEFAULT_HOME_SETTINGS;
   const on = home.threadId !== null;
+  // oxlint-disable-next-line t3code/react-effect-budget -- Tells the desktop shell to keep the app alive on close while Home runs, and undoes it on cleanup.
   useEffect(() => {
     void window.desktopBridge?.setKeepAliveOnClose?.(on);
     // Without a relay running, closing the window should quit as usual.
@@ -109,6 +110,7 @@ function HomeRelay({ environmentId }: { readonly environmentId: EnvironmentId })
   // The consumer outlives renders, so it reads the latest handler from an atom.
   const [handlerAtom] = useState(() => Atom.make({ handle }));
   const setHandler = useAtomSet(handlerAtom);
+  // oxlint-disable-next-line t3code/react-effect-budget -- Publishes the latest request handler to the atom the relay consumer reads.
   useEffect(() => {
     setHandler({ handle });
   }, [handle, setHandler]);
@@ -158,6 +160,7 @@ function HomeWatchReporter({
   const sending = useRef(false);
   const stopped = useRef(false);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Diffs watched threads against the last pass and batches reports to the hub; the retry timer is external.
   useEffect(() => {
     const { next, events } = diffWatchedThreads({
       previous: previous.current,
@@ -195,6 +198,7 @@ function HomeWatchReporter({
     timer.current = setTimeout(() => void send(), WATCH_REPORT_DELAY_MS);
   }, [environmentId, home, knownWatchKeys, labels, liveEnvironmentIds, report, shells]);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Marks the reporter stopped and clears its retry timer on unmount.
   useEffect(() => {
     stopped.current = false;
     return () => {

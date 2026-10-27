@@ -26,20 +26,16 @@ export type PnpmLock = typeof PnpmLock.Type;
  * only `.` and pnpm itself), so the workspace lockfile is the last document.
  */
 export const decodePnpmLock = (text: string): PnpmLock =>
-  Schema.decodeUnknownSync(fromYaml(PnpmLock))(text.split(/^---$/m).at(-1) ?? text);
+  Schema.decodeSync(fromYaml(PnpmLock))(text.split(/^---$/m).at(-1) ?? text);
 
 // pnpm references carry peer and patch suffixes: `2.2.0(@bufbuild/protobuf@2.16.0)`.
 const versionOf = (reference: string) => reference.replace(/\(.*$/, "");
 
 /**
  * The npm manifest that installs exactly what the repo's pnpm lockfile tested.
- *
- * The CLI bundle inlines every dependency except its runtime externals, so
- * those are the only packages a runtime needs on disk. npm cannot read
- * pnpm-lock.yaml, so each package of that closure that pnpm resolved to one
- * version is pinned there with an override. npm resolves a package pnpm holds
- * at several versions itself, because a nested override for one of them leaks
- * into peers of the others; `findUntestedPackages` catches it if that drifts.
+ * npm cannot read pnpm-lock.yaml, so each runtime external that pnpm resolved to one version is
+ * pinned with an override. Packages pnpm holds at several versions are left to npm, because a nested
+ * override leaks into peers; `findUntestedPackages` catches it if that drifts.
  */
 export function resolveRuntimeDependencies(lock: PnpmLock, importer: string) {
   const declared = lock.importers[importer]?.dependencies ?? {};

@@ -1,10 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - base records and build archives are small files on this host.
 /**
- * The images a repository's copies boot from. A base is the repository's default branch with its
- * prepare commands already run, so a copy only applies the worktree's own changes. This host owns
- * its bases: it builds the first one on demand from a git bundle of its own fetch (a copy needs
- * no git credential), refreshes it in the background at most hourly once origin moves, keeps two,
- * and lets Modal expire the rest.
+ * The images a repository's copies boot from: its default branch with prepare commands already run,
+ * so a copy only applies the worktree's own changes. This host builds the first one on demand from a
+ * git bundle of its own fetch (a copy needs no git credential), refreshes at most hourly, keeps two.
  *
  * @module worktreeForkBases
  */

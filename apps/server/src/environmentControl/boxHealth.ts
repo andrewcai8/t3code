@@ -1,10 +1,8 @@
 // @effect-diagnostics globalDate:off - a probe reads E2B's samples from a wall-clock window, Promise-side.
 /**
- * Whether a cloud box may keep its memory when it pauses. E2B captures a box's memory when it
- * pauses, and boxes paused with their envd agent not answering were captured frozen and could not
- * be resumed again. So a pause first reads the box: envd must answer a trivial command, and the box
- * must not be pinned with its memory nearly full, the state that starves envd. A pinned CPU alone
- * is normal for a build or a test run, so it never costs a box its memory.
+ * Whether a cloud box may keep its memory when it pauses. E2B captures memory on pause, and boxes
+ * paused with envd not answering could not be resumed. So a pause first requires envd to answer and
+ * the box not to be pinned with memory nearly full; a pinned CPU alone is normal and never costs memory.
  *
  * @module boxHealth
  */

@@ -1,9 +1,7 @@
 // @effect-diagnostics globalDate:off - cleanup times are ISO timestamps at the server boundary.
 /**
  * When a paused cloud machine is removed, and the sweep that removes it. Only a Namespace Devbox
- * costs money while paused (its volume is billed by the GB-month), so only a lease with a
- * `namespaceResource` is ever planned. An E2B sandbox pauses for free, and an instance-engine
- * chat's snapshot expires on its own.
+ * costs money while paused, so only a lease with a `namespaceResource` is ever planned.
  *
  * @module cloudCleanup
  */
