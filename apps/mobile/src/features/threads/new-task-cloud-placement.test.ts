@@ -75,6 +75,7 @@ describe("newChatScopeTarget", () => {
     newChatScopeTarget(
       makeScope(projects),
       EnvironmentId.make(preferred),
+      new Set(projects.map((project) => project.environmentId)),
       newChatPlacement(userEnvironments("mac", "server", "host")),
     )?.id;
 
@@ -241,18 +242,16 @@ describe("new task environments", () => {
     });
   });
 
-  it("ignores a pick of another chat's box unless a queued task being edited sits there", () => {
-    const picked = (pinned: boolean) =>
+  it("ignores a pick of another chat's box", () => {
+    expect(
       resolveNewTaskEnvironmentId({
         picked: box,
-        pinned,
         projects: hostOnly,
         serverConfigs,
         boxes,
         placement,
-      });
-    expect(picked(false)).toBe(host);
-    expect(picked(true)).toBe(box);
+      }),
+    ).toBe(host);
   });
 
   it("keeps a draft on the box it just started", () => {
@@ -260,7 +259,6 @@ describe("new task environments", () => {
     expect(
       resolveNewTaskEnvironmentId({
         picked: ownBox,
-        pinned: false,
         projects: [...hostOnly, onOwnBox],
         serverConfigs,
         boxes,

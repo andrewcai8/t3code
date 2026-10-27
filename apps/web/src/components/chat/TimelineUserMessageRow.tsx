@@ -174,6 +174,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           expanded && "w-full",
         )}
       >
+        <MessageAuthorHeading>Automation</MessageAuthorHeading>
         <FoldedMessageHeader
           icon={CalendarClockIcon}
           label="Automation"
@@ -317,6 +318,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       ? { environmentId: ctx.activeThreadEnvironmentId, threadId: senderThreadId }
       : null,
   );
+  const senderLabel =
+    senderThreadId && isHomeThreadId(senderThreadId)
+      ? "Home"
+      : senderShell?.title.trim() || "Agent";
   const resolvedContext = resolveUserMessageContext(
     userMessage.attribution === "guest" ? { ...row.message, text: userMessage.text } : row.message,
   );
@@ -470,14 +475,18 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           folded && expanded && "w-full",
         )}
       >
+        {/* Outside the fold so a collapsed message still has a heading to navigate to. */}
+        <MessageAuthorHeading>
+          {folded
+            ? senderLabel
+            : userMessage.guestName === undefined
+              ? "You"
+              : `${userMessage.guestName} (guest)`}
+        </MessageAuthorHeading>
         {folded ? (
           <FoldedMessageHeader
             icon={MessagesSquareIcon}
-            label={
-              senderThreadId && isHomeThreadId(senderThreadId)
-                ? "Home"
-                : senderShell?.title.trim() || "Agent"
-            }
+            label={senderLabel}
             summary={foldSummary}
             expanded={expanded}
             onToggle={() => setExpanded((value) => !value)}
@@ -493,9 +502,6 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
               folded && !ctx.findActive && "max-h-96 overflow-auto",
             )}
           >
-            <MessageAuthorHeading>
-              {userMessage.guestName === undefined ? "You" : `${userMessage.guestName} (guest)`}
-            </MessageAuthorHeading>
             {(regularImages.length > 0 || userVideos.length > 0) && (
               <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
                 {regularImages.map((image) => (

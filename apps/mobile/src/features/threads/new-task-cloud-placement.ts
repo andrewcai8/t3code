@@ -30,9 +30,14 @@ export type NewChatPlacement = ReturnType<typeof newChatPlacement>;
 export function newChatScopeTarget(
   scope: HomeProjectScope,
   preferredEnvironmentId: EnvironmentId | null,
+  connectedEnvironmentIds: ReadonlySet<EnvironmentId>,
   placement: NewChatPlacement,
 ): EnvironmentProject | null {
-  const requested = getProjectScopeSelectionTarget(scope, preferredEnvironmentId);
+  const requested = getProjectScopeSelectionTarget(
+    scope,
+    preferredEnvironmentId,
+    connectedEnvironmentIds,
+  );
   return newChatProject({
     requested: scopeProjectRef(requested.environmentId, requested.id),
     projects: scope.projects,
@@ -95,19 +100,18 @@ export function defaultNewTaskEnvironmentId(input: {
 
 /**
  * The machine the new-task flow points at: the one picked, unless it is gone or another chat's
- * box, and then the default. A queued task being edited stays on its own machine, box or not.
+ * box, and then the default.
  */
 export function resolveNewTaskEnvironmentId(
   input: Parameters<typeof defaultNewTaskEnvironmentId>[0] & {
     readonly boxes: OtherChatBoxes;
     readonly picked: EnvironmentId | null;
-    readonly pinned: boolean;
   },
 ): EnvironmentId | null {
   const { picked } = input;
   return picked !== null &&
     input.projects.some((project) => project.environmentId === picked) &&
-    (input.pinned || !input.boxes.has(picked))
+    !input.boxes.has(picked)
     ? picked
     : defaultNewTaskEnvironmentId(input);
 }

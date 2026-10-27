@@ -83,7 +83,7 @@ vi.mock(import("../ui/toast"), async (original) => {
   return { ...actual, toastManager: { ...actual.toastManager, add: vi.fn() } };
 });
 
-import { StorageSettingsPanel } from "./StorageSettings";
+import { StorageCleanupSections, WorktreeCleanupSection } from "./StorageSettings";
 
 function setup() {
   state.settings = {
@@ -108,7 +108,7 @@ function setup() {
 
 const panel = () => (
   <RegistryProvider>
-    <StorageSettingsPanel />
+    <StorageCleanupSections />
   </RegistryProvider>
 );
 const deleteButton = (container: HTMLElement) =>
@@ -133,7 +133,12 @@ it("treats the unused worktree rule as a cleanup rule", async () => {
     storageCleanup: { ...state.settings.storageCleanup, orphanWorktreeAfterDays: 14 },
   };
   state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
-  await using screen = await render(panel());
+  await using screen = await render(
+    <RegistryProvider>
+      <WorktreeCleanupSection />
+      <StorageCleanupSections />
+    </RegistryProvider>,
+  );
   const button = deleteButton(screen.container);
 
   expect(screen.container.textContent).toContain("Delete unused worktrees");

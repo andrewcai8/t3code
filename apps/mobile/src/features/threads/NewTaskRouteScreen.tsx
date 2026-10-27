@@ -33,7 +33,6 @@ import { useRemoteConnectionStatus } from "../../state/use-remote-environment-re
 import type { WorkspaceState } from "../../state/workspaceModel";
 import { useWorkspaceState } from "../../state/workspace";
 
-import { usePromptLinkResolver } from "../prompt-links/usePromptLinkResolver";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { useNewTaskFlow } from "./new-task-flow-provider";
 import { newChatScopeTarget, resolveNewThreadStart } from "./new-task-cloud-placement";
@@ -160,7 +159,6 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
   const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const { getShare, releaseShareReservation } = useIncomingShare();
-  usePromptLinkResolver(route.params);
   const routeShareId = Array.isArray(route.params?.incomingShareId)
     ? route.params.incomingShareId[0]
     : route.params?.incomingShareId;
@@ -181,10 +179,6 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         isScratchProject(project, serverConfigs.get(project.environmentId)?.scratchWorkspaceRoot),
       ),
   );
-  const visibleScopes = filterProjectScopes(listScopes, searchText).flatMap((scope) => {
-    const selectionTarget = newChatScopeTarget(scope, selectedEnvironmentId, cloud.placement);
-    return selectionTarget ? [{ scope, selectionTarget }] : [];
-  });
   const resumedDestinationKeyRef = useRef<string | null>(null);
   const reservedDestinationProject = incomingShare?.destination
     ? (projects.find(
@@ -194,6 +188,20 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
       ) ?? null)
     : null;
   const { connectedEnvironments } = useRemoteConnectionStatus();
+  const connectedEnvironmentIds = new Set(
+    connectedEnvironments
+      .filter((environment) => environment.connectionState === "connected")
+      .map((environment) => environment.environmentId),
+  );
+  const visibleScopes = filterProjectScopes(listScopes, searchText).flatMap((scope) => {
+    const selectionTarget = newChatScopeTarget(
+      scope,
+      selectedEnvironmentId,
+      connectedEnvironmentIds,
+      cloud.placement,
+    );
+    return selectionTarget ? [{ scope, selectionTarget }] : [];
+  });
   const openScratch = useAtomCommand(projectEnvironment.openScratch, {
     reportFailure: false,
   });

@@ -225,7 +225,6 @@ export function CloudBaseBranchSelector({
       onSelectItem={select}
       value={value}
       query={query}
-      resultsQuery={deferredQuery}
       onQueryChange={setQuery}
       hasNextPage={false}
       isFetchingNextPage={false}

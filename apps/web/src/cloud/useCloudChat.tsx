@@ -48,7 +48,7 @@ import {
 import type { CloudBaseBranch, CloudRunOn } from "../components/CloudRunOn";
 import {
   cloneComposerImageForRetry,
-  revokeUserMessagePreviewUrls,
+  collectUserMessageBlobPreviewUrls,
 } from "../components/ChatView.logic";
 import { Button } from "../components/ui/button";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -721,7 +721,9 @@ export function useCloudChat(input: {
     heldRef.current = null;
     setHeldLocalMessage(null);
     if (!held) return;
-    revokeUserMessagePreviewUrls(held.message);
+    for (const previewUrl of collectUserMessageBlobPreviewUrls(held.message)) {
+      URL.revokeObjectURL(previewUrl);
+    }
     const store = useComposerDraftStore.getState();
     const images = held.images.map(cloneComposerImageForRetry);
     promptRef.current = held.prompt;
