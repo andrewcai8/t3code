@@ -64,7 +64,7 @@ jobs:
       id-token: write
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -358,8 +358,15 @@ jobs:
             node apps/web/node_modules/playwright/cli.js install-deps chromium
           fi
 
+      # Upstream runs this job on 8 vCPU. On ubuntu-latest's 4, the file previews' Word, WASM and
+      # worker tests time out while other browser files share the CPU, so they run alone.
       - name: Test
-        run: vp run --filter @t3tools/web test
+        working-directory: apps/web
+        run: vp test run --passWithNoTests --project unit --project browser --exclude src/components/files/AttachmentFilePreview.browser.test.tsx
+
+      - name: Test file previews
+        working-directory: apps/web
+        run: vp test run --project browser src/components/files/AttachmentFilePreview.browser.test.tsx
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of
