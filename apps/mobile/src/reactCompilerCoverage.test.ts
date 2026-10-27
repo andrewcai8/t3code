@@ -17,7 +17,6 @@ const KNOWN_BAILOUTS: Record<string, string> = {
   "src/components/ui/Menu.tsx": "ref read during render",
   "src/features/connection/CloudComputeControls.tsx": "try without catch",
   "src/features/connection/SavedCloudBoxConnections.tsx": "try without catch",
-  "src/features/connection/useCreateCloudMachine.ts": "try without catch",
   "src/features/diffs/nativeReviewDiffSurface.ts": "ref read during render",
   "src/features/home/thread-swipe-actions.tsx": "ref read during render",
   "src/features/threads/ThreadArrangementSheet.tsx": "ref read during render",
