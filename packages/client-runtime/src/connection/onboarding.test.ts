@@ -371,6 +371,25 @@ describe("connection onboarding", () => {
     }).pipe(Effect.provide(layerPairingOnboarding())),
   );
 
+  it.effect("pairs a box its host already listed, whatever address the box now has", () =>
+    Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSwitchedOffEnvironment;
+
+      yield* onboarding.registerPairing({
+        host: "box.example.test",
+        pairingCode: "pairing-token",
+        box: { managerId: EnvironmentId.make("host") },
+      });
+
+      const entry = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID);
+      expect(entry === undefined ? [] : connectionRoutes(entry).map(routeHttpBaseUrl)).toEqual(
+        expect.arrayContaining(["https://box.example.test/"]),
+      );
+    }).pipe(Effect.provide(layerPairingOnboarding())),
+  );
+
   it.effect(
     "re-pairs an outdated self-updatable environment so its connection can be rechecked",
     () =>

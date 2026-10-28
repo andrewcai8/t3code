@@ -101,6 +101,14 @@ function differentMachineError(label: string) {
   });
 }
 
+/**
+ * Whether a pairing may only reach environments at addresses already saved for them. A box
+ * pairing comes from its host, and the host may have listed the box before it had an address.
+ */
+function knownAddressOnly(input: PairingConnectionInput): boolean {
+  return input.expectedEnvironmentId === undefined && input.box === undefined;
+}
+
 export const preparePairingRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.preparePairingRegistration",
 )(function* (input: PairingConnectionInput) {
@@ -135,7 +143,7 @@ export const preparePairingRegistration = Effect.fn(
   // The registry checks again under its lease; this early check keeps a refused code unspent.
   // Optional because box pairing runs inside the registry's own layer, always with an expected id.
   const registry = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
-  if (input.expectedEnvironmentId === undefined && Option.isSome(registry)) {
+  if (knownAddressOnly(input) && Option.isSome(registry)) {
     yield* registry.value.assertKnownAddress({ ...route, profile: Option.some(route.profile) });
   }
   const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
@@ -162,8 +170,7 @@ const registerPairingConnection = Effect.fn(
 )(function* (input: PairingConnectionInput) {
   const registration = yield* preparePairingRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-  const knownAddressOnly = input.expectedEnvironmentId === undefined;
-  if (!(yield* registry.register(registration, { knownAddressOnly }))) {
+  if (!(yield* registry.register(registration, { knownAddressOnly: knownAddressOnly(input) }))) {
     return registration.target.environmentId;
   }
   yield* registry.setCompatibility(registration.target.environmentId, null);
