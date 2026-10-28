@@ -1,4 +1,3 @@
-import { OrchestratorMcpEnvironmentTarget } from "./orchestratorMcp.ts";
 import * as Schema from "effect/Schema";
 
 import {
@@ -11,7 +10,7 @@ import {
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 
-function hasOnlyPairedSurrogates(value: string): boolean {
+export function hasOnlyPairedSurrogates(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index);
     if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
@@ -45,7 +44,6 @@ export const ThreadMetadataMcpAction = Schema.Literals(["rename", "regenerate_ti
 export type ThreadMetadataMcpAction = typeof ThreadMetadataMcpAction.Type;
 
 export const ThreadMetadataMcpUpdateInput = Schema.Struct({
-  environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: Schema.optional(ThreadId),
   action: ThreadMetadataMcpAction,
   title: Schema.optional(ThreadMetadataTitle),

@@ -165,7 +165,7 @@ function DragHandle(props: {
   );
 }
 
-export function ThreadArrangementSheet(props: { onClose: () => void }) {
+function ThreadArrangementSheet(props: { onClose: () => void }) {
   const threads = useAtomValue(environmentThreadShells.navigationThreadShellsAtom);
   const configs = useAtomValue(environmentServerConfigsAtom);
   const queuedThreadKeys = useAtomValue(queuedThreadKeysAtom);
@@ -194,11 +194,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
         configs,
         threads.map((thread) => thread.environmentId),
       ),
-      snoozeEnvironmentIds: new Set(
-        [...configs].flatMap(([id, config]) =>
-          config.environment.capabilities.threadSnooze ? [id] : [],
-        ),
-      ),
+      snoozeEnvironmentIds: new Set(configs.keys()),
     };
     const pinned = getThreadListV2OrderedSection({ ...shared, section: "pinned" });
     const active = getThreadListV2OrderedSection({ ...shared, section: "active" });
@@ -226,15 +222,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
         allThreads: threads,
         section,
         reorderableEnvironmentIds: new Set(
-          [...configs].flatMap(([id, config]) =>
-            (
-              section === "pinned"
-                ? config.environment.capabilities.threadPinReorder
-                : !workingShelfEnabled && config.environment.capabilities.threadActiveReorder
-            )
-              ? [id]
-              : [],
-          ),
+          section === "pinned" || !workingShelfEnabled ? configs.keys() : [],
         ),
       });
     return { pinned: planner("pinned"), active: planner("active") };
@@ -277,10 +265,12 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
   const orderVersion = rows
     .map((row) => `${row.key}:${row.thread?.pinOrderKey}:${row.thread?.activeOrderKey}`)
     .join("|");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- cancels the in-progress drag gesture when the thread order changes underneath it
   useEffect(() => {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies, react/set-state-in-effect -- A changed thread order cancels the in-progress drag and clears its preview; stop only touches refs and state setters.
     stop();
   }, [orderVersion]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- cancels the pending drag animation frame on unmount
   useEffect(
     () => () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -438,8 +428,12 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                       item.section === "pinned" || item.section === "active"
                         ? planners[item.section]
                         : null;
-                    const capabilities =
-                      thread && configs.get(thread.environmentId)?.environment.capabilities;
+                    const configLoaded = thread ? configs.has(thread.environmentId) : false;
+                    const settlementAllowed = thread
+                      ? environmentAllowsThreadSettlement(
+                          configs.get(thread.environmentId)?.environment.capabilities,
+                        )
+                      : false;
                     const sectionActions = thread
                       ? (["pinned", "active", "settled"] as const).flatMap<{
                           name: "pinned" | "active" | "settled";
@@ -449,18 +443,13 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                           const label = threadDragAction(item.section, section);
                           if (!label) return [];
                           if (section === "settled")
-                            return environmentAllowsThreadSettlement(capabilities)
-                              ? [{ name: section, label }]
-                              : [];
+                            return settlementAllowed ? [{ name: section, label }] : [];
                           if (
-                            ((section === "pinned" || thread.pinnedAt != null) &&
-                              !capabilities?.threadPinning) ||
+                            ((section === "pinned" || thread.pinnedAt != null) && !configLoaded) ||
                             (section === "active" &&
                               item.section === "settled" &&
-                              !environmentAllowsThreadSettlement(capabilities)) ||
-                            (section === "active" &&
-                              item.section === "snoozed" &&
-                              !capabilities?.threadSnooze)
+                              !settlementAllowed) ||
+                            (section === "active" && item.section === "snoozed" && !configLoaded)
                           )
                             return [];
                           return planners[section](item.key, {
@@ -498,12 +487,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                               disabled={
                                 dropBusy ||
                                 pendingOrder !== null ||
-                                !(
-                                  configs.get(thread.environmentId)?.environment.capabilities
-                                    .threadPinReorder ||
-                                  configs.get(thread.environmentId)?.environment.capabilities
-                                    .threadActiveReorder
-                                )
+                                !configs.has(thread.environmentId)
                               }
                               sectionActions={sectionActions}
                               onSectionMove={(section) => {

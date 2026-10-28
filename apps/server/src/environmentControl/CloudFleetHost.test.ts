@@ -635,7 +635,7 @@ it.effect("answers with the thread links boxes on builds before #200 still requi
       // A sleeping box's list already carries the current link format, which old decoders accept.
       const listed = yield* relay(environment(2), { op: "threads.list", input: {} });
       expect(decodeLegacyList(resultOf(listed)).threads.map((thread) => thread.link)).toEqual([
-        "[Write docs](t3-thread://v1/chat-2)",
+        "<t3-thread://v2/box-2/chat-2>",
       ]);
 
       answers.set("threads.read", {

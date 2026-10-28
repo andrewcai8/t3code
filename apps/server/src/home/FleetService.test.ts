@@ -78,6 +78,7 @@ const setup = (
         NodeCrypto.layer,
         ServerSettings.layerTest(options.settings),
         Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("studio")),
           getDescriptor: Effect.succeed({
             environmentId: EnvironmentId.make("studio"),
           } as ExecutionEnvironmentDescriptor),
@@ -357,6 +358,9 @@ it.effect("returns a ready link for the thread it sends to", () => {
       actor,
       request: { op: "threads.send", input: { threadId, message: "Keep going" } },
     });
-    expect(result).toMatchObject({ threadId, link: formatThreadLink(threadId, "worker") });
+    expect(result).toMatchObject({
+      threadId,
+      link: formatThreadLink({ environmentId: EnvironmentId.make("studio"), threadId }),
+    });
   }).pipe(Effect.provide(layer));
 });

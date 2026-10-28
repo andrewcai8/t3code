@@ -141,7 +141,7 @@ export function ProvisionedEnvironmentConnections({
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const refresh = query.refresh;
-  // oxlint-disable-next-line t3code/react-effect-budget -- Polls the manager's provisioned machines every 15s while it supports them; cleared on change or unmount.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Polls the manager's provisioned machines every 15s while it supports them; cleared on change or unmount.
   useEffect(() => {
     if (!supported) return;
     refresh();

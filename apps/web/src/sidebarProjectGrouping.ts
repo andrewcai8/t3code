@@ -4,9 +4,9 @@ import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 import {
   buildProjectGroups,
   derivePhysicalProjectKey,
+  resolveScratchProjectScopeKey,
   type ProjectGroupingSettings,
-} from "./logicalProject";
-import { resolveScratchProjectScopeKey } from "@t3tools/client-runtime/state/project-grouping";
+} from "@t3tools/client-runtime/state/project-grouping";
 import type { Project } from "./types";
 
 export type EnvironmentPresence = "local-only" | "remote-only" | "mixed";
@@ -84,6 +84,17 @@ export function resolveSidebarProjectScopeKey(input: {
           candidate.projectKey,
     );
   return group?.projectKey ?? (input.canClearMissingScope ? null : input.key);
+}
+
+export function resolveSidebarProjectScopeKeys(input: {
+  readonly groups: ReadonlyArray<SidebarProjectSnapshot>;
+  readonly keys: ReadonlyArray<string>;
+  readonly settings?: ProjectGroupingSettings;
+  readonly canClearMissingScope?: boolean;
+}): string[] {
+  return [
+    ...new Set(input.keys.flatMap((key) => resolveSidebarProjectScopeKey({ ...input, key }) ?? [])),
+  ];
 }
 
 export function buildPhysicalToLogicalProjectKeyMap(input: {

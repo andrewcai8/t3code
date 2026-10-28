@@ -365,21 +365,15 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       ORCHESTRATION_V2_WS_METHODS.subscribeShell,
       Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
         yield* Ref.set(activeSubscriptionSession, session);
-        const { supportsCompletionMarker, omitIdleSubagents, omitOlderSettled } =
-          yield* session.initialConfig.pipe(
-            Effect.map((config) => ({
-              supportsCompletionMarker: config.shellResumeCompletionMarker === true,
-              omitIdleSubagents: config.shellThreadFamilies === true,
-              omitOlderSettled:
-                config.shellOlderSettled === true && config.shellThreadFamilies === true,
-            })),
-            Effect.orElseSucceed(() => ({
-              supportsCompletionMarker: false,
-              omitIdleSubagents: false,
-              omitOlderSettled: false,
-            })),
-          );
-        yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
+        const { omitIdleSubagents, omitOlderSettled } = yield* session.initialConfig.pipe(
+          Effect.map((config) => ({
+            omitIdleSubagents: config.shellThreadFamilies === true,
+            omitOlderSettled:
+              config.shellOlderSettled === true && config.shellThreadFamilies === true,
+          })),
+          Effect.orElseSucceed(() => ({ omitIdleSubagents: false, omitOlderSettled: false })),
+        );
+        yield* Ref.set(awaitingCompletion, true);
         yield* setSynchronizing;
 
         // Foreground resubscriptions on the same live session can resume from
@@ -434,22 +428,12 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           ...(omitOlderSettled ? { omitOlderSettled: true as const } : {}),
         };
         if (!canResume || Option.isNone(current.snapshot)) {
-          return {
-            ...omission,
-            ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
-          };
-        }
-        if (!supportsCompletionMarker) {
-          yield* SubscriptionRef.update(state, (value) => ({
-            ...value,
-            status: "live" as const,
-            error: Option.none(),
-          }));
+          return { ...omission, requestCompletionMarker: true as const };
         }
         return {
           afterSequence: current.snapshot.value.snapshotSequence,
           ...omission,
-          ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+          requestCompletionMarker: true as const,
         };
       }),
       {
@@ -486,16 +470,12 @@ function shellStateChanges(environmentId: EnvironmentId) {
 export interface EnvironmentShellSummary {
   readonly hasSnapshot: boolean;
   readonly hasSynchronizingShell: boolean;
-  readonly hasCachedShell: boolean;
-  readonly hasLiveShell: boolean;
   readonly firstError: string | null;
 }
 
 const EMPTY_ENVIRONMENT_SHELL_SUMMARY: EnvironmentShellSummary = Object.freeze({
   hasSnapshot: false,
   hasSynchronizingShell: false,
-  hasCachedShell: false,
-  hasLiveShell: false,
   firstError: null,
 });
 
@@ -508,8 +488,6 @@ function shellSummariesEqual(
   return (
     left.hasSnapshot === right.hasSnapshot &&
     left.hasSynchronizingShell === right.hasSynchronizingShell &&
-    left.hasCachedShell === right.hasCachedShell &&
-    left.hasLiveShell === right.hasLiveShell &&
     left.firstError === right.firstError
   );
 }
@@ -534,15 +512,11 @@ export function createEnvironmentShellSummaryAtom(input: {
   return Atom.make((get) => {
     let hasSnapshot = false;
     let hasSynchronizingShell = false;
-    let hasCachedShell = false;
-    let hasLiveShell = false;
     let firstError: string | null = null;
 
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const state = get(input.shellStateValueAtom(environmentId));
       hasSynchronizingShell ||= state.status === "synchronizing";
-      hasCachedShell ||= state.status === "cached";
-      hasLiveShell ||= state.status === "live";
       if (firstError === null) {
         firstError = Option.getOrNull(state.error);
       }
@@ -555,8 +529,6 @@ export function createEnvironmentShellSummaryAtom(input: {
     const next: EnvironmentShellSummary = {
       hasSnapshot,
       hasSynchronizingShell,
-      hasCachedShell,
-      hasLiveShell,
       firstError,
     };
     if (shellSummariesEqual(previousSummary, next)) {

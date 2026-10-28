@@ -45,6 +45,7 @@ export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
   previewAnnotations: [],
   reviewComments: [],
   threadContexts: [],
+  environmentContexts: [],
   modelSelectionByProvider: {},
   activeProvider: null,
   runtimeMode: null,

@@ -10,10 +10,11 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import * as FleetBroker from "../home/FleetBroker.ts";
-import * as FleetService from "../home/FleetService.ts";
+import * as FleetService from "../home/FleetServiceTag.ts";
 import * as HomeService from "../home/HomeService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpToolAccess from "./McpToolAccess.ts";
 import { assertFullAccess, assertLiveCaller, readCaller } from "./threadAccess.ts";
 
 /** Services a tool needs to declare when it routes Home calls. */
@@ -63,6 +64,24 @@ const callerHasCloudReach = Effect.fn("mcp.callerHasCloudReach")(function* () {
 export const callerHasFleetReach = Effect.fn("mcp.callerHasFleetReach")(function* () {
   return (yield* callerIsHome()) || (yield* callerHasCloudReach());
 });
+
+/**
+ * Home's calls, and a cloud chat's its host relays, reach other environments through the fleet
+ * rather than over links. While its host reconnects, the fleet takes them only with links off,
+ * so the chat hears to retry instead of that links are off.
+ */
+const callerUsesFleet = Effect.fn("mcp.callerUsesFleet")(function* () {
+  if (yield* callerIsHome()) return true;
+  const reach = yield* callerCloudReach();
+  if (reach === "connected") return true;
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  return reach === "reconnecting" && scope.linkedEnvironments === false;
+});
+
+/** Lets the declared handler route calls naming another environment through `routeHome`. */
+export const viaFleet = <P, A, E, R>(
+  declaration: McpToolAccess.Declaration<(params: P) => Effect.Effect<A, E, R>>,
+) => McpToolAccess.routesOtherEnvironments(declaration, callerUsesFleet());
 
 /**
  * Fails a caller without fleet reach. A cloud chat whose host is between connections is told to
