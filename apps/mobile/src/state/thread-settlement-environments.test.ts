@@ -13,10 +13,6 @@ const config = {
   environment: { capabilities: {}, platform: { machine: "laptop" } },
   settings: {},
 } as unknown as ServerConfig;
-const settlingConfig = {
-  ...config,
-  environment: { ...config.environment, capabilities: { threadSettlement: true } },
-} as unknown as ServerConfig;
 
 describe("threadSettlementEnvironmentIds", () => {
   it("lets threads on an environment with no loaded config settle", () => {
@@ -25,7 +21,7 @@ describe("threadSettlementEnvironmentIds", () => {
       createThreadListEnvironmentsAtom(
         Atom.make<ReadonlyMap<EnvironmentId, ServerConfig>>(
           new Map([
-            [ID, settlingConfig],
+            [ID, config],
             [OTHER_ID, config],
           ]),
         ),
@@ -38,7 +34,7 @@ describe("threadSettlementEnvironmentIds", () => {
       { environmentId: BOX_ID },
     ]);
 
-    expect([...ids].toSorted()).toEqual([ID, BOX_ID].toSorted());
+    expect([...ids].toSorted()).toEqual([ID, OTHER_ID, BOX_ID].toSorted());
     expect(threadSettlementEnvironmentIds(list, [{ environmentId: OTHER_ID }])).toBe(
       list.settlementEnvironmentIds,
     );
