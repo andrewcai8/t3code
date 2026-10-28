@@ -32,6 +32,18 @@ connection. Pull request diffs and provider settings keep working after the
 previous credential expires. A failed renewal affects that request; it does not
 disconnect an otherwise healthy conversation.
 
+### More machines with T3 Chat
+
+Each T3 Connect account can link up to 3 machines. Phones and browsers do not
+count. A paid T3 Chat plan raises the limit to 10 machines with Pro, or 100 with
+Premier.
+
+To link T3 Chat, open your account menu on the web or desktop app, go to
+**T3 Chat**, and select **Link T3 Chat**. Sign in to T3 Chat in the window that
+opens and approve. The new limit applies the next time you add a machine. If you
+cancel or downgrade T3 Chat, machines you already linked stay linked, but you
+cannot add more until you are under the limit again.
+
 ## Cloud compute
 
 A configured cloud manager adds compute status and Start/Stop controls in
@@ -97,9 +109,10 @@ URL, SSH, or T3 Connect. Tailscale shares its `100.64.0.0/10` address range with
 other VPNs such as Cloudflare WARP, so an address in that range shows as VPN
 unless the machine confirms it is on Tailscale. To add a route, choose **Add
 route** in the machine's route list, or next to it in the T3 Connect list.
-Pairing the same machine again over another address also adds a route instead
-of a second machine. A new route is placed by speed, in that order, and you can
-reorder routes at any time.
+A pairing link for a saved machine is refused when it comes from an address
+that machine does not have yet; add that address with **Add route** instead.
+Pairing again over an address the machine already has still works. A new route
+is placed by speed, in that order, and you can reorder routes at any time.
 
 While connected through T3 Connect or a paired address, T3 Code also learns the
 machine's current LAN and Tailscale addresses and adds them as routes, so

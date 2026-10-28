@@ -171,6 +171,28 @@ it.effect("lists threads from every project, newest first, with snooze state", (
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("lists every project when asked for all projects, even naming one", () => {
+  const { layer } = setup();
+  return Effect.gen(function* () {
+    const fleet = yield* FleetService.FleetService;
+    const result = yield* fleet.execute({
+      actor,
+      request: {
+        op: "threads.list",
+        input: { projectId: ProjectId.make("a"), allProjects: true },
+      },
+    });
+    expect(result).toMatchObject({
+      projectId: null,
+      threads: [
+        { threadId: "newer", projectId: "b" },
+        { threadId: "older" },
+        { threadId: "snoozed" },
+      ],
+    });
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("leaves models the user hid out of the capabilities Home reads", () => {
   const codex = ProviderInstanceId.make("codex");
   const { layer } = setup({

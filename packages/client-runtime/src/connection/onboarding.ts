@@ -116,19 +116,8 @@ export const preparePairingRegistration = Effect.fn(
   ) {
     return yield* differentMachineError(descriptor.label);
   }
-  const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
-  // An outdated server is still saved so it can be updated from this client.
-  if (compatibilityError !== null && compatibilityError.serverUpdateRequired !== true) {
-    return yield* compatibilityError;
-  }
-  const access = yield* bootstrapRemoteBearerSession({
-    httpBaseUrl: target.httpBaseUrl,
-    credential: target.credential,
-    clientMetadata: presentation.metadata,
-  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   const connectionId = bearerConnectionId(descriptor.environmentId, target.httpBaseUrl);
-
-  return new BearerConnectionRegistration({
+  const route = {
     target: new BearerConnectionTarget({
       environmentId: descriptor.environmentId,
       label: descriptor.label,
@@ -142,6 +131,26 @@ export const preparePairingRegistration = Effect.fn(
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
     }),
+  };
+  // The registry checks again under its lease; this early check keeps a refused code unspent.
+  // Optional because box pairing runs inside the registry's own layer, always with an expected id.
+  const registry = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
+  if (input.expectedEnvironmentId === undefined && Option.isSome(registry)) {
+    yield* registry.value.assertKnownAddress({ ...route, profile: Option.some(route.profile) });
+  }
+  const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
+  // An outdated server is still saved so it can be updated from this client.
+  if (compatibilityError !== null && compatibilityError.serverUpdateRequired !== true) {
+    return yield* compatibilityError;
+  }
+  const access = yield* bootstrapRemoteBearerSession({
+    httpBaseUrl: target.httpBaseUrl,
+    credential: target.credential,
+    clientMetadata: presentation.metadata,
+  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+
+  return new BearerConnectionRegistration({
+    ...route,
     credential: new BearerConnectionCredential({
       token: access.access_token,
     }),
@@ -153,7 +162,10 @@ const registerPairingConnection = Effect.fn(
 )(function* (input: PairingConnectionInput) {
   const registration = yield* preparePairingRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-  if (!(yield* registry.register(registration))) return registration.target.environmentId;
+  const knownAddressOnly = input.expectedEnvironmentId === undefined;
+  if (!(yield* registry.register(registration, { knownAddressOnly }))) {
+    return registration.target.environmentId;
+  }
   yield* registry.setCompatibility(registration.target.environmentId, null);
   yield* registry
     .setEnabled(registration.target.environmentId, true)

@@ -336,6 +336,7 @@ export const OrchestratorMcpThreadListInput = Schema.Struct({
         "Project to list. Omit for the calling thread's project; Home lists every project when omitted. Required when the caller is not a T3 thread.",
     }),
   ),
+  allProjects: Schema.optional(Schema.Boolean),
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
@@ -385,7 +386,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
 export type OrchestratorMcpThreadListItem = typeof OrchestratorMcpThreadListItem.Type;
 
 export const OrchestratorMcpThreadListResult = Schema.Struct({
-  /** The listed project; null when Home lists every project. */
+  /** null with `allProjects`, or when Home lists every project. */
   projectId: Schema.NullOr(ProjectId),
   currentThreadId: Schema.NullOr(ThreadId),
   threads: Schema.Array(OrchestratorMcpThreadListItem),

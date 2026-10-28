@@ -228,7 +228,7 @@ const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List threads in a project, newest first. Omit `projectId` for yours. Filter by status, title, settled, or snoozed. Page with the cursor. Home: omit `projectId` to list every project in any environment.",
+    "List threads newest first, in one project or with `allProjects`. Omit `projectId` for yours. Page with `cursor`. Home: omit `projectId` to list every project in any environment.",
   parameters: OrchestratorMcpThreadListInput,
   success: OrchestratorMcpThreadListResult,
   failure: OrchestratorMcpFailure,

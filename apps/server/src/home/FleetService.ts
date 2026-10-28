@@ -124,7 +124,7 @@ export function listThreadPage(
   const page = filtered.slice(cursor, cursor + (input.limit ?? DEFAULT_LIST_LIMIT));
   const next = cursor + page.length;
   return {
-    projectId: input.projectId ?? null,
+    projectId: input.allProjects ? null : (input.projectId ?? null),
     currentThreadId: filtered.some((thread) => thread.id === actor.threadId)
       ? actor.threadId
       : null,
@@ -231,7 +231,7 @@ const make = Effect.gen(function* () {
       // The same default as the regular thread list: subagents unless turned off.
       const includeSubagents = input.includeSubagents !== false;
       const shells =
-        input.projectId === undefined
+        input.allProjects || input.projectId === undefined
           ? yield* threads.getShellSnapshot().pipe(
               Effect.mapError(threadManagementFailure),
               Effect.map((snapshot) =>
