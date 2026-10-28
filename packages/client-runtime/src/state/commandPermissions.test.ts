@@ -389,8 +389,12 @@ it.effect(
             phase: "connected" as const,
           }),
         } as EnvironmentSupervisor["Service"];
+        const entries = yield* SubscriptionRef.make<
+          ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
+        >(new Map());
         const peerRuntime = Atom.runtime(
           Layer.succeed(EnvironmentRegistry, {
+            entries,
             run: (id, effect) => {
               expect(id).toBe(env);
               return Effect.provideService(effect, EnvironmentSupervisor, supervisor);
