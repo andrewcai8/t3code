@@ -21,7 +21,6 @@ import { environmentPresentations } from "../state/presentation";
 export { environmentAllowsThreadSettlement } from "@t3tools/client-runtime/state/thread-settled";
 export { useEnvironment } from "../state/environments";
 export { useThreadRefs } from "../state/entities";
-export { stopProvisionedCloudMachineMenuItem } from "./cloudThreadMenu";
 export { draftSessionHasInvestedWork } from "./draftInvestedWork";
 export { provisionedSandboxFor } from "./provisionedSandboxLeases";
 export { useCloudThreadActions } from "./useCloudThreadActions";
