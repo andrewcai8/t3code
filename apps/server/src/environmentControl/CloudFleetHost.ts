@@ -23,7 +23,7 @@ import {
   ProvisionRequestId,
   ThreadId,
 } from "@t3tools/contracts";
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import { THREAD_LINK_PROTOCOL } from "@t3tools/shared/threadLinks";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -186,7 +186,12 @@ const withLegacyLink = (environmentId: string, thread: unknown, title?: string):
   if (!isRecord(thread) || typeof thread.threadId !== "string") return thread;
   const label = title ?? (typeof thread.title === "string" ? thread.title : "");
   const href = `${legacySegment(environmentId)}/${legacySegment(thread.threadId)}`;
-  return { link: formatThreadLink(href, label), ...thread };
+  // The old v1 form, labeled, which those builds' clients still parse.
+  const cleaned = label
+    .replace(/[[\]\\\r\n]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { link: `[${cleaned || href}](${THREAD_LINK_PROTOCOL}://v1/${href})`, ...thread };
 };
 const withLegacyLinks = ({ environmentId, invoke }: FleetHostRequest, result: unknown) => {
   if (!isRecord(result)) return result;
@@ -499,6 +504,7 @@ const make = Effect.gen(function* () {
           : [];
       return listThreadPage(shells, request.input, {
         actor,
+        environmentId,
         nowMs: yield* Clock.currentTimeMillis,
       });
     }

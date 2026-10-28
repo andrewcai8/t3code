@@ -70,7 +70,7 @@ import { newMessageId } from "../lib/utils";
 import {
   deriveLogicalProjectKeyFromSettings,
   type ProjectGroupingSettings,
-} from "../logicalProject";
+} from "@t3tools/client-runtime/state/project-grouping";
 import { getProviderModelCapabilities } from "../providerModels";
 import { type ProviderInstanceEntry } from "../providerInstances";
 import type { ReviewCommentContext } from "../reviewCommentContext";
@@ -337,7 +337,7 @@ export function useCloudChat(input: {
   } = input;
   // Handlers read the latest props through this; render reads `input` itself.
   const inputRef = useRef(input);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Publishes the latest props to a ref after commit for event handlers.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Publishes the latest props to a ref after commit for event handlers.
   useLayoutEffect(() => {
     inputRef.current = input;
   });
@@ -364,7 +364,7 @@ export function useCloudChat(input: {
   );
 
   const restoreKeyRef = useRef<string | null>(null);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Resets per-draft refs and restores a held send when the draft or thread changes, before paint.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Resets per-draft refs and restores a held send when the draft or thread changes, before paint.
   useLayoutEffect(() => {
     const restoreKey = `${draftId ?? ""}:${threadId}`;
     if (restoreKeyRef.current === restoreKey) return;
@@ -394,7 +394,7 @@ export function useCloudChat(input: {
   }, [draftId, sendInFlightRef, threadId]);
 
   // The draft's record, which other pages write too, resets what this page's own handlers set.
-  // oxlint-disable-next-line t3code/react-effect-budget -- Mirrors the draft record, which other pages also write, into this page's setup state before paint.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Mirrors the draft record, which other pages also write, into this page's setup state before paint.
   useLayoutEffect(() => {
     // oxlint-disable-next-line react/set-state-in-effect -- Follows each new record; this page's handlers also set these between records.
     setSetupPhase(pending?.phase ?? null);
@@ -469,7 +469,7 @@ export function useCloudChat(input: {
           environmentState: (environmentId) => input.environmentById.get(environmentId),
         })
       : null;
-  // oxlint-disable-next-line t3code/react-effect-budget -- Moves the draft store off another chat's box onto its project, unless a send is in flight.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Moves the draft store off another chat's box onto its project, unless a send is in flight.
   useEffect(() => {
     if (!draftId || !projectOffAnotherChatsBox || sendInFlightRef.current) return;
     useComposerDraftStore.getState().setDraftThreadContext(draftId, {
@@ -480,7 +480,7 @@ export function useCloudChat(input: {
       loadBalancedEnvironmentId: null,
     });
   }, [draftId, projectOffAnotherChatsBox, sendInFlightRef]);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Moves the draft store to the redirect environment's project, unless a send is in flight.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Moves the draft store to the redirect environment's project, unless a send is in flight.
   useEffect(() => {
     // A machine whose "No project" folder does not exist yet has no project to move to.
     if (
@@ -831,7 +831,7 @@ export function useCloudChat(input: {
   // Once the environment is ready and the draft points at it, the held message goes out.
   const activeProjectEnvironmentId = activeProject?.environmentId ?? null;
   const activeEnvironmentConfigured = input.activeEnvironment?.serverConfig != null;
-  // oxlint-disable-next-line t3code/react-effect-budget -- Hands the ready machine to the draft once its environment is configured: transfers the lease, or sends the held message.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Hands the ready machine to the draft once its environment is configured: transfers the lease, or sends the held message.
   useEffect(() => {
     if (
       readyEnvironmentId === null ||

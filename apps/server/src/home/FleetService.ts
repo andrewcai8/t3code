@@ -7,6 +7,7 @@
  */
 import {
   CommandId,
+  type EnvironmentId,
   type FleetActor,
   type FleetInput,
   type FleetInvokeInput,
@@ -24,7 +25,6 @@ import {
 } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
-import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -40,6 +40,8 @@ import {
   threadSettlement,
 } from "../mcp/OrchestratorMcpService.ts";
 import { resultFromThread } from "../mcp/ThreadMetadataMcpService.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { FleetService } from "./FleetServiceTag.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -51,13 +53,7 @@ import * as ServerSettings from "../serverSettings.ts";
 
 const DEFAULT_LIST_LIMIT = 50;
 
-export class FleetService extends Context.Service<
-  FleetService,
-  {
-    /** Runs one operation and returns its result, typed by `FleetResults[op]`. */
-    readonly execute: (input: FleetInvokeInput) => Effect.Effect<unknown, OrchestratorMcpFailure>;
-  }
->()("t3/home/FleetService") {}
+export { FleetService };
 
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
@@ -108,10 +104,12 @@ export function listThreadPage(
   input: FleetInput<"threads.list">,
   context: {
     readonly actor: FleetActor;
+    /** The environment the shells live in, which their links name. */
+    readonly environmentId: EnvironmentId;
     readonly nowMs: number;
   },
 ): FleetResult<"threads.list"> {
-  const { actor, nowMs } = context;
+  const { actor, environmentId, nowMs } = context;
   const statuses = input.statuses === undefined ? null : new Set(input.statuses);
   const titleContains = input.titleContains?.toLocaleLowerCase();
   const filtered = shells.filter(
@@ -130,7 +128,7 @@ export function listThreadPage(
     currentThreadId: filtered.some((thread) => thread.id === actor.threadId)
       ? actor.threadId
       : null,
-    threads: page.map((shell) => listItemFromShell(shell, nowMs)),
+    threads: page.map((shell) => listItemFromShell(environmentId, shell, nowMs)),
     nextCursor: next < filtered.length ? next : null,
     total: filtered.length,
   };
@@ -152,6 +150,7 @@ const make = Effect.gen(function* () {
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const settings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
+  const environmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
 
   // A retried request with the same clientRequestId maps to the same command
   // for the same target thread; another target gets its own command.
@@ -252,7 +251,7 @@ const make = Effect.gen(function* () {
               .listProjectThreads({ projectId: input.projectId, includeSubagents })
               .pipe(Effect.mapError(threadManagementFailure));
       const nowMs = yield* Clock.currentTimeMillis;
-      return listThreadPage(shells, input, { actor, nowMs });
+      return listThreadPage(shells, input, { actor, environmentId, nowMs });
     }),
 
     "threads.read": Effect.fn("FleetService.threads.read")(function* (input) {
@@ -265,7 +264,7 @@ const make = Effect.gen(function* () {
       const target = yield* threads
         .getThreadRecords(input.threadId, ["runs", "runtimeRequests", "contextTransfers"])
         .pipe(Effect.mapError(threadManagementFailure));
-      return (yield* readThreadPage(threads, target, shell, input)).result;
+      return (yield* readThreadPage(environmentId, threads, target, shell, input)).result;
     }),
 
     "threads.launch": Effect.fn("FleetService.threads.launch")(function* (input, actor) {
@@ -332,7 +331,7 @@ const make = Effect.gen(function* () {
       const run = result.projection.runs.find((candidate) => candidate.userMessageId === messageId);
       return {
         threadId: thread.id,
-        link: formatThreadLink(thread.id, thread.title),
+        link: formatThreadLink({ environmentId, threadId: thread.id }),
         projectId: thread.projectId,
         modelSelection: thread.modelSelection,
         runId: run?.id ?? null,
@@ -360,7 +359,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(threadManagementFailure));
       return {
         threadId: input.threadId,
-        link: formatThreadLink(input.threadId, shell.title),
+        link: formatThreadLink({ environmentId, threadId: input.threadId }),
         messageId,
         runId: result.run.id,
         status: result.run.status,

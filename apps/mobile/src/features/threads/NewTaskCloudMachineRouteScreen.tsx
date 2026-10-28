@@ -58,7 +58,7 @@ function NewTaskCloudMachine({
   // Leaving is allowed while the machine starts: it keeps starting and appears under
   // Connections, but nothing opens a draft for a screen the user left or moved past.
   const mounted = useRef(true);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Tracks whether this screen is still mounted so a machine that finishes after the user left opens nothing.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Tracks whether this screen is still mounted so a machine that finishes after the user left opens nothing.
   useEffect(() => {
     mounted.current = true;
     return () => {

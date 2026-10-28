@@ -64,8 +64,6 @@ export const PersistedConnectionTarget = Schema.Union([
 ]);
 export type PersistedConnectionTarget = typeof PersistedConnectionTarget.Type;
 
-export type ConnectionTargetKind = ConnectionTarget["_tag"];
-
 /** The box a connection reaches, or null when it reaches a user environment. */
 export function connectionBox(target: ConnectionTarget): BoxAttachment | null {
   return target._tag === "BearerConnectionTarget" ? (target.box ?? null) : null;

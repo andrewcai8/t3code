@@ -50,7 +50,7 @@ export function useNewThreadNavigation(selectThreadRoute: (params: ThreadRoutePa
   const groupingSettings = useMobileProjectGroupingSettings();
   const boxes = useOtherChatBoxes();
   const latest = useRef({ serverConfigs, boxes, groupingSettings, selectThreadRoute });
-  // oxlint-disable-next-line t3code/react-effect-budget -- Publishes the latest inputs to a ref after commit so the navigation callbacks stay stable.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Publishes the latest inputs to a ref after commit so the navigation callbacks stay stable.
   useLayoutEffect(() => {
     latest.current = { serverConfigs, boxes, groupingSettings, selectThreadRoute };
   }, [serverConfigs, boxes, groupingSettings, selectThreadRoute]);

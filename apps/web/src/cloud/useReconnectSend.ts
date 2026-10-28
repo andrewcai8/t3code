@@ -36,7 +36,7 @@ export function useReconnectSend<Input>(options: {
     }
   };
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- Releases the held send once the thread is ready, or abandons it when the user navigated to another thread.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Releases the held send once the thread is ready, or abandons it when the user navigated to another thread.
   useEffect(() => {
     if (!pending || pendingRef.current !== pending) return;
     if (pending.threadKey !== threadKey) {
@@ -52,11 +52,11 @@ export function useReconnectSend<Input>(options: {
     send(pending.input);
   }, [pending, threadKey, ready, send, onAbandoned]);
   const onAbandonedRef = useRef(onAbandoned);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Keeps the latest abandon callback for the unmount cleanup below, which must not resubscribe.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keeps the latest abandon callback for the unmount cleanup below, which must not resubscribe.
   useEffect(() => {
     onAbandonedRef.current = onAbandoned;
   });
-  // oxlint-disable-next-line t3code/react-effect-budget -- Reports an abandoned send when the page unmounts while one is still waiting.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Reports an abandoned send when the page unmounts while one is still waiting.
   useEffect(
     () => () => {
       if (pendingRef.current === null) return;

@@ -1,7 +1,9 @@
 import { expect, it } from "@effect/vitest";
 import {
+  DEFAULT_HOME_SETTINGS,
   EnvironmentId,
   type FleetInvokeInput,
+  type HomeSettings,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadShell,
@@ -9,13 +11,19 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as FleetBroker from "../home/FleetBroker.ts";
 import * as FleetService from "../home/FleetService.ts";
 import * as HomeService from "../home/HomeService.ts";
+import * as WorktreeForks from "../home/WorktreeForks.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { routeHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpToolAccess from "./McpToolAccess.ts";
+import * as HomeHandlers from "./toolkits/home/handlers.ts";
+import { HomeToolkit } from "./toolkits/home/tools.ts";
 
 const hub = EnvironmentId.make("hub");
 const studio = EnvironmentId.make("studio");
@@ -33,7 +41,11 @@ const liveCaller = {
   interactionMode: "default",
 };
 
-const setup = (isHome: boolean, caller: Partial<typeof liveCaller> = {}) => {
+const setup = (
+  isHome: boolean,
+  caller: Partial<typeof liveCaller> = {},
+  options: { readonly linkedEnvironments?: boolean } = {},
+) => {
   const local: Array<FleetInvokeInput> = [];
   const remote: Array<[EnvironmentId, FleetInvokeInput]> = [];
   const layer = Layer.mergeAll(
@@ -48,6 +60,9 @@ const setup = (isHome: boolean, caller: Partial<typeof liveCaller> = {}) => {
       client: undefined,
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
+      ...(options.linkedEnvironments === undefined
+        ? {}
+        : { linkedEnvironments: options.linkedEnvironments }),
     }),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: () =>
@@ -108,4 +123,35 @@ it.effect("lets Home read but not change anything outside full-access/default mo
     expect(local).toHaveLength(1);
     expect(remote).toHaveLength(0);
   }).pipe(Effect.provide(layer));
+});
+
+it.effect("lets Home watch and unwatch a thread in another environment with links off", () => {
+  let home: HomeSettings = { ...DEFAULT_HOME_SETTINGS, threadId: callerId };
+  const { layer } = setup(true, {}, { linkedEnvironments: false });
+  const dependencies = Layer.mergeAll(
+    layer,
+    Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+    Layer.mock(WorktreeForks.WorktreeForks)({ enabled: false, bunShim: null }),
+    Layer.mock(HomeService.HomeService)({
+      available: true,
+      isHome: () => Effect.succeed(true),
+      updateWatches: (_homeThreadId, update) => Effect.sync(() => (home = update(home))),
+    }),
+  );
+  return Effect.gen(function* () {
+    const toolkit = yield* HomeToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(HomeHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const call = (action: "watch" | "unwatch") =>
+      toolkit
+        .handle("t3_thread_watch", { action, environmentId: studio, threadId: target })
+        .pipe(Stream.unwrap, Stream.runCollect);
+    const watch = { environmentId: studio, threadId: target, reason: "requested" };
+    expect((yield* call("watch")).at(-1)?.result).toMatchObject({ watches: [watch] });
+    expect(home.watches).toEqual([watch]);
+    expect((yield* call("unwatch")).at(-1)?.result).toMatchObject({ watches: [] });
+    expect(home.watches).toEqual([]);
+  }).pipe(Effect.provide(dependencies));
 });

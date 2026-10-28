@@ -63,7 +63,7 @@ export function useCloudBoxes(): void {
   const catalogReady = useAtomValue(environmentCatalog.catalogValueAtom).isReady;
   const markBoxes = useAtomCommand(environmentCatalog.markBoxes);
   const syncHostBoxes = useAtomCommand(environmentCatalog.syncHostBoxes);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Reloads the persisted lease store and marks its boxes once the catalog is ready; the store is external.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Reloads the persisted lease store and marks its boxes once the catalog is ready; the store is external.
   useEffect(() => {
     if (!catalogReady) return;
     // The lease store was made before the phone's provisioning file was read.
@@ -72,7 +72,7 @@ export function useCloudBoxes(): void {
       void markBoxes(provisionedSandboxLeases.boxes());
     });
   }, [catalogReady, markBoxes]);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Syncs each host's box listing into the catalog whenever the listing changes.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Syncs each host's box listing into the catalog whenever the listing changes.
   useEffect(() => {
     void syncHostBoxes(lists);
   }, [lists, syncHostBoxes]);
