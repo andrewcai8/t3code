@@ -42,10 +42,6 @@ export const BOX_USAGE_RETENTION_DAYS = 90;
 
 const isoAt = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
-/**
- * The host id usage sources carry. Cloud boxes are cloned from one template
- * and share a hostname, so the provisioner names each one.
- */
 /** The order `UsageAggregator` sorts a summary's buckets in. */
 const compareUsageBuckets = (a: UsageBucket, b: UsageBucket) =>
   a.day.localeCompare(b.day) ||

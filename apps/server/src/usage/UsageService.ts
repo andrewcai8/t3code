@@ -180,7 +180,8 @@ export const make = Effect.gen(function* () {
       Effect.provideService(Path.Path, path),
     );
   const hostIdPath = path.join(config.baseDir, "usage-host-id");
-  // A cloud box is named by the lease its host gave it, ahead of any operator override.
+  // Cloud boxes are cloned from one template and share a hostname and seeded home, so the
+  // provisioner's lease id names each one, ahead of any operator override.
   const explicitHostId =
     hostEnvironment["T3CODE_USAGE_HOST_ID"]?.trim() || hostEnvironment["T3CODE_HOST_ID"]?.trim();
   const hostId =
