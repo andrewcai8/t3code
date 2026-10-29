@@ -11,6 +11,7 @@ import { definition } from "../shared/definition.ts";
 
 import * as GitHubAppAccess from "./GitHubAppAccess.ts";
 import * as GitHubAppSignIn from "./GitHubAppSignIn.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubMediaFetch from "./gitHubMediaFetch.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import * as GitHubPullRequestProvider from "./GitHubPullRequestProvider.ts";
@@ -53,12 +54,22 @@ const makeSignIn = Effect.gen(function* () {
   } satisfies SourceControlSignIn;
 });
 
+const makeGitCredential = Effect.gen(function* () {
+  const credentials = yield* GitHubCredentials.GitHubCredentials;
+  return (host: string) =>
+    credentials.get(host).pipe(
+      Effect.map((credential) => credential.token),
+      Effect.orElseSucceed(() => null),
+    );
+});
+
 const makeInstance = Effect.all({
   sourceControl: GitHubSourceControlProvider.make,
   discovery: GitHubSourceControlProvider.makeDiscovery,
   pullRequests: GitHubPullRequestProvider.make,
   fetchMedia: GitHubMediaFetch.make,
   signIn: makeSignIn,
+  gitCredential: makeGitCredential,
 });
 
 export const driver = defineSourceControlDriver({

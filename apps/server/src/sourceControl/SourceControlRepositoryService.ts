@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
@@ -30,6 +31,9 @@ import {
   type GitCloneProgressLine,
 } from "../project/gitCloneProgress.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { gitConfigEnv } from "../vcs/VcsProcess.ts";
+import * as BuiltInDrivers from "./builtInDrivers.ts";
+import { sourceControlDefinitions } from "./sourceControlDefinitions.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -134,6 +138,18 @@ function redactUrlCredentials(text: string): string {
   return text.replace(URL_WITH_USERINFO, "$1");
 }
 
+/** A URL that already carries credentials is the user's own choice; leave it alone. */
+function credentialHostOf(cloneUrl: string): string | null {
+  try {
+    const url = new URL(cloneUrl);
+    return url.protocol === "https:" && url.username === "" && url.password === ""
+      ? url.host
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 // The remote already exists after push failure; advise fixing access and pushing.
 // Use fixed text and provider URLs because git stderr can expose credentials.
 function publishPushFailureDetail(input: {
@@ -194,6 +210,44 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const drivers = yield* BuiltInDrivers.SourceControlDrivers;
+  const platform = yield* HostProcess.Platform;
+  const hostEnvironment = yield* HostProcess.Environment;
+
+  /**
+   * Git has no credential helper on a server that only has T3's token, so hand it the token the
+   * host's API already uses. It travels as an `http.<url>.extraheader` in the environment only,
+   * where it stays out of argv, the URL, and the remote git writes into the clone's config.
+   */
+  const cloneAuthentication = Effect.fn("SourceControlRepositoryService.cloneAuthentication")(
+    function* (cloneUrl: string) {
+      const host = credentialHostOf(cloneUrl);
+      // The registry decides which host owns the URL, so a driver is never asked about a host another one claims.
+      const kind =
+        host === null ? undefined : sourceControlDefinitions.recognizeRemote(cloneUrl)?.kind;
+      const gitCredential = drivers.find((entry) => entry.driver.kind === kind)?.instance
+        .gitCredential;
+      const token =
+        host === null || gitCredential === undefined ? null : yield* gitCredential(host);
+      if (host === null || token === null) return null;
+      const secret = Redacted.value(token);
+      const basic = Buffer.from(`x-access-token:${secret}`).toString("base64");
+      return {
+        env: {
+          ...CLONE_ENV,
+          // Appends after any GIT_CONFIG_COUNT entries the server inherited instead of replacing them.
+          ...gitConfigEnv(
+            hostEnvironment,
+            `http.https://${host}/.extraheader`,
+            `Authorization: Basic ${basic}`,
+            platform,
+          ),
+        } satisfies NodeJS.ProcessEnv,
+        // Git does not echo request headers, but the tail becomes user-facing text.
+        scrub: (text: string) => text.replaceAll(basic, "***").replaceAll(secret, "***"),
+      };
+    },
+  );
 
   const ensureConcreteProvider = (input: {
     readonly operation: string;
@@ -327,6 +381,8 @@ export const make = Effect.gen(function* () {
     options?: SourceControlCloneOptions,
   ) {
     const onProgress = options?.onProgress;
+    const authentication = yield* cloneAuthentication(cloneUrl);
+    const scrub = authentication?.scrub ?? ((text: string) => text);
     // Git mixes progress and diagnostics on stderr; retain non-progress tail lines for failure details.
     const stderrTail: Array<string> = [];
     const onStderrLine = (line: string) => {
@@ -336,7 +392,7 @@ export const make = Effect.gen(function* () {
         const trimmed = line.trim();
         if (trimmed.length === 0 || trimmed.startsWith("Cloning into")) return;
         // Git echoes the remote in some failures; the tail becomes user-facing text.
-        stderrTail.push(redactUrlCredentials(trimmed));
+        stderrTail.push(scrub(redactUrlCredentials(trimmed)));
         if (stderrTail.length > 4) stderrTail.shift();
       });
     };
@@ -350,7 +406,7 @@ export const make = Effect.gen(function* () {
         maxOutputBytes: 256 * 1024,
         appendTruncationMarker: true,
         keepLineCallbacksAfterTruncation: true,
-        env: CLONE_ENV,
+        env: authentication?.env ?? CLONE_ENV,
         progress: { onStderrLine },
       })
       .pipe(

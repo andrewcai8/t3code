@@ -3,6 +3,7 @@ import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
@@ -15,9 +16,13 @@ import {
   type SourceControlCloneRepositoryInput,
 } from "@t3tools/contracts";
 
+import { definition as gitHubDefinition } from "@t3tools/source-control-github/shared/definition";
+import { fakeSourceControlDriverInstance } from "@t3tools/source-control-testing/fakeSourceControlDriver";
+
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import type * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
+import * as BuiltInDrivers from "./builtInDrivers.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
 
@@ -63,8 +68,20 @@ function layer(input: {
   readonly provider?: SourceControlProvider.SourceControlProvider["Service"];
   readonly git?: Partial<GitVcsDriver.GitVcsDriver["Service"]>;
   readonly fileSystem?: FileSystem.FileSystem;
+  readonly gitCredential?: (host: string) => Effect.Effect<Redacted.Redacted<string> | null>;
 }) {
   const layerService = SourceControlRepositoryService.layer.pipe(
+    Layer.provide(
+      Layer.succeed(BuiltInDrivers.SourceControlDrivers, [
+        {
+          driver: { kind: gitHubDefinition.kind, definition: gitHubDefinition },
+          instance: {
+            ...fakeSourceControlDriverInstance(gitHubDefinition.kind),
+            ...(input.gitCredential === undefined ? {} : { gitCredential: input.gitCredential }),
+          },
+        },
+      ]),
+    ),
     Layer.provide(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
         resolveLink: () => undefined,
@@ -323,6 +340,7 @@ function rejectingSsh(
 const cloneInTemporaryDirectory = (
   git: Partial<GitVcsDriver.GitVcsDriver["Service"]>,
   input: Omit<SourceControlCloneRepositoryInput, "destinationPath">,
+  gitCredential?: (host: string) => Effect.Effect<Redacted.Redacted<string> | null>,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -336,7 +354,11 @@ const cloneInTemporaryDirectory = (
         ...input,
         destinationPath: path.join(parent, "t3code"),
       });
-    }).pipe(Effect.provide(layer({ git }).pipe(Layer.orDie)));
+    }).pipe(
+      Effect.provide(
+        layer({ git, ...(gitCredential === undefined ? {} : { gitCredential }) }).pipe(Layer.orDie),
+      ),
+    );
   }).pipe(Effect.provide(NodeServices.layer));
 
 it.effect("retries a clone over HTTPS when the SSH login is refused", () =>
@@ -658,3 +680,112 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
     ),
   );
 });
+
+const TOKEN = "ghp_secret_token_value";
+const BASIC = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
+
+const cloneRecordingEnv = (
+  remoteUrl: string,
+  gitCredential: (host: string) => Effect.Effect<Redacted.Redacted<string> | null>,
+  stderr?: string,
+) => {
+  const calls: Array<GitVcsDriver.ExecuteGitInput> = [];
+  const git = {
+    execute: (input: GitVcsDriver.ExecuteGitInput) =>
+      Effect.gen(function* () {
+        calls.push(input);
+        if (stderr === undefined) return processOutput();
+        yield* input.progress?.onStderrLine?.(stderr) ?? Effect.void;
+        return yield* new GitCommandError({
+          operation: input.operation,
+          command: "git",
+          cwd: input.cwd,
+          detail: "Git command exited with a non-zero status.",
+        });
+      }),
+  } satisfies Partial<GitVcsDriver.GitVcsDriver["Service"]>;
+  return cloneInTemporaryDirectory(git, { remoteUrl }, gitCredential).pipe(
+    Effect.exit,
+    Effect.map((exit) => ({ calls, exit })),
+  );
+};
+
+const extraHeaderOf = (env: NodeJS.ProcessEnv | undefined) => {
+  const last = Number(env?.GIT_CONFIG_COUNT) - 1;
+  return Number.isInteger(last) && last >= 0
+    ? { key: env?.[`GIT_CONFIG_KEY_${last}`], value: env?.[`GIT_CONFIG_VALUE_${last}`] }
+    : null;
+};
+
+it.effect(
+  "clones a private GitHub repository with the server's GitHub token in git's env only",
+  () =>
+    Effect.gen(function* () {
+      const hosts: Array<string> = [];
+      const { calls } = yield* cloneRecordingEnv("https://github.com/octocat/t3code.git", (host) =>
+        Effect.sync(() => {
+          hosts.push(host);
+          return Redacted.make(TOKEN);
+        }),
+      );
+
+      assert.deepStrictEqual(hosts, ["github.com"]);
+      assert.strictEqual(calls.length, 1);
+      assert.deepStrictEqual(extraHeaderOf(calls[0]?.env), {
+        key: "http.https://github.com/.extraheader",
+        value: `Authorization: Basic ${BASIC}`,
+      });
+      assert.strictEqual(calls[0]?.env?.GIT_TERMINAL_PROMPT, "0");
+      assert.isFalse(JSON.stringify(calls[0]?.args).includes(TOKEN));
+      assert.isFalse(JSON.stringify(calls[0]?.args).includes(BASIC));
+    }),
+);
+
+it.effect("clones exactly as before when the server has no GitHub token", () =>
+  Effect.gen(function* () {
+    const { calls } = yield* cloneRecordingEnv("https://github.com/octocat/t3code.git", () =>
+      Effect.succeed(null),
+    );
+
+    assert.deepStrictEqual(calls[0]?.env, {
+      GIT_PROGRESS_DELAY: "0",
+      GIT_TERMINAL_PROMPT: "0",
+      LC_ALL: "C",
+    });
+  }),
+);
+
+it.effect.each([
+  "https://gitlab.com/octocat/t3code.git",
+  "https://example.com/octocat/t3code.git",
+  "git@github.com:octocat/t3code.git",
+  "https://user:tok@github.com/octocat/t3code.git",
+])("does not offer the GitHub token for %s", (remoteUrl) =>
+  Effect.gen(function* () {
+    let asked = false;
+    const { calls } = yield* cloneRecordingEnv(remoteUrl, () =>
+      Effect.sync(() => {
+        asked = true;
+        return Redacted.make(TOKEN);
+      }),
+    );
+
+    assert.isFalse(asked);
+    assert.isUndefined(calls[0]?.env?.GIT_CONFIG_COUNT);
+    assert.isFalse(JSON.stringify(calls).includes(BASIC));
+  }),
+);
+
+it.effect("keeps the GitHub token out of a failed clone's error text", () =>
+  Effect.gen(function* () {
+    const { exit } = yield* cloneRecordingEnv(
+      "https://github.com/octocat/t3code.git",
+      () => Effect.succeed(Redacted.make(TOKEN)),
+      `fatal: unable to access: Authorization: Basic ${BASIC} ${TOKEN}`,
+    );
+
+    assert.isTrue(exit._tag === "Failure");
+    assert.isFalse(JSON.stringify(exit).includes(TOKEN));
+    assert.isFalse(JSON.stringify(exit).includes(BASIC));
+  }),
+);
