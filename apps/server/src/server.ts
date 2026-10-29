@@ -19,7 +19,6 @@ import {
   environmentControlBodyLimitLayer,
   environmentControlHttpApiLayer,
 } from "./environmentControl/http.ts";
-import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -38,6 +37,7 @@ import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
 import { withUntracedRequests } from "./http.ts";
 import * as ServerHttp from "./http.ts";
+import * as NodeHttpServer from "./nodeHttpServer.ts";
 import {
   guardHttpResponseWriteErrors,
   rejectRequestsUntilServing,
