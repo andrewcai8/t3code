@@ -128,7 +128,9 @@ export function listThreadPage(
     currentThreadId: filtered.some((thread) => thread.id === actor.threadId)
       ? actor.threadId
       : null,
-    threads: page.map((shell) => listItemFromShell(environmentId, shell, nowMs)),
+    threads: page.map((shell) =>
+      listItemFromShell({ environmentId, client: undefined }, shell, nowMs),
+    ),
     nextCursor: next < filtered.length ? next : null,
     total: filtered.length,
   };
@@ -264,7 +266,13 @@ const make = Effect.gen(function* () {
       const target = yield* threads
         .getThreadRecords(input.threadId, ["runs", "runtimeRequests", "contextTransfers"])
         .pipe(Effect.mapError(threadManagementFailure));
-      return (yield* readThreadPage(environmentId, threads, target, shell, input)).result;
+      return (yield* readThreadPage(
+        { environmentId, client: undefined },
+        threads,
+        target,
+        shell,
+        input,
+      )).result;
     }),
 
     "threads.launch": Effect.fn("FleetService.threads.launch")(function* (input, actor) {

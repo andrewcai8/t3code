@@ -32,6 +32,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { routeHome, runAsHome } from "./homeRouting.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as HomeHandlers from "./toolkits/home/handlers.ts";
@@ -181,6 +182,7 @@ it.effect("hands a cloud chat's launch elsewhere to its host, which picks the th
     ServerSettings.layerTest(),
     NodeCrypto.layer,
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+    Layer.mock(ProviderRegistry.ProviderRegistry)({}),
     Layer.mock(Project.ProjectService)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     Layer.mock(GitVcsDriver.GitVcsDriver)({}),

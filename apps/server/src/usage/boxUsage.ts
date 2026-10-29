@@ -6,7 +6,6 @@
  *
  * @module boxUsage
  */
-import * as NodeOS from "node:os";
 
 import {
   ForwardCompatibleArray,
@@ -21,7 +20,6 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import { usageSourcePath } from "@t3tools/shared/usageMerge";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -48,9 +46,6 @@ const isoAt = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
  * The host id usage sources carry. Cloud boxes are cloned from one template
  * and share a hostname, so the provisioner names each one.
  */
-export const usageHostId = (environment: { readonly T3CODE_USAGE_HOST_ID?: string | undefined }) =>
-  environment.T3CODE_USAGE_HOST_ID?.trim() || NodeOS.hostname();
-
 /** The order `UsageAggregator` sorts a summary's buckets in. */
 const compareUsageBuckets = (a: UsageBucket, b: UsageBucket) =>
   a.day.localeCompare(b.day) ||
@@ -498,12 +493,12 @@ export const makeBoxUsageReads = Effect.fn("makeBoxUsageReads")(function* (
     input: UsageSummaryInput,
     maxHourlyWindowMs?: number,
   ) => Effect.Effect<UsageSummary, UsageReadError>,
+  hostId: string,
 ) {
   // Absent where the service is built without storage, as its unit suites do.
   const boxUsage = yield* Effect.serviceOption(BoxUsageStore);
   const config = yield* ServerConfig.ServerConfig;
   const path = yield* Path.Path;
-  const hostId = usageHostId(yield* HostProcess.Environment);
 
   const readSummary = Effect.fn("UsageService.readSummaryWithBoxUsage")(function* (
     input: UsageSummaryInput,

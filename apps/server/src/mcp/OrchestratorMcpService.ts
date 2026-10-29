@@ -1,6 +1,5 @@
 import {
   CommandId,
-  type EnvironmentId,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -109,6 +108,7 @@ import {
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
+  threadLinkFor,
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import {
@@ -805,8 +805,11 @@ function threadPullRequests(
   }));
 }
 
+/** What a thread link needs from the caller: Home's fleet reads have no MCP client. */
+type ThreadLinkScope = Pick<McpInvocationScope, "environmentId" | "client">;
+
 export function listItemFromShell(
-  environmentId: EnvironmentId,
+  scope: ThreadLinkScope,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
 ): OrchestratorMcpThreadListItem {
@@ -814,7 +817,7 @@ export function listItemFromShell(
     threadId: shell.id,
     projectId: shell.projectId,
     title: shell.title,
-    link: formatThreadLink({ environmentId, threadId: shell.id }),
+    link: threadLinkFor(scope, shell.id),
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
     status: shell.activityRunStatus ?? shell.status,
@@ -836,7 +839,7 @@ export function listItemFromShell(
 }
 
 function threadDetail(
-  environmentId: EnvironmentId,
+  scope: ThreadLinkScope,
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "runtimeRequests">,
   itemCount: number,
   shell: OrchestrationV2ThreadShell,
@@ -848,7 +851,7 @@ function threadDetail(
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
-    link: formatThreadLink({ environmentId, threadId: projection.thread.id }),
+    link: threadLinkFor(scope, projection.thread.id),
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
     status: active?.status ?? latest?.status ?? "idle",
@@ -1020,7 +1023,7 @@ function timelineItem(input: {
  * acknowledgement on top.
  */
 export const readThreadPage = Effect.fn("OrchestratorMcp.readThreadPage")(function* (
-  environmentId: EnvironmentId,
+  scope: ThreadLinkScope,
   threadManagement: ThreadManagementService.ThreadManagementService["Service"],
   target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "runtimeRequests">,
   shell: OrchestrationV2ThreadShell,
@@ -1058,7 +1061,7 @@ export const readThreadPage = Effect.fn("OrchestratorMcp.readThreadPage")(functi
   );
   const messagesByThreadId = new Map(sourceMessages);
   const result = {
-    thread: threadDetail(environmentId, target, timeline.totalItems, shell, nowMs),
+    thread: threadDetail(scope, target, timeline.totalItems, shell, nowMs),
     recentRuns: target.runs
       .toSorted((left, right) => right.ordinal - left.ordinal)
       .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
@@ -2888,20 +2891,14 @@ const make = Effect.gen(function* () {
       return {
         projectId,
         currentThreadId: parent?.thread.id ?? null,
-        threads: page.map((shell) => listItemFromShell(scope.environmentId, shell, nowMs)),
+        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs)),
         nextCursor,
         total: filtered.length,
       } satisfies OrchestratorMcpThreadListResult;
     }),
     readThread: Effect.fn("OrchestratorMcpService.readThread")(function* (scope, input) {
       const { parent, target, shell } = yield* loadReadableThread(scope, input.threadId);
-      const { result, page } = yield* readThreadPage(
-        scope.environmentId,
-        threadManagement,
-        target,
-        shell,
-        input,
-      );
+      const { result, page } = yield* readThreadPage(scope, threadManagement, target, shell, input);
       const maxChars = input.maxCharsPerItem ?? DEFAULT_THREAD_ITEM_MAX_CHARS;
       const returnedRunIds = new Set(
         page.filter((row) => row.sourceThreadId === target.thread.id).map((row) => row.item.runId),
@@ -2989,7 +2986,7 @@ const make = Effect.gen(function* () {
         );
       return {
         threadId: input.threadId,
-        link: formatThreadLink({ environmentId: scope.environmentId, threadId: input.threadId }),
+        link: threadLinkFor(scope, input.threadId),
         messageId,
         runId: result.run.id,
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),

@@ -251,6 +251,7 @@ function isQueuedMessagePayloadCurrent(
 export async function completeQueuedMessageDelivery(
   queuedMessage: QueuedThreadMessage,
   deliveryRevision: number,
+  sequence: number | undefined,
 ): Promise<"removed" | "edited" | "failed"> {
   clearThreadComposerError(
     scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId),
@@ -267,7 +268,9 @@ export async function completeQueuedMessageDelivery(
     if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
       return "edited";
     }
-    retainAcknowledgedThreadMessage(queuedMessage);
+    retainAcknowledgedThreadMessage(
+      sequence === undefined ? queuedMessage : { ...queuedMessage, sequence },
+    );
     const removed = await removeThreadOutboxMessage(
       queuedMessage,
       deliveryRevision,
@@ -617,6 +620,12 @@ const settledCreationOutcomeKeysAtom = Atom.make((get): ReadonlyArray<string> =>
   );
 }).pipe(Atom.withLabel("mobile:thread-outbox:settled-creation-outcomes"));
 
+function deliveredSequence(
+  result: AtomCommandResult<{ readonly sequence?: number }, unknown>,
+): number | undefined {
+  return AsyncResult.isSuccess(result) ? result.value.sequence : undefined;
+}
+
 const runDeliveryCommand = <W, A, E>(
   command: AtomCommand<W, A, E>,
   input: W,
@@ -897,7 +906,11 @@ export function createThreadOutboxDelivery(): {
     }
     acknowledgedExistingThreadMessageIds.add(persistedMessage.messageId);
     const delivered =
-      (await completeQueuedMessageDelivery(persistedMessage, deliveryRevision)) === "removed";
+      (await completeQueuedMessageDelivery(
+        persistedMessage,
+        deliveryRevision,
+        deliveredSequence(deliveryResult),
+      )) === "removed";
     if (delivered) {
       acknowledgedExistingThreadMessageIds.delete(persistedMessage.messageId);
     }
@@ -1054,7 +1067,11 @@ export function createThreadOutboxDelivery(): {
     }
     recordPendingThreadCreationOutcome({ kind: "delivered", message: persistedMessage });
     claimFirstTurnCloudBox(queuedMessage);
-    const outcome = await completeQueuedMessageDelivery(persistedMessage, deliveryRevision);
+    const outcome = await completeQueuedMessageDelivery(
+      persistedMessage,
+      deliveryRevision,
+      deliveredSequence(deliveryResult),
+    );
     if (outcome === "edited") {
       if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
         return true;
