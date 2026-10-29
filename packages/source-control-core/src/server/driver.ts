@@ -7,6 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import type * as Redacted from "effect/Redacted";
 import type * as FileSystem from "effect/FileSystem";
 import type { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
@@ -63,6 +64,12 @@ export interface SourceControlDriverInstance {
     Scope.Scope
   >;
   readonly signIn?: SourceControlSignIn;
+  /**
+   * The token git presents over HTTPS to `host` (with its port, if any), read from the sources
+   * the host's API uses. Null when there is none. It never fails: a clone that finds no token
+   * still runs, as git alone would.
+   */
+  readonly gitCredential?: (host: string) => Effect.Effect<Redacted.Redacted<string> | null>;
 }
 
 /** What the server gives every driver. A driver builds anything else it needs itself. */
