@@ -259,6 +259,55 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(layer())),
 );
 
+const shippedEnvDuringPrepare = (
+  fake: ReturnType<typeof makeFakeSandboxes>,
+  workDir: string,
+  seen: Array<string | null>,
+) =>
+  fake.onExec(isCommand("make prepare"), {
+    run: () => {
+      const path = NodePath.join(workDir, ".env");
+      seen.push(NodeFS.existsSync(path) ? NodeFS.readFileSync(path, "utf8") : null);
+      return 0;
+    },
+  });
+
+const linkedWorktree = ({ checkout }: ReturnType<typeof setup>) => {
+  const linked = NodePath.join(tempDir("linked"), "feature");
+  git(checkout.root, "worktree", "add", "-q", "-b", "feature", linked);
+  return { ...checkout, root: linked, cwd: linked, branch: "feature" } satisfies Checkout;
+};
+
+it.effect("a build from a linked worktree ships the ignored files only the main checkout has", () =>
+  Effect.gen(function* () {
+    const fixture = setup();
+    const { host, workDir, fake } = fixture;
+    const seen: Array<string | null> = [];
+    shippedEnvDuringPrepare(fake, workDir, seen);
+    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+
+    yield* bases.current(linkedWorktree(fixture), true);
+
+    expect(seen).toEqual(["TOKEN=1\n"]);
+  }).pipe(Effect.scoped, Effect.provide(layer())),
+);
+
+it.effect("a linked worktree's own copy of a ship file wins over the main checkout's", () =>
+  Effect.gen(function* () {
+    const fixture = setup();
+    const { host, workDir, fake } = fixture;
+    const linked = linkedWorktree(fixture);
+    NodeFS.writeFileSync(NodePath.join(linked.root, ".env"), "TOKEN=linked\n");
+    const seen: Array<string | null> = [];
+    shippedEnvDuringPrepare(fake, workDir, seen);
+    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+
+    yield* bases.current(linked, true);
+
+    expect(seen).toEqual(["TOKEN=linked\n"]);
+  }).pipe(Effect.scoped, Effect.provide(layer())),
+);
+
 it.effect("a caller that stops waiting leaves the build running", () =>
   Effect.gen(function* () {
     const { host, checkout, fake } = setup();
