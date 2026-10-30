@@ -305,14 +305,36 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
       ]);
       parts.push("base.bundle");
     }
-    const shipped = repository.ship.filter((path) => NodeFS.existsSync(NodePath.join(root, path)));
-    yield* onHost(
-      "pack",
-      root,
-      "tar",
-      ["-czf", NodePath.join(dir, "ship.tgz"), "--null", "-T", "-"],
-      shipped.map((path) => `${path}\0`).join(""),
-    );
+    // Gitignored ship paths such as .env usually live only in the main checkout, and a refresh can
+    // be triggered from any linked worktree of the repository.
+    const commonDir = yield* runner
+      .run({
+        command: "git",
+        args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd: root,
+      })
+      .pipe(Effect.option);
+    const mainRoot =
+      commonDir._tag === "Some" &&
+      Number(commonDir.value.code) === 0 &&
+      NodePath.basename(commonDir.value.stdout.trim()) === ".git"
+        ? NodePath.dirname(commonDir.value.stdout.trim())
+        : null;
+    const packFrom = (from: string, paths: ReadonlyArray<string>) =>
+      paths.length === 0 ? [] : ["-C", from, ...paths];
+    const present = (from: string, path: string) => NodeFS.existsSync(NodePath.join(from, path));
+    const shipped = repository.ship.filter((path) => present(root, path));
+    const fromMain =
+      mainRoot === null || mainRoot === root
+        ? []
+        : repository.ship.filter((path) => !present(root, path) && present(mainRoot, path));
+    const members = [...packFrom(root, shipped), ...packFrom(mainRoot ?? root, fromMain)];
+    yield* onHost("pack", root, "tar", [
+      "-czf",
+      NodePath.join(dir, "ship.tgz"),
+      // tar refuses to write an archive of nothing, and a repository may have nothing to ship.
+      ...(members.length === 0 ? ["-T", "/dev/null"] : members),
+    ]);
     yield* onHost("pack", dir, "tar", ["-cf", "state.tar", ...parts]);
 
     const job = `base-${repository.repository.replace("/", "__")}`;
