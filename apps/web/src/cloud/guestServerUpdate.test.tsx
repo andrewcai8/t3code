@@ -39,6 +39,7 @@ vi.mock("~/state/use-atom-command", () => ({
 // The guest's own session grants nothing: a manager upgrade must not need it.
 const unauthorizedSession = AsyncResult.success({ authenticated: false });
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => unauthorizedSession }));
+vi.mock("~/state/entities", () => ({ useServerConfigs: () => new Map() }));
 vi.mock("~/state/session", () => ({
   environmentSession: { sessionStateAtom: () => "session" },
 }));

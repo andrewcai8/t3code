@@ -106,6 +106,7 @@ const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [70, "PeerLinks"],
   [71, "PeerLinkFence"],
   [72, "WaitingLinkRequestIndex"],
+  [73, "ActiveTurnItemIndexes"],
 ];
 /** Upstream migrations newer than any fork-era ledger, which a moved ledger still runs. */
 const upstreamAfterForkEra = expectedUpstreamAbove51.filter(([id]) => id > 56);

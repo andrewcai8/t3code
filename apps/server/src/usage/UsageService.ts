@@ -40,7 +40,7 @@ import type {
   UsageRecord,
 } from "@t3tools/provider-core/server/usage";
 import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
-import { BoxUsageStore, makeBoxUsageReads, usageHostId } from "./boxUsage.ts";
+import { BoxUsageStore, makeBoxUsageReads } from "./boxUsage.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -156,6 +156,7 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const hostEnvironment = yield* HostProcess.Environment;
+  const hostname = yield* HostProcess.Hostname;
   const readerContext = yield* Effect.context<BuiltInUsageReadersEnv>();
 
   const fileCache: ScanCache = new Map();
@@ -178,6 +179,40 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
+  const hostIdPath = path.join(config.baseDir, "usage-host-id");
+  // Cloud boxes are cloned from one template and share a hostname and seeded home, so the
+  // provisioner's lease id names each one, ahead of any operator override.
+  const explicitHostId =
+    hostEnvironment["T3CODE_USAGE_HOST_ID"]?.trim() || hostEnvironment["T3CODE_HOST_ID"]?.trim();
+  const hostId =
+    explicitHostId ||
+    (yield* fileSystem.readFileString(hostIdPath).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              yield* fileSystem.makeDirectory(config.baseDir, { recursive: true });
+              const tempDirectory = yield* fileSystem.makeTempDirectoryScoped({
+                directory: config.baseDir,
+                prefix: "usage-host-id.",
+              });
+              const tempFile = path.join(tempDirectory, "identity");
+              yield* fileSystem.writeFileString(tempFile, `${hostname}\n`);
+              // Publish complete contents without replacing another initializer's identity.
+              yield* fileSystem.link(tempFile, hostIdPath).pipe(
+                Effect.catchIf(
+                  (error) => error.reason._tag === "AlreadyExists",
+                  () => Effect.void,
+                ),
+              );
+              return yield* fileSystem.readFileString(hostIdPath);
+            }),
+          ),
+      ),
+      Effect.map((value) => value.trim() || hostname),
+      Effect.orElseSucceed(() => hostname),
+    ));
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesLastFailedAtMs: number | null = null;
@@ -666,7 +701,6 @@ export const make = Effect.gen(function* () {
     const startedAtMs = yield* Clock.currentTimeMillis;
     yield* ensureScanCacheLoaded;
 
-    const hostId = usageHostId(hostEnvironment);
     const windowStart = DateTime.make(`${input.sinceDay}T00:00:00Z`);
     if (Option.isNone(windowStart)) {
       return yield* new UsageReadError({
@@ -905,7 +939,11 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  return { ...(yield* makeBoxUsageReads(readSummary)), refreshRates, awaitPersisted } as const;
+  return {
+    ...(yield* makeBoxUsageReads(readSummary, hostId)),
+    refreshRates,
+    awaitPersisted,
+  } as const;
 });
 
 export const layer = Layer.effect(UsageService, make).pipe(Layer.provide(BoxUsageStore.layer));
