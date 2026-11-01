@@ -19,6 +19,7 @@ import { MuseUsageHome } from "@t3tools/provider-muse/server";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -36,6 +37,9 @@ const WINDOW: UsageSummaryInput = {
   sinceDay: UsageDay.make("2026-07-31"),
   untilDay: UsageDay.make("2026-08-02"),
 };
+
+// Saved usage is pruned after the retention window, so "now" stays near the records.
+const SAVED_USAGE_NOW = Date.parse("2026-08-15T00:00:00Z");
 
 const OUTPUT_BY_ACCOUNT: Record<string, number> = { user_a: 3, user_b: 5 };
 
@@ -150,8 +154,9 @@ const readSummary = (
   );
 
 describe("UsageService with several Cursor logins", () => {
-  it.live("reads every Cursor instance's login and counts each account once", () =>
+  it.effect("reads every Cursor instance's login and counts each account once", () =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(SAVED_USAGE_NOW);
       const home = yield* makeHome;
       // The host's default login and two instance logins share user_a.
       for (const [config, account] of [
@@ -206,8 +211,9 @@ describe("UsageService with several Cursor logins", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.live("keeps a removed login's account history", () =>
+  it.effect("keeps a removed login's account history", () =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(SAVED_USAGE_NOW);
       const home = yield* makeHome;
       yield* writeLogin(home, "config-b", "user_b");
       yield* readSummary(home, "usage-service-cursor-removed", {
