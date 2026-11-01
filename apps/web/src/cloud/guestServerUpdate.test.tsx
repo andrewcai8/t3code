@@ -43,7 +43,21 @@ vi.mock("~/state/entities", () => ({ useServerConfigs: () => new Map() }));
 vi.mock("~/state/session", () => ({
   environmentSession: { sessionStateAtom: () => "session" },
 }));
-vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: { get: () => unauthorizedSession } }));
+vi.mock("~/state/presentation", async (importOriginal) => {
+  const original = await importOriginal<typeof import("~/state/presentation")>();
+  return {
+    ...original,
+    environmentPresentations: {
+      ...original.environmentPresentations,
+      serverConfigsAtom: "configs",
+    },
+  };
+});
+vi.mock("~/rpc/atomRegistry", () => ({
+  appAtomRegistry: {
+    get: (atom: unknown) => (atom === "configs" ? new Map() : unauthorizedSession),
+  },
+}));
 vi.mock("~/cloud/provisionedSandboxLeases", () => ({
   provisionedSandboxOwnedByEnvironment: () => testState.lease,
 }));
