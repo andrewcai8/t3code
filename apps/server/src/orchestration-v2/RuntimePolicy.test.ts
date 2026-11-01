@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  type ManagedPolicySummary,
   type ModelSelection,
   type OrchestrationV2AppThread,
   ProjectId,
@@ -14,8 +15,8 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
-import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
@@ -74,9 +75,12 @@ const providerInstanceFor = (instanceId: ProviderInstanceId) =>
     },
   }) as ProviderInstance;
 
-const makeLayerTest = (autoApproveFullAccessPrompts: boolean) =>
+const layerWith = (
+  settings: { readonly autoApproveFullAccessPrompts?: boolean },
+  policy?: ManagedPolicySummary,
+) =>
   RuntimePolicy.layerFromProjectStore.pipe(
-    Layer.provide(ServerSettings.layerTest({ autoApproveFullAccessPrompts })),
+    Layer.provide(ServerSettings.layerTest(settings, policy)),
     Layer.provide(
       Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
         getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
@@ -99,6 +103,8 @@ const makeLayerTest = (autoApproveFullAccessPrompts: boolean) =>
             faviconPath: null,
             projectIcon: null,
             scripts: [],
+            pinnedAt: null,
+            archivedAt: null,
             createdAt: "2026-06-21T00:00:00.000Z",
             updatedAt: "2026-06-21T00:00:00.000Z",
             deletedAt: null,
@@ -107,7 +113,7 @@ const makeLayerTest = (autoApproveFullAccessPrompts: boolean) =>
     ),
   );
 
-it.layer(makeLayerTest(false))("RuntimePolicyV2", (it) => {
+it.layer(layerWith({ autoApproveFullAccessPrompts: false }))("RuntimePolicyV2", (it) => {
   it.effect("runs a mode the provider does not offer in Supervised", () =>
     Effect.gen(function* () {
       const policy = yield* RuntimePolicy.RuntimePolicyV2;
@@ -140,16 +146,52 @@ it.layer(makeLayerTest(false))("RuntimePolicyV2", (it) => {
   );
 });
 
-it.layer(makeLayerTest(true))("RuntimePolicyV2 with auto-approval enabled", (it) => {
-  it.effect("carries the server setting into the resolved policy", () =>
+it.layer(layerWith({ autoApproveFullAccessPrompts: true }))(
+  "RuntimePolicyV2 with auto-approval enabled",
+  (it) => {
+    it.effect("carries the server setting into the resolved policy", () =>
+      Effect.gen(function* () {
+        const policy = yield* RuntimePolicy.RuntimePolicyV2;
+        const now = yield* DateTime.now;
+        const resolved = yield* policy.resolve({
+          thread: makeThread({ now, worktreePath: null }),
+          modelSelection,
+        });
+        assert.equal(resolved.autoApproveFullAccessPrompts, true);
+      }),
+    );
+  },
+);
+
+it.layer(
+  layerWith(
+    {},
+    {
+      organization: "Example Corp",
+      lockedSettings: [],
+      limits: { maxRuntimeMode: "auto-accept-edits" },
+    },
+  ),
+)("RuntimePolicyV2 under a runtime mode ceiling", (it) => {
+  it.effect("refuses to start a turn above the ceiling, such as one resumed after a restart", () =>
     Effect.gen(function* () {
       const policy = yield* RuntimePolicy.RuntimePolicyV2;
       const now = yield* DateTime.now;
-      const resolved = yield* policy.resolve({
-        thread: makeThread({ now, worktreePath: null }),
-        modelSelection,
-      });
-      assert.equal(resolved.autoApproveFullAccessPrompts, true);
+      const resolve = (runtimeMode: RuntimeMode) =>
+        policy.resolve({
+          thread: makeThread({ now, worktreePath: "/work", runtimeMode }),
+          modelSelection,
+        });
+
+      const refused = yield* resolve("full-access").pipe(Effect.flip);
+      assert.equal(refused._tag, "RuntimePolicyAboveCeilingError");
+      assert.equal(
+        refused.message,
+        "Example Corp limits threads to Auto-accept edits. Switch this thread's mode to continue.",
+      );
+      const allowed = yield* resolve("auto-accept-edits");
+      assert.equal(allowed.runtimeMode, "auto-accept-edits");
+      assert.equal(allowed.maxRuntimeMode, "auto-accept-edits");
     }),
   );
 });

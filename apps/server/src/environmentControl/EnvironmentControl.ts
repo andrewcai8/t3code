@@ -2972,7 +2972,9 @@ export const layer = Layer.effect(
       }
       const names: ReadonlyArray<string> = credentialVariables[profile.kind];
       const [first, ...rest] = profile.environment.flatMap(({ name, value }) =>
-        names.includes(name) && value.trim() ? [{ name, value: value.trim() }] : [],
+        names.includes(name) && typeof value === "string" && value.trim()
+          ? [{ name, value: value.trim() }]
+          : [],
       );
       if (!first) throw new Error("The account has no credential to hand a cloud machine.");
       return { ...named, credential: { kind: "environment", variables: [first, ...rest] } };

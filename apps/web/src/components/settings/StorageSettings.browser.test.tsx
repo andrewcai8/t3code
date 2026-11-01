@@ -1,4 +1,4 @@
-import { act, render } from "../../../test/render";
+import { act, fakeTimers, render } from "../../../test/render";
 import { RegistryProvider } from "@effect/atom-react";
 import { DEFAULT_SERVER_SETTINGS, type StorageCleanupReport } from "@t3tools/contracts";
 import { type ReactNode } from "react";
@@ -6,6 +6,7 @@ import { expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   settings: {} as typeof DEFAULT_SERVER_SETTINGS,
+  targets: [] as Array<{ environmentId: string; settings: typeof DEFAULT_SERVER_SETTINGS }>,
   run: vi.fn(),
   report: null as StorageCleanupReport | null,
 }));
@@ -34,11 +35,11 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
 vi.mock(import("./SettingsScopeContext"), async (original) => ({
   ...(await original()),
   useSettingsScope: (() => {
-    const environment = {
-      environmentId: "env",
-      label: "Build workstation",
+    const environments = state.targets.map(({ environmentId, settings }) => ({
+      environmentId,
+      label: environmentId,
       serverConfig: {
-        settings: state.settings,
+        settings,
         environment: {
           capabilities: {
             storageCleanup: true,
@@ -48,12 +49,12 @@ vi.mock(import("./SettingsScopeContext"), async (original) => ({
           },
         },
       },
-    };
+    }));
     return {
-      scope: { kind: "environment" },
-      environments: [environment],
-      connectedEnvironments: [environment],
-      targets: [],
+      scope: { kind: "all" },
+      environments,
+      connectedEnvironments: environments,
+      targets: state.targets.map((entry) => ({ ...entry, sources: {} })),
       target: null,
     };
   }) as never,
@@ -68,10 +69,17 @@ vi.mock(import("./useScopedSettings"), async (original) => ({
 vi.mock(import("./settingsLayout"), async (original) => ({
   ...(await original()),
   SettingsPageContainer: (({ children }: { children: ReactNode }) => children) as never,
-  SettingsRow: ({ title, description, control, children }) => (
+  SettingsRow: ({ title, description, status, control, children }) => (
     <div>
       <h3>{title}</h3>
       {description}
+      {status && (
+        <div
+          data-testid={`${title === "Delete old browser artifacts" ? "artifact" : "logs"}-retention-status`}
+        >
+          {status}
+        </div>
+      )}
       {control}
       {children}
     </div>
@@ -102,8 +110,31 @@ function setup() {
     },
     projectSettingsOverrides: {},
   };
+  state.targets = ["env-a", "env-b"].map((environmentId) => ({
+    environmentId,
+    settings: state.settings,
+  }));
   state.report = null;
   state.run.mockReset();
+}
+
+function setRetentionValues(
+  artifactDays: ReadonlyArray<number | null>,
+  logDays: ReadonlyArray<number | null> = artifactDays.map(() => null),
+  environmentIds: readonly string[] = ["env-a", "env-b"],
+) {
+  state.targets = artifactDays.map((browserArtifactsAfterDays, index) => ({
+    environmentId: environmentIds[index]!,
+    settings: {
+      ...state.settings,
+      storageCleanup: {
+        ...state.settings.storageCleanup,
+        browserArtifactsAfterDays,
+        logsAfterDays: logDays[index]!,
+      },
+    },
+  }));
+  state.settings = state.targets[0]?.settings ?? state.settings;
 }
 
 const panel = () => (
@@ -132,6 +163,7 @@ it("treats the unused worktree rule as a cleanup rule", async () => {
     ...state.settings,
     storageCleanup: { ...state.settings.storageCleanup, orphanWorktreeAfterDays: 14 },
   };
+  state.targets = state.targets.map((entry) => ({ ...entry, settings: state.settings }));
   state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
   await using screen = await render(
     <RegistryProvider>
@@ -144,5 +176,87 @@ it("treats the unused worktree rule as a cleanup rule", async () => {
   expect(screen.container.textContent).toContain("Delete unused worktrees");
   expect(button.disabled).toBe(false);
   await act(async () => button.click());
-  expect(state.run).toHaveBeenCalledOnce();
+  expect(state.run).toHaveBeenCalledTimes(state.targets.length);
+});
+
+it("settles mixed retention statuses independently across selected machines", async () => {
+  setup();
+  using _timers = fakeTimers();
+  await using screen = await render(panel());
+  const advance = (ms: number) => act(() => vi.advanceTimersByTime(ms));
+
+  await advance(300);
+  setRetentionValues([8, null], [8, null]);
+  await screen.rerender(panel());
+  await advance(125);
+  await expect.element(screen.getByTestId("artifact-retention-status")).not.toBeInTheDocument();
+  await expect.element(screen.getByTestId("logs-retention-status")).not.toBeInTheDocument();
+  setRetentionValues([null, null], [8, null]);
+  await screen.rerender(panel());
+  await advance(8);
+  await expect.element(screen.getByTestId("logs-retention-status")).not.toBeInTheDocument();
+  await advance(117);
+  await expect.element(screen.getByTestId("logs-retention-status")).not.toBeInTheDocument();
+  setRetentionValues([null, null]);
+  await screen.rerender(panel());
+  await advance(300);
+  await expect.element(screen.getByTestId("artifact-retention-status")).not.toBeInTheDocument();
+  await expect.element(screen.getByTestId("logs-retention-status")).not.toBeInTheDocument();
+
+  setRetentionValues([8, null]);
+  await screen.rerender(panel());
+  await advance(300);
+  await expect
+    .element(screen.getByTestId("artifact-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+  await expect.element(screen.getByTestId("logs-retention-status")).not.toBeInTheDocument();
+
+  setRetentionValues([null, null]);
+  await screen.rerender(panel());
+  await advance(75);
+  await expect
+    .element(screen.getByTestId("artifact-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+  setRetentionValues([8, null]);
+  await screen.rerender(panel());
+  await advance(133);
+  await expect
+    .element(screen.getByTestId("artifact-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+  setRetentionValues([null, null]);
+  await screen.rerender(panel());
+  await advance(133);
+  await expect
+    .element(screen.getByTestId("artifact-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+  await advance(117);
+  await expect
+    .element(screen.getByTestId("artifact-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+  setRetentionValues([8, null]);
+  await screen.rerender(panel());
+  await advance(300);
+  await expect
+    .element(screen.getByTestId("artifact-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+
+  setRetentionValues([8], [null], ["env-c"]);
+  await screen.rerender(panel());
+  await expect.element(screen.getByTestId("artifact-retention-status")).not.toBeInTheDocument();
+
+  setRetentionValues([null, null], [null, null], ["env-c", "env-d"]);
+  await screen.rerender(panel());
+  await expect.element(screen.getByTestId("artifact-retention-status")).not.toBeInTheDocument();
+
+  setRetentionValues([null, null], [8, null]);
+  await screen.rerender(panel());
+  await advance(300);
+  await expect.element(screen.getByTestId("artifact-retention-status")).not.toBeInTheDocument();
+  await expect
+    .element(screen.getByTestId("logs-retention-status"))
+    .toHaveTextContent("Mixed across selected machines");
+  setRetentionValues([null, null]);
+  await screen.rerender(panel());
+  await advance(300);
+  await expect.element(screen.getByTestId("logs-retention-status")).not.toBeInTheDocument();
 });

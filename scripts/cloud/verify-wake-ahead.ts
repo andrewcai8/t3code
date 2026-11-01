@@ -34,6 +34,7 @@ import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -126,7 +127,7 @@ const withRpc = Effect.fn("withRpc")(function* <A, E, R>(
       Effect.flatMap(decodeTicket),
       Effect.map(({ ticket }) => {
         const url = new URL(wsUrl(httpBaseUrl));
-        url.searchParams.set("wsTicket", ticket);
+        url.searchParams.set("wsTicket", Redacted.value(ticket));
         return url.toString();
       }),
       Effect.timeout("1 minute"),

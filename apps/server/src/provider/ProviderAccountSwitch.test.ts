@@ -18,6 +18,7 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -48,6 +49,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ServerSettingsModule from "../serverSettings.ts";
 import * as ProviderAccountSwitch from "./ProviderAccountSwitch.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
@@ -184,6 +186,7 @@ const boxRuntime = (
   rebuild?: RebuildGate,
 ) => {
   const settingsLayer = ServerSettingsModule.layer.pipe(
+    Layer.provideMerge(ManagedPolicy.layerTest()),
     Layer.provide(ServerSecretStore.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-account-switch-" })),
@@ -382,7 +385,7 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
   );
 
   it.effect(
-    "leaves a turn that started while the instance rebuilt running, and does not continue",
+    "refuses a message sent while the instance rebuilds, then continues on the new account",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -444,32 +447,27 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               })
               .pipe(Effect.forkScoped);
             yield* Deferred.await(rebuild.started);
-            const nextRunning = yield* watch(
-              (event) =>
-                event.type === "provider-turn.updated" &&
-                event.payload.status === "running" &&
-                event.payload.id !== projection.providerTurns[0]!.id,
-            );
-            yield* send("next", "Try the next step.");
-            yield* worker.drain();
-            yield* Fiber.join(nextRunning);
+            // The registry hides an instance while it is replaced, so no turn starts on the old account.
+            const refused = yield* Effect.exit(send("next", "Try the next step."));
+            assert.isTrue(Exit.isFailure(refused));
             yield* Deferred.succeed(rebuild.release, undefined);
             const switched = yield* Fiber.join(switching);
             yield* worker.drain();
 
             const after = yield* orchestrator.getThreadProjection(threadId);
-            assert.deepEqual(switched, { kind: "switched", continued: false });
+            assert.deepEqual(switched, { kind: "switched", continued: true });
             assert.deepEqual(
               after.runs.map((run) => run.status),
               ["failed", "running"],
             );
-            assert.deepEqual(
+            assert.equal(after.messages[0]?.text, "Build it.");
+            assert.notInclude(
               after.messages.map((message) => message.text),
-              ["Build it.", "Try the next step."],
+              "Try the next step.",
             );
             assert.deepEqual(
               (yield* Ref.get(opened)).map(({ token }) => token),
-              ["token-a"],
+              ["token-a", "token-b"],
             );
           }).pipe(Effect.provide(boxRuntime(opened, cwd, rebuild)));
         }),

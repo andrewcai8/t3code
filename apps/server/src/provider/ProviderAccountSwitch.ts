@@ -136,16 +136,18 @@ const make = Effect.gen(function* () {
   };
 
   /**
-   * Waits until the registry holds a rebuilt instance. A settings change reaches the registry on
-   * its own fiber, and a turn started before that would open on the old login. An instance that
-   * never rebuilds, such as one whose config no longer decodes, is not waited on past the timeout.
+   * Waits until the registry holds a rebuilt instance; it hides the instance while rebuilding, so
+   * a missing one is not rebuilt yet. A turn started before then would open on the old login. An
+   * instance that never rebuilds, such as one whose config no longer decodes, waits out the timeout.
    */
   const awaitRebuilt = (instanceId: ProviderInstanceId, previous: ProviderInstance) =>
     Effect.scoped(
       Effect.gen(function* () {
         const changes = yield* instances.subscribeChanges;
-        while ((yield* instances.getInstance(instanceId)) === previous) {
+        let current = yield* instances.getInstance(instanceId);
+        while (current === undefined || current === previous) {
           yield* PubSub.take(changes);
+          current = yield* instances.getInstance(instanceId);
         }
       }),
     ).pipe(
@@ -228,7 +230,7 @@ const make = Effect.gen(function* () {
         );
     if (previous !== undefined && !sameInstance(before, after, instanceId))
       yield* awaitRebuilt(instanceId, previous);
-    // A turn may have started while the instance rebuilt. Releasing its session would cut it, so
+    // A turn may have started once the instance rebuilt. Releasing its session would cut it, so
     // the chat keeps it and runs on the new login from its next session.
     const latest = yield* readThread(input.threadId);
     if (busy(latest))
