@@ -39,6 +39,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
@@ -156,7 +157,7 @@ const rpc = <A, E>(
           Effect.flatMap((response) => response.json),
           Effect.flatMap(decodeTicket),
           Effect.map(({ ticket }) => {
-            wsUrl.searchParams.set("wsTicket", ticket);
+            wsUrl.searchParams.set("wsTicket", Redacted.value(ticket));
             return wsUrl.toString();
           }),
           // Without a ticket the server refuses the upgrade, and the call reports that.

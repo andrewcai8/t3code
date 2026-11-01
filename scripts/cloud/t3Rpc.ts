@@ -12,6 +12,7 @@ import {
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import { PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
@@ -57,7 +58,7 @@ export const withRpc = Effect.fn("withRpc")(function* <A, E, R>(
       Effect.flatMap(decodeWebSocketTicket),
       Effect.map(({ ticket }) => {
         const url = new URL(wsUrl(httpBaseUrl));
-        url.searchParams.set("wsTicket", ticket);
+        url.searchParams.set("wsTicket", Redacted.value(ticket));
         return url.toString();
       }),
       Effect.timeout("2 minutes"),

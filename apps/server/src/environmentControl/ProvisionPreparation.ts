@@ -1095,8 +1095,10 @@ export function makeProvisionPreparationStore(stateDir: string) {
           profile.credential.kind === "environment"
             ? profile.environment
                 .filter(
-                  ({ name, value }) =>
-                    credentialVariables[profile.kind].includes(name) && value.trim(),
+                  (variable): variable is typeof variable & { readonly value: string } =>
+                    credentialVariables[profile.kind].includes(variable.name) &&
+                    typeof variable.value === "string" &&
+                    variable.value.trim() !== "",
                 )
                 // The guest cannot resolve references to the manager's secret store.
                 .map(({ name, value, sensitive }) => ({ name, value, sensitive }))

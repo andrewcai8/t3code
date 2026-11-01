@@ -9,13 +9,16 @@ import {
   ServerSettings,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 
+import * as ManagedProviders from "../policy/managedProviders.ts";
 import * as Settings from "../serverSettings.ts";
+import * as SecretResolver from "../secrets/SecretResolver.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "./builtInDrivers.ts";
 import type { AnyProviderDriver } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
@@ -40,6 +43,8 @@ type ProviderInstanceRegistryHydrationEnv =
   | ServerConfig.ServerConfig
   | Path.Path
   | FileSystem.FileSystem
+  // Secret provider reads.
+  | Crypto.Crypto
   // The Claude runner counts its CLIs as running agents for port discovery.
   | PortScanner.PortDiscovery;
 
@@ -155,29 +160,44 @@ export const layerWithDrivers = <R>(drivers: ReadonlyArray<AnyProviderDriver<R>>
         initialSettings === undefined
           ? ({} as ProviderInstanceConfigMap)
           : deriveProviderInstanceConfigMap(initialSettings);
+      // Instances of drivers the policy leaves out stay listed, as unavailable, so their threads
+      // explain why instead of losing their provider.
       const layerMutable = ProviderInstanceRegistry.layer({
         drivers,
         configMap: initialConfigMap,
-      });
+        blockedReason: (driver) =>
+          ManagedProviders.disallowedDriverReason(serverSettings.managedPolicy, driver),
+      }).pipe(Layer.provide(SecretResolver.layer));
       return layerSettingsWatcher(settingsChanges).pipe(Layer.provideMerge(layerMutable));
     }),
   );
 
 export const layer: Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
   never,
   ProviderInstanceRegistryHydrationEnv
 > = Layer.unwrap(
-  seedDevReplayInstance().pipe(
-    Effect.catchCause((cause) => Effect.logWarning("Dev replay agent unavailable", cause)),
-    Effect.as(layerWithDrivers(BUILT_IN_DRIVERS)),
-  ),
-).pipe(
-  Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
-  Layer.provide(AcpRegistrySupport.layerFromHost),
-  Layer.provide(ProviderHostLive.layer),
+  Effect.gen(function* () {
+    const serverSettings = yield* Settings.ServerSettingsService;
+    yield* seedDevReplayInstance().pipe(
+      Effect.catchCause((cause) => Effect.logWarning("Dev replay agent unavailable", cause)),
+    );
+    // Drivers launch from the host environment, minus launch overrides a policy ignores.
+    const hostEnvironment = ManagedProviders.providerHostEnvironment(
+      serverSettings.managedPolicy,
+      yield* HostProcess.Environment,
+    );
+    return layerWithDrivers(BUILT_IN_DRIVERS).pipe(
+      Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
+      Layer.provide(AcpRegistrySupport.layerFromHost),
+      Layer.provide(ProviderHostLive.layer),
+      Layer.provide(Layer.succeed(HostProcess.Environment, hostEnvironment)),
+    );
+  }),
 ) as Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
   never,
   ProviderInstanceRegistryHydrationEnv
 >;

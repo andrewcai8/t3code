@@ -37,6 +37,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
+import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
 import {
   BearerConnectionCredential,
@@ -512,6 +513,15 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         }),
       prepareForUpdate: () => Effect.die(new Error("Updating outdated hosts is not used.")),
     }),
+    Effect.provideService(
+      RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
+      RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization.of({
+        authorizeBearer: () => Effect.die(new Error("Authorization is not used.")),
+        authorizeDpop: () => Effect.die(new Error("Authorization is not used.")),
+        authorizeDpopHttp: () => Effect.die(new Error("Authorization is not used.")),
+        renewDpopBeforeExpiry: () => Effect.void,
+      }),
+    ),
     // Route checks find nothing, so each saved route is dialed as it would be after a check.
     Effect.provide(
       RpcHttp.layerRemoteHttpClient((() =>

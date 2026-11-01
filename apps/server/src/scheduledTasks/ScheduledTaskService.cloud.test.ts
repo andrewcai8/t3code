@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -56,6 +57,7 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
         isScratchProject: () => Effect.succeed(false),
       }),
       Layer.mock(SecretRequests.SecretRequests)({}),
+      ManagedPolicy.layerTest(),
       Layer.succeed(ScheduledCloudFire, {
         providers: Effect.succeed(["e2b"] as const),
         fire: ({ task, provider }) =>
@@ -118,6 +120,7 @@ const dependenciesWith = (
       isScratchProject: () => Effect.succeed(false),
     }),
     Layer.mock(SecretRequests.SecretRequests)({}),
+    ManagedPolicy.layerTest(),
     Layer.succeed(ScheduledCloudFire, { providers, fire }),
   );
 

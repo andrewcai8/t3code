@@ -25,6 +25,7 @@ describe("threadSettlementEnvironmentIds", () => {
             [OTHER_ID, config],
           ]),
         ),
+        Atom.make<ReadonlyArray<EnvironmentId>>([ID, OTHER_ID]),
       ),
     );
 
