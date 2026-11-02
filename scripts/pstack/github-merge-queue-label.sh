@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Print the Graphite merge-queue GitHub label for the current repo, or nothing.
-# `graphite` wins when both `graphite` and `merge-queue` exist.
+# Print the merge-queue GitHub label for the current repo, or nothing.
+# Trunk's `trunk-merge-queue-submit` wins: a repo migrating from Graphite to Trunk keeps its
+# `graphite` and `merge-queue` labels, and new PRs belong in the queue it is moving to.
+# A failed lookup exits non-zero rather than printing nothing, which would read as "no queue"
+# and send the agent to `gh pr merge`. REST, because GraphQL's budget runs out first on busy hosts.
 # Never require the Graphite CLI (`gt`).
 set -euo pipefail
-labels="$(gh label list --limit 100 --json name --jq '.[].name' 2>/dev/null || true)"
-if [[ -z "$labels" ]]; then
-  exit 0
-fi
-if printf '%s\n' "$labels" | grep -qx graphite; then
-  printf '%s\n' graphite
-  exit 0
-fi
-if printf '%s\n' "$labels" | grep -qx merge-queue; then
-  printf '%s\n' merge-queue
-fi
+labels="$(gh api 'repos/{owner}/{repo}/labels?per_page=100' --paginate --jq '.[].name')"
+for label in trunk-merge-queue-submit graphite merge-queue; do
+  if printf '%s\n' "$labels" | grep -qx "$label"; then
+    printf '%s\n' "$label"
+    exit 0
+  fi
+done
