@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Print the merge-queue GitHub label for the current repo, or nothing.
-# Trunk's `trunk-merge-queue-submit` wins: a repo that moved from Graphite to Trunk keeps its
-# old `graphite` and `merge-queue` labels, and labeling those queues nothing.
+# Trunk's `trunk-merge-queue-submit` wins: a repo migrating from Graphite to Trunk keeps its
+# `graphite` and `merge-queue` labels, and new PRs belong in the queue it is moving to.
 # A failed lookup exits non-zero rather than printing nothing, which would read as "no queue"
 # and send the agent to `gh pr merge`. REST, because GraphQL's budget runs out first on busy hosts.
 # Never require the Graphite CLI (`gt`).
