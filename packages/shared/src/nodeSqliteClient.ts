@@ -678,7 +678,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
     yield* warn(writer);
     return undefined;
   }
-  const started = yield* Effect.try(
+  const started = Result.try(
     () =>
       new NodeWorkerThreads.Worker(checkpointWorkerSource, {
         eval: true,
@@ -689,9 +689,9 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
           idleMs: CHECKPOINT_IDLE_MS,
         },
       }),
-  ).pipe(Effect.result);
+  );
   if (Result.isFailure(started)) {
-    yield* warn(String(started.failure.cause));
+    yield* warn(String(started.failure));
     return undefined;
   }
   const worker = started.success;
@@ -1113,7 +1113,7 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
       }),
       undefined,
     );
-  const spawned = yield* Effect.try(
+  const spawned = Result.try(
     () =>
       new NodeWorkerThreads.Worker(writerWorkerSource, {
         eval: true,
@@ -1125,9 +1125,9 @@ const makeWriterWorker = Effect.fnUntraced(function* (options: SqliteClientConfi
           checkpoint: options.checkpointWorker ?? false,
         },
       }),
-  ).pipe(Effect.result);
+  );
   if (Result.isFailure(spawned)) {
-    return yield* fallBack(String(spawned.failure.cause));
+    return yield* fallBack(String(spawned.failure));
   }
   const worker = spawned.success;
   const runFork = Effect.runForkWith(yield* Effect.context<never>());
