@@ -37,6 +37,7 @@ import {
   PrimaryConnectionTarget,
   type PreparedConnection,
 } from "../connection/model.ts";
+import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { RpcPermissionGuard } from "../rpc/client.ts";
@@ -1348,7 +1349,9 @@ describe("provider setup commands", () => {
       const runtime = Atom.runtime(
         Layer.merge(
           Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
-            entries: yield* SubscriptionRef.make(new Map()),
+            entries: yield* SubscriptionRef.make<
+              ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
+            >(new Map()),
             run: (_environmentId, effect) =>
               Effect.provideService(
                 effect,
