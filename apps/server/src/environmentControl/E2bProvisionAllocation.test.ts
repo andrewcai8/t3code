@@ -452,8 +452,7 @@ it.effect("expired requests never allocate, fork or reconnect", () =>
     expect((yield* ports.fork(expired, parent).pipe(Effect.result))._tag).toBe("Failure");
     const runtime = makeE2bProvisionRuntime(f.config.connection);
     expect(
-      (yield* Effect.tryPromise(() => runtime.touch(expired, parent.sandboxId)).pipe(Effect.result))
-        ._tag,
+      (yield* Effect.exit(Effect.promise(() => runtime.touch(expired, parent.sandboxId))))._tag,
     ).toBe("Failure");
     expect(f.creates).toHaveLength(1);
     expect(f.forks).toEqual([]);
@@ -490,9 +489,11 @@ it.effect(
       const resource = yield* ports.create(bounded);
       if (resource.provider !== "e2b") throw new Error("Expected E2B resource");
       f.state.drift = true;
-      const result = yield* Effect.tryPromise(() =>
-        makeE2bProvisionRuntime(f.config.connection).touch(bounded, resource.sandboxId),
-      ).pipe(Effect.result);
+      const result = yield* Effect.exit(
+        Effect.promise(() =>
+          makeE2bProvisionRuntime(f.config.connection).touch(bounded, resource.sandboxId),
+        ),
+      );
       expect(result._tag).toBe("Failure");
       expect(f.connects).toHaveLength(1);
       expect(f.timeouts).toHaveLength(1);

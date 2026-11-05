@@ -123,7 +123,7 @@ const continuation = (
     text,
     attachments: [],
     dispatchMode: { type: "start_immediately" },
-    createdBy: "user",
+    createdBy: "agent",
     creationSource: "server",
   }) satisfies OrchestrationV2Command;
 

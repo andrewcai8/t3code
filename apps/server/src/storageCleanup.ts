@@ -72,6 +72,23 @@ const decodePnpmModulesManifest = Schema.decodeUnknownEffect(
   }),
 );
 
+class PnpmModulesManifestParseError extends Schema.TaggedError<PnpmModulesManifestParseError>()(
+  "PnpmModulesManifestParseError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not parse the pnpm modules manifest.";
+  }
+}
+
+class WorktreeLstatError extends Schema.TaggedError<WorktreeLstatError>()("WorktreeLstatError", {
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return "Could not read a worktree entry's timestamps.";
+  }
+}
+
 const DAY_MS = 86_400_000;
 // Give settle scripts time to open terminals that protect the worktree.
 const SETTLE_SCRIPT_GRACE_MS = 60_000;
@@ -349,7 +366,12 @@ const make = Effect.gen(function* () {
     function* (root: string) {
       const nodeModules = path.join(root, "node_modules");
       const text = yield* fs.readFileString(path.join(nodeModules, ".modules.yaml"));
-      const manifest = yield* decodePnpmModulesManifest(yield* Effect.try(() => parseYaml(text)));
+      const manifest = yield* decodePnpmModulesManifest(
+        yield* Effect.try({
+          try: () => parseYaml(text),
+          catch: (cause) => new PnpmModulesManifestParseError({ cause }),
+        }),
+      );
       // An agent can write this manifest, and statting a network path makes
       // Windows sign in to its host with the user's NTLM credentials.
       if (isNetworkPath(manifest.storeDir) || isNetworkPath(manifest.virtualStoreDir ?? "")) {
@@ -428,7 +450,10 @@ const make = Effect.gen(function* () {
         // about the files inside. Content copied in with `rsync -a`, `tar x` or
         // `cp -p` keeps its old mtime but gets a fresh ctime, which Effect's
         // File.Info does not expose.
-        const stat = yield* Effect.tryPromise(() => NodeFSP.lstat(target));
+        const stat = yield* Effect.tryPromise({
+          try: () => NodeFSP.lstat(target),
+          catch: (cause) => new WorktreeLstatError({ cause }),
+        });
         if (stat.isSymbolicLink()) continue;
         if (Math.max(stat.mtimeMs, stat.ctimeMs) > cutoff)
           return { status: "recent" as const, path: target };

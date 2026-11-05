@@ -6,6 +6,15 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+class DiskHeadroomReadError extends Schema.TaggedError<DiskHeadroomReadError>()(
+  "DiskHeadroomReadError",
+  { operation: Schema.Literals(["statfs", "readFile"]), cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `Disk headroom ${this.operation} failed.`;
+  }
+}
+
 /** Only a box's preparation names its host for usage. */
 const onCloudBox = Effect.map(HostProcess.Environment, (environment) =>
   Boolean(environment.T3CODE_USAGE_HOST_ID?.trim()),
@@ -35,7 +44,10 @@ export const lowDiskNoteFor = Effect.fn("DiskHeadroom.lowDiskNoteFor")(function*
 ): Effect.fn.Return<string> {
   if (!cwd) return "";
   const box = yield* onCloudBox;
-  return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
+  return yield* Effect.tryPromise({
+    try: () => NodeFSP.statfs(cwd),
+    catch: (cause) => new DiskHeadroomReadError({ operation: "statfs", cause }),
+  }).pipe(
     Effect.map((stats) => lowDiskNote(stats.bavail * stats.bsize, box)),
     Effect.orElseSucceed(() => ""),
   );
@@ -101,7 +113,10 @@ export const cloudMachineNoteFor = Effect.fn("DiskHeadroom.cloudMachineNoteFor")
   // Written by the box's preparation when a reopen's project setup fails, removed when it passes.
   const log = t3home ? NodePath.join(t3home, "setup-failure.log") : undefined;
   const setupFailure = log
-    ? yield* Effect.tryPromise(() => NodeFSP.readFile(log, "utf8")).pipe(
+    ? yield* Effect.tryPromise({
+        try: () => NodeFSP.readFile(log, "utf8"),
+        catch: (cause) => new DiskHeadroomReadError({ operation: "readFile", cause }),
+      }).pipe(
         Effect.map((text) => {
           const line = text.split("\n", 1)[0]!;
           return { log, summary: line.length > 200 ? `${line.slice(0, 199)}…` : line };
@@ -110,7 +125,10 @@ export const cloudMachineNoteFor = Effect.fn("DiskHeadroom.cloudMachineNoteFor")
       )
     : undefined;
   const cwd = input.cwd;
-  return yield* Effect.tryPromise(() => NodeFSP.statfs(cwd)).pipe(
+  return yield* Effect.tryPromise({
+    try: () => NodeFSP.statfs(cwd),
+    catch: (cause) => new DiskHeadroomReadError({ operation: "statfs", cause }),
+  }).pipe(
     Effect.map((stats) =>
       cloudMachineNote({
         cpus: NodeOS.availableParallelism(),
@@ -148,9 +166,10 @@ export const saveFailureNoteFor = Effect.fn("DiskHeadroom.saveFailureNoteFor")(f
 ): Effect.fn.Return<string> {
   const t3home = (yield* HostProcess.Environment).T3CODE_HOME;
   if (!t3home || !(yield* onCloudBox)) return "";
-  const failure = yield* Effect.tryPromise(() =>
-    NodeFSP.readFile(NodePath.join(t3home, "save-failure.json"), "utf8"),
-  ).pipe(
+  const failure = yield* Effect.tryPromise({
+    try: () => NodeFSP.readFile(NodePath.join(t3home, "save-failure.json"), "utf8"),
+    catch: (cause) => new DiskHeadroomReadError({ operation: "readFile", cause }),
+  }).pipe(
     Effect.flatMap(decodeSaveFailure),
     Effect.orElseSucceed(() => null),
   );

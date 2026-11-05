@@ -2139,7 +2139,10 @@ describe("a cloud chat whose box E2B cannot start", () => {
       await registry.markPaused("lease");
       const driver = setup().driver;
       driver.resume = async () => {
-        throw new E2bPlacementUnavailable("504 placement", "provider-unavailable");
+        throw new E2bPlacementUnavailable({
+          message: "504 placement",
+          failure: "provider-unavailable",
+        });
       };
       let recordDone: (() => void) | undefined;
       const done = new Promise<void>((resolve) => (recordDone = resolve));
@@ -2255,7 +2258,11 @@ describe("recovering a cloud box E2B cannot resume", () => {
       const driver = setup().driver;
       driver.resume = async () => {
         calls.push(failing ? "resume:unplaceable" : "resume:ok");
-        if (failing) throw new E2bPlacementUnavailable("504 placement", "provider-unavailable");
+        if (failing)
+          throw new E2bPlacementUnavailable({
+            message: "504 placement",
+            failure: "provider-unavailable",
+          });
         return {};
       };
       const manager = createEnvironmentControl(

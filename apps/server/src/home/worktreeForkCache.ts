@@ -59,6 +59,16 @@ export class UploadFailed extends Schema.TaggedError<UploadFailed>()("UploadFail
   cause: Schema.Defect(),
 }) {}
 
+/** A cache problem that is logged and answered by uploading directly, so nothing reads its tag. */
+class UploadCacheError extends Schema.TaggedError<UploadCacheError>()("UploadCacheError", {
+  operation: Schema.Literals(["load", "save", "verify", "cache", "mount"]),
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return `The worktree fork upload cache could not ${this.operation}.`;
+  }
+}
+
 const Entry = Schema.Struct({
   imageId: Schema.String,
   bytes: Schema.Number,
@@ -86,12 +96,15 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
   const index = new Map<string, Entry>();
   const scope = yield* Effect.scope;
   const packRoot = NodePath.join(stateDir, "worktree-forks", "tmp", "packs");
-  yield* Effect.try(() => {
-    if (!NodeFS.existsSync(path)) return;
-    const saved = decodeIndex(NodeFS.readFileSync(path, "utf8"));
-    // Another workspace's images are not this one's to mount; Modal expires them.
-    if (saved.scope === workspace)
-      for (const [key, entry] of Object.entries(saved.entries)) index.set(key, entry);
+  yield* Effect.try({
+    try: () => {
+      if (!NodeFS.existsSync(path)) return;
+      const saved = decodeIndex(NodeFS.readFileSync(path, "utf8"));
+      // Another workspace's images are not this one's to mount; Modal expires them.
+      if (saved.scope === workspace)
+        for (const [key, entry] of Object.entries(saved.entries)) index.set(key, entry);
+    },
+    catch: (cause) => new UploadCacheError({ operation: "load", cause }),
   }).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("worktree fork upload cache could not be read; it starts empty", {
@@ -100,14 +113,17 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
       }),
     ),
   );
-  const save = Effect.try(() => {
-    NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
-    const temporary = `${path}.${NodeCrypto.randomUUID()}`;
-    NodeFS.writeFileSync(
-      temporary,
-      encodeIndex({ scope: workspace, entries: Object.fromEntries(index) }),
-    );
-    NodeFS.renameSync(temporary, path);
+  const save = Effect.try({
+    try: () => {
+      NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
+      const temporary = `${path}.${NodeCrypto.randomUUID()}`;
+      NodeFS.writeFileSync(
+        temporary,
+        encodeIndex({ scope: workspace, entries: Object.fromEntries(index) }),
+      );
+      NodeFS.renameSync(temporary, path);
+    },
+    catch: (cause) => new UploadCacheError({ operation: "save", cause }),
   }).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("worktree fork upload cache could not be saved", { path, cause }),
@@ -214,13 +230,16 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
         bytes: packed.bytes,
         uploadedBytes: packed.bytes,
       };
-      const verified = yield* Effect.tryPromise(async () => {
-        const digest = await fileDigest(packed.archive);
-        return sandboxes.exec(
-          sandboxId,
-          ["sh", "-c", VERIFY_SCRIPT, "t3-verify", uploaded, digest, stage],
-          { timeoutMs: 5 * 60_000 },
-        );
+      const verified = yield* Effect.tryPromise({
+        try: async () => {
+          const digest = await fileDigest(packed.archive);
+          return sandboxes.exec(
+            sandboxId,
+            ["sh", "-c", VERIFY_SCRIPT, "t3-verify", uploaded, digest, stage],
+            { timeoutMs: 5 * 60_000 },
+          );
+        },
+        catch: (cause) => new UploadCacheError({ operation: "verify", cause }),
       }).pipe(Effect.result);
       if (verified._tag === "Failure" || verified.success.exitCode !== 0) {
         yield* fallBack(
@@ -237,9 +256,10 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
         });
         return placed;
       }
-      const saved = yield* Effect.tryPromise(() =>
-        sandboxes.saveDirectory(sandboxId, stage, IMAGE_TTL_MS),
-      ).pipe(Effect.result);
+      const saved = yield* Effect.tryPromise({
+        try: () => sandboxes.saveDirectory(sandboxId, stage, IMAGE_TTL_MS),
+        catch: (cause) => new UploadCacheError({ operation: "cache", cause }),
+      }).pipe(Effect.result);
       if (saved._tag === "Failure") {
         yield* Effect.logWarning("worktree fork upload could not be cached", {
           key: item.key,
@@ -291,9 +311,10 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
     const entry = claim._tag === "cached" ? claim.entry : yield* Deferred.await(claim.pending);
     if (entry === null) return yield* direct(sandboxId, item, fallbackPath);
     const mountPath = `${MOUNTS}/${item.key}`;
-    const mounted = yield* Effect.tryPromise(() =>
-      sandboxes.mountImage(sandboxId, mountPath, entry.imageId),
-    ).pipe(Effect.result);
+    const mounted = yield* Effect.tryPromise({
+      try: () => sandboxes.mountImage(sandboxId, mountPath, entry.imageId),
+      catch: (cause) => new UploadCacheError({ operation: "mount", cause }),
+    }).pipe(Effect.result);
     if (mounted._tag === "Failure") {
       // Likely gone from Modal: the next job uploads it again.
       if (index.get(item.key) === entry) {

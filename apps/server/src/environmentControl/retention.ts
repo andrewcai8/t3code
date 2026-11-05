@@ -1,16 +1,18 @@
 // @effect-diagnostics globalDate:off - provider SDK boundaries use the wall clock for relative timeouts.
-import * as Data from "effect/Data";
+import * as Schema from "effect/Schema";
 
 /** E2B accepts relative whole seconds; leave room for transport before checking its actual deadline. */
 const TRANSPORT_MARGIN_MS = 1_000;
 
-export class ProvisionRetentionError extends Data.TaggedError("ProvisionRetentionError")<{
-  readonly message: string;
-}> {
-  constructor() {
-    super({ message: "The provider retention deadline could not be enforced." });
+export class ProvisionRetentionError extends Schema.TaggedError<ProvisionRetentionError>()(
+  "ProvisionRetentionError",
+  {},
+) {
+  override get message(): string {
+    return "The provider retention deadline could not be enforced.";
   }
 }
+export const isProvisionRetentionError = Schema.is(ProvisionRetentionError);
 
 export function retentionExpired(deadline: string | undefined, now: number): boolean {
   return deadline !== undefined && Date.parse(deadline) <= now;

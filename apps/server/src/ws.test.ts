@@ -683,7 +683,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(McpAppRequests.McpAppRequests)({}),
   Layer.mock(HomeService.HomeService)({ available: false }),
   Layer.mock(EnvironmentControl.EnvironmentControl)({
-    provisionedSkills: Effect.succeed(undefined),
+    provisionedSkills: Effect.undefined,
     provisionProviders: Effect.succeed([]),
   }),
   Layer.mock(ModelManifest.ModelManifest)({}),

@@ -1,5 +1,6 @@
 // @effect-diagnostics globalTimers:off - this Promise helper backs off between E2B requests outside Effect.
-import type { ProviderStartFailure } from "@t3tools/contracts";
+import { ProviderStartFailure } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { SandboxError, ServiceBusyError } from "e2b";
 
 /**
@@ -14,13 +15,15 @@ const E2B_RESUME_BACKOFF_MS = 2_000;
  * E2B cannot start the sandbox now: it answered with a failure on its side (placement timed out,
  * no capacity, a 5xx), or it did not answer in time.
  */
-export class E2bPlacementUnavailable extends Error {
-  readonly failure: ProviderStartFailure;
-  constructor(message: string, failure: ProviderStartFailure, options?: ErrorOptions) {
-    super(message, options);
-    this.failure = failure;
-  }
-}
+export class E2bPlacementUnavailable extends Schema.TaggedError<E2bPlacementUnavailable>()(
+  "E2bPlacementUnavailable",
+  {
+    message: Schema.String,
+    failure: ProviderStartFailure,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+export const isE2bPlacementUnavailable = Schema.is(E2bPlacementUnavailable);
 
 export type E2bResumeDecision =
   | {
@@ -64,29 +67,29 @@ export async function connectResumingE2b<A>(
       return await connect(E2B_RESUME_REQUEST_TIMEOUT_MS);
     } catch (cause) {
       if (cause instanceof ServiceBusyError)
-        throw new E2bPlacementUnavailable(
-          `E2B could not place sandbox ${sandboxId}: ${cause.message}`,
-          "provider-unavailable",
-          { cause },
-        );
+        throw new E2bPlacementUnavailable({
+          message: `E2B could not place sandbox ${sandboxId}: ${cause.message}`,
+          failure: "provider-unavailable",
+          cause,
+        });
       const decision = e2bResumeDecision(cause);
       if (
         decision.kind === "fail" &&
         cause instanceof SandboxError &&
         (cause.statusCode ?? 0) >= 500
       )
-        throw new E2bPlacementUnavailable(
-          `E2B could not start sandbox ${sandboxId}: ${cause.message}`,
-          "provider-unavailable",
-          { cause },
-        );
+        throw new E2bPlacementUnavailable({
+          message: `E2B could not start sandbox ${sandboxId}: ${cause.message}`,
+          failure: "provider-unavailable",
+          cause,
+        });
       if (decision.kind === "fail") throw cause;
       if (attempt === E2B_RESUME_ATTEMPTS)
-        throw new E2bPlacementUnavailable(
-          `E2B could not resume sandbox ${sandboxId} after ${attempt} attempts: ${decision.message}`,
-          decision.code === "http_504" ? "provider-unavailable" : "provider-unreachable",
-          { cause },
-        );
+        throw new E2bPlacementUnavailable({
+          message: `E2B could not resume sandbox ${sandboxId} after ${attempt} attempts: ${decision.message}`,
+          failure: decision.code === "http_504" ? "provider-unavailable" : "provider-unreachable",
+          cause,
+        });
       onRetry({ sandboxId, attempt, code: decision.code, message: decision.message });
       await new Promise((resolve) => setTimeout(resolve, E2B_RESUME_BACKOFF_MS * attempt));
     }

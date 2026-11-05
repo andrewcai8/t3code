@@ -18,8 +18,8 @@ import {
   provisionSandboxId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { ProvisionRetentionError, retentionExpired } from "./retention.ts";
-import { E2bPlacementUnavailable } from "./e2bResume.ts";
+import { isProvisionRetentionError, retentionExpired } from "./retention.ts";
+import { isE2bPlacementUnavailable } from "./e2bResume.ts";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
@@ -160,11 +160,12 @@ const reportUnexpected = <A, E, R>(effect: Effect.Effect<A, E | UnexpectedCause,
 const promise = <A>(run: () => Promise<A>) =>
   logCause(Effect.tryPromise({ try: run, catch: safeError }));
 /** A box's T3 server did not answer, so it cannot be paired until a resume brings it back. */
-export class GuestNotServing extends Error {
-  constructor() {
-    super("The box's T3 server is not serving.");
+export class GuestNotServing extends Schema.TaggedError<GuestNotServing>()("GuestNotServing", {}) {
+  override get message(): string {
+    return "The box's T3 server is not serving.";
   }
 }
+const isGuestNotServing = Schema.is(GuestNotServing);
 const notServing: EnvironmentProvisionAttachResult = {
   kind: "refused",
   reason: "not-serving",
@@ -240,13 +241,12 @@ export function makeProvisionControl(
   const remote = <A>(operation: ProvisionOperation, run: () => Promise<A>) =>
     Effect.tryPromise({
       try: run,
-      catch: (error) =>
-        error instanceof ProvisionRetentionError ? error : new UnexpectedCause(error),
+      catch: (error) => (isProvisionRetentionError(error) ? error : new UnexpectedCause(error)),
     }).pipe(
       reportUnexpected,
       Effect.catch((error) =>
         Effect.gen(function* () {
-          if (error instanceof ProvisionRetentionError)
+          if (isProvisionRetentionError(error))
             yield* provisioning
               .cancel(operation.request.requestId)
               .pipe(logCause, Effect.mapError(safeError));
@@ -270,8 +270,7 @@ export function makeProvisionControl(
     };
     const attached = yield* remote(operation, () =>
       ports.attach(operation, manifest, lease.namespaceProxy, record).catch((error: unknown) => {
-        if (error instanceof GuestNotServing || error instanceof E2bPlacementUnavailable)
-          return null;
+        if (isGuestNotServing(error) || isE2bPlacementUnavailable(error)) return null;
         throw error;
       }),
     ).pipe(

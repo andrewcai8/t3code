@@ -36,11 +36,15 @@ export const ControllerResult = Schema.Union([
 export type ControllerResult = typeof ControllerResult.Type;
 const PROVISIONED_TIMEOUT_MS = 6 * 3_600_000;
 
-export class ProvisionedSandboxMissing extends Error {
-  constructor() {
-    super("The cloud provider no longer has this workspace. It cannot be reconnected.");
+export class ProvisionedSandboxMissing extends Schema.TaggedError<ProvisionedSandboxMissing>()(
+  "ProvisionedSandboxMissing",
+  {},
+) {
+  override get message(): string {
+    return "The cloud provider no longer has this workspace. It cannot be reconnected.";
   }
 }
+export const isProvisionedSandboxMissing = Schema.is(ProvisionedSandboxMissing);
 
 function isMissingSandbox(cause: unknown): boolean {
   const message = cause instanceof Error ? cause.message : String(cause);

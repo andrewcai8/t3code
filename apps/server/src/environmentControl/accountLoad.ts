@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import type * as SqlClient from "effect/sql/SqlClient";
 import { leaseAccounts, type ProvisionedLeaseRegistry } from "./ProvisionedLeaseRegistry.ts";
 import type { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
+import { tryCloudPromise } from "./cloudPromiseError.ts";
 
 const requestAccounts = (request: {
   readonly providerInstanceId: string;
@@ -55,7 +56,7 @@ export const readAccountLoad = (
 ) =>
   Effect.all(
     {
-      boxes: Effect.tryPromise(async () =>
+      boxes: tryCloudPromise("readAwakeLeases", async () =>
         (await leases.awake()).flatMap((lease) =>
           leaseAccounts(lease).map((id) => ProviderInstanceId.make(id)),
         ),

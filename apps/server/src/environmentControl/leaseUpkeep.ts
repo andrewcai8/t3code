@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import { BOX_USAGE_RETENTION_DAYS, type BoxUsageStore } from "../usage/boxUsage.ts";
 import type { ProvisionStoreError } from "./ProvisionOperationStore.ts";
+import { tryCloudPromise } from "./cloudPromiseError.ts";
 
 export const LEASE_UPKEEP_INTERVAL = Duration.minutes(5);
 /**
@@ -46,7 +47,7 @@ export const runLeaseUpkeep = Effect.fn("runLeaseUpkeep")(function (input: {
     // expired heartbeat means a finished machine nobody is watching. Pause
     // it and leave it reconnectable. A provision that never reached ready
     // holds no lease; reconciling below resumes or disposes it.
-    yield* Effect.tryPromise(input.reapExpiredLeases).pipe(
+    yield* tryCloudPromise("reapExpiredLeases", input.reapExpiredLeases).pipe(
       Effect.ignore({ log: "Warn", message: "expired cloud leases could not be paused" }),
     );
     // A restart or a stalled step leaves an unfinished provision that no
@@ -56,7 +57,7 @@ export const runLeaseUpkeep = Effect.fn("runLeaseUpkeep")(function (input: {
     );
   });
   const collectUsage = Effect.gen(function* () {
-    yield* Effect.tryPromise(input.syncLeaseUsage).pipe(
+    yield* tryCloudPromise("syncLeaseUsage", input.syncLeaseUsage).pipe(
       Effect.ignore({ log: "Warn", message: "cloud box usage could not be collected" }),
     );
     const now = yield* Clock.currentTimeMillis;
@@ -68,7 +69,7 @@ export const runLeaseUpkeep = Effect.fn("runLeaseUpkeep")(function (input: {
   const upkeepChats = Effect.sync(() => {
     void input.upkeepCloudChats?.().catch(() => undefined);
   }).pipe(Effect.repeat(Schedule.spaced(CHAT_UPKEEP_INTERVAL)));
-  const cleanUp = Effect.tryPromise(async () => input.cleanUpBoxes?.()).pipe(
+  const cleanUp = tryCloudPromise("cleanUpBoxes", async () => input.cleanUpBoxes?.()).pipe(
     Effect.ignore({ log: "Warn", message: "paused cloud boxes could not be cleaned up" }),
   );
   return Effect.all([repeat(reap), repeat(collectUsage), upkeepChats, repeat(cleanUp)], {

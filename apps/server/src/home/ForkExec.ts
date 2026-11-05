@@ -42,6 +42,15 @@ import {
 const unavailable = (message: string) =>
   new OrchestratorMcpFailure({ code: "environment_unavailable", message });
 
+class ForkExecSetupError extends Schema.TaggedError<ForkExecSetupError>()("ForkExecSetupError", {
+  step: Schema.Literals(["link t3", "update bun shim"]),
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return `Fork exec could not ${this.step}.`;
+  }
+}
+
 /**
  * Runs `request` as a one-job batch for this machine's own chat, which its host names in the
  * forks environment it offers. `emit` gets `started` once the batch exists.
@@ -82,10 +91,13 @@ const runInFork = Effect.fn("ForkExec.runInFork")(
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => NodeFS.rmSync(environmentFile, { force: true })),
     );
-    yield* Effect.try(() => {
-      NodeFS.mkdirSync(NodePath.dirname(environmentFile), { recursive: true, mode: 0o700 });
-      NodeFS.writeFileSync(environmentFile, exportsOf(request.environment), { mode: 0o600 });
-    }).pipe(Effect.mapError(() => unavailable("The caller's environment could not be saved.")));
+    yield* Effect.try({
+      try: () => {
+        NodeFS.mkdirSync(NodePath.dirname(environmentFile), { recursive: true, mode: 0o700 });
+        NodeFS.writeFileSync(environmentFile, exportsOf(request.environment), { mode: 0o600 });
+      },
+      catch: () => unavailable("The caller's environment could not be saved."),
+    });
     const { cwd, timeoutSeconds } = request;
     const command = `. ${shellQuote(environmentFile)} && ${request.command}`;
     const job = { command, cwd, ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }) };
@@ -146,11 +158,14 @@ const linkT3Command = Effect.gen(function* () {
   const invocation = yield* resolveSelfInvocation();
   const bin = NodePath.join(yield* HostProcess.HomeDirectory, ".local", "bin");
   const argv = [invocation.command, ...selfInvocationArgs(invocation, [])].map(shellQuote);
-  yield* Effect.try(() => {
-    NodeFS.mkdirSync(bin, { recursive: true });
-    const staged = NodePath.join(bin, `.t3.${process.pid}`);
-    NodeFS.writeFileSync(staged, `#!/bin/sh\nexec ${argv.join(" ")} "$@"\n`, { mode: 0o755 });
-    NodeFS.renameSync(staged, NodePath.join(bin, "t3"));
+  yield* Effect.try({
+    try: () => {
+      NodeFS.mkdirSync(bin, { recursive: true });
+      const staged = NodePath.join(bin, `.t3.${process.pid}`);
+      NodeFS.writeFileSync(staged, `#!/bin/sh\nexec ${argv.join(" ")} "$@"\n`, { mode: 0o755 });
+      NodeFS.renameSync(staged, NodePath.join(bin, "t3"));
+    },
+    catch: (cause) => new ForkExecSetupError({ step: "link t3", cause }),
   });
 });
 
@@ -212,7 +227,10 @@ const writeOutcome = (
 const reconcileShim = Effect.fn("ForkExec.reconcileShim")(
   function* (owner: string, want: WorktreeForks.WorktreeForks["Service"]["bunShim"]) {
     const bin = NodePath.join(yield* HostProcess.HomeDirectory, ".local", "bin");
-    const changes = yield* Effect.try(() => reconcileBunShim(bin, owner, want));
+    const changes = yield* Effect.try({
+      try: () => reconcileBunShim(bin, owner, want),
+      catch: (cause) => new ForkExecSetupError({ step: "update bun shim", cause }),
+    });
     if (changes.includes("conflict"))
       yield* Effect.logWarning(
         "bun test is not offloaded: ~/.local/bin/bun and ~/.local/bin/.bun.t3-real both exist and neither is T3's shim",

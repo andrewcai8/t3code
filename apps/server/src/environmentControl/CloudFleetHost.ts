@@ -52,6 +52,7 @@ import { createProvisionedLeaseRegistry, type RemoteAccess } from "./Provisioned
 import { createProvisionedChatStore } from "./provisionedChats.ts";
 import { ProvisionOperationStore } from "./ProvisionOperationStore.ts";
 import * as WorkerForks from "./WorkerForks.ts";
+import { tryCloudPromise } from "./cloudPromiseError.ts";
 
 /** The environment every box is offered for starting a chat on a fresh cloud machine. */
 export const NEW_CLOUD_CHAT_ENVIRONMENT_ID = EnvironmentId.make("cloud:new-chat");
@@ -426,7 +427,7 @@ const make = Effect.gen(function* () {
       .readChat(access, source.threadId)
       .pipe(Effect.orElseSucceed(() => null));
     if (chat === null) return source;
-    yield* Effect.tryPromise(() => chats.record(source.leaseId, chat)).pipe(
+    yield* tryCloudPromise("recordChatCard", () => chats.record(source.leaseId, chat)).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("a cloud chat's card could not be kept", {
           leaseId: source.leaseId,

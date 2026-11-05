@@ -30,6 +30,7 @@ const CLAUDE = ProviderDriverKind.make("claudeAgent");
 
 class ChatRebuildError extends Schema.TaggedError<ChatRebuildError>()("ChatRebuildError", {
   reason: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
     return this.reason;
@@ -285,7 +286,14 @@ export const continueChatOnBox = Effect.fn("chatRebuild.continueChatOnBox")(func
     projectId: project.value.id,
     expectedWorkspaceRoot: input.workspace,
   });
-  yield* Effect.tryPromise(() => restore.unstage(input.files.staged));
+  yield* Effect.tryPromise({
+    try: () => restore.unstage(input.files.staged),
+    catch: (cause) =>
+      new ChatRebuildError({
+        reason: "The staged session could not be cleared on the new box.",
+        cause,
+      }),
+  });
   if ((yield* threadProjection(rpc, threadId)) === null)
     return yield* new ChatRebuildError({
       reason: `The new box did not import session ${plan.sessionId}.`,
@@ -322,7 +330,14 @@ export const continueChatOnBox = Effect.fn("chatRebuild.continueChatOnBox")(func
       providerSessionId: session.id,
       reason: "rebuild: reopen the restored native session",
     });
-  yield* Effect.tryPromise(() => restore.swap(plan.sessionId, input.files));
+  yield* Effect.tryPromise({
+    try: () => restore.swap(plan.sessionId, input.files),
+    catch: (cause) =>
+      new ChatRebuildError({
+        reason: "The restored session could not be put in place on the new box.",
+        cause,
+      }),
+  });
   yield* rpc["orchestration.dispatchCommand"]({
     type: "message.dispatch",
     commandId: CommandId.make(crypto.randomUUID()),
