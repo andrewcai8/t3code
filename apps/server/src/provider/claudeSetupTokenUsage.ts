@@ -146,23 +146,35 @@ function buildClaudeUsageTurnQueryOptions(
   };
 }
 
+class ClaudeUsageTurnError extends Schema.TaggedError<ClaudeUsageTurnError>()(
+  "ClaudeUsageTurnError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Claude usage turn failed.";
+  }
+}
+
 /**
  * The `rate_limit_event` arrives with the response headers, before the
  * reply, and the turn is aborted there.
  */
 const readFreshClaudeUsageTurn: ClaudeUsageTurnReader = (input) => {
   const abort = new AbortController();
-  return Effect.tryPromise(async () => {
-    const q = claudeQuery({
-      prompt: CLAUDE_USAGE_TURN_PROMPT,
-      options: buildClaudeUsageTurnQueryOptions({ ...input, abortController: abort }),
-    });
-    for await (const message of q) {
-      if (message.type === "rate_limit_event") {
-        return rateLimitEventToUsageResponse(message.rate_limit_info);
+  return Effect.tryPromise({
+    try: async () => {
+      const q = claudeQuery({
+        prompt: CLAUDE_USAGE_TURN_PROMPT,
+        options: buildClaudeUsageTurnQueryOptions({ ...input, abortController: abort }),
+      });
+      for await (const message of q) {
+        if (message.type === "rate_limit_event") {
+          return rateLimitEventToUsageResponse(message.rate_limit_info);
+        }
       }
-    }
-    return undefined;
+      return undefined;
+    },
+    catch: (cause) => new ClaudeUsageTurnError({ cause }),
   }).pipe(
     Effect.timeout(CLAUDE_USAGE_TURN_TIMEOUT_MS),
     Effect.ensuring(Effect.sync(() => abort.abort())),

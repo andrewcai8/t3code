@@ -13,8 +13,17 @@ import * as NodeZlib from "node:zlib";
 
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import { fileDigest } from "../environmentControl/ProvisionPreparation.ts";
+
+class ContentKeyError extends Schema.TaggedError<ContentKeyError>()("ContentKeyError", {
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return "A worktree's content could not be hashed.";
+  }
+}
 
 /** Each entry's description, by the path it unpacks at, from which a key is taken. */
 type Entries = Map<string, string>;
@@ -74,10 +83,13 @@ export const contentKey = Effect.fnUntraced(function* (
   paths: ReadonlyArray<{ readonly name: string; readonly path: string }>,
 ) {
   const now = yield* Clock.currentTimeMillis;
-  return yield* Effect.tryPromise(async () => {
-    const entries: Entries = new Map();
-    for (const { name, path } of paths) await addTree(entries, entryName(name), path, now);
-    return keyOf(context, entries);
+  return yield* Effect.tryPromise({
+    try: async () => {
+      const entries: Entries = new Map();
+      for (const { name, path } of paths) await addTree(entries, entryName(name), path, now);
+      return keyOf(context, entries);
+    },
+    catch: (cause) => new ContentKeyError({ cause }),
   });
 });
 
@@ -187,4 +199,8 @@ export const archiveKey = (
   context: ReadonlyArray<string>,
   archive: string,
   unpackedAt: (name: string) => string = (name) => name,
-) => Effect.tryPromise(async () => keyOf(context, await readArchive(archive, unpackedAt)));
+) =>
+  Effect.tryPromise({
+    try: async () => keyOf(context, await readArchive(archive, unpackedAt)),
+    catch: (cause) => new ContentKeyError({ cause }),
+  });

@@ -1,6 +1,6 @@
 // @effect-diagnostics globalDate:off globalTimers:off cryptoRandomUUID:off - provider control crosses a Promise boundary, a box is probed twice a few seconds apart, and a rebuild mints its own request id.
 // @effect-diagnostics nodeBuiltinImport:off - provider control resolves state in a Node filesystem boundary.
-import { ProvisionRetentionError } from "./retention.ts";
+import { isProvisionRetentionError } from "./retention.ts";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
@@ -100,7 +100,7 @@ import {
 } from "./ModalRuntime.ts";
 import { makeE2bAllocationPorts } from "./E2bProvisionAllocation.ts";
 import { makeE2bProvisionRuntime, makeProvisionResolution } from "./E2bProvisionRuntime.ts";
-import { E2bPlacementUnavailable, type E2bResumeRetry } from "./e2bResume.ts";
+import { isE2bPlacementUnavailable, type E2bResumeRetry } from "./e2bResume.ts";
 import { provisionFailureMessage } from "./provisionFailure.ts";
 import { logProvisionPhases, type ProvisionPhase } from "./provisionTiming.ts";
 import * as Path from "effect/Path";
@@ -131,7 +131,12 @@ import {
   type EnvironmentControlConfig,
   type ManagedTarget,
 } from "./config.ts";
-import { createCloudDriver, ProvisionedSandboxMissing, type CloudDriver } from "./driver.ts";
+import {
+  createCloudDriver,
+  isProvisionedSandboxMissing,
+  ProvisionedSandboxMissing,
+  type CloudDriver,
+} from "./driver.ts";
 import {
   firstTurnOverdue,
   createProvisionedLeaseRegistry,
@@ -154,6 +159,7 @@ import {
 import { makeWakeAhead } from "./wakeAhead.ts";
 import { createProvisionedChatStore, type ProvisionedChatStore } from "./provisionedChats.ts";
 import { runLeaseUpkeep } from "./leaseUpkeep.ts";
+import { tryCloudPromise } from "./cloudPromiseError.ts";
 import { createCleanupSweep, type CleanupCandidate } from "./cloudCleanup.ts";
 import type { BoxHealth } from "./boxHealth.ts";
 import { openBoxRpc } from "./BoxFleetClient.ts";
@@ -1023,8 +1029,8 @@ export function createEnvironmentControl(
         if (lease.reboot) await leaseRegistry.recordReboot(lease.leaseId, null);
         return { kind: "resumed" };
       })()
-        .catch(async (cause): Promise<EnvironmentProvisionResumeResult> => {
-          if (cause instanceof ProvisionedSandboxMissing) {
+        .catch(async (cause: unknown): Promise<EnvironmentProvisionResumeResult> => {
+          if (isProvisionedSandboxMissing(cause)) {
             await leaseRegistry?.markMissing(input.leaseId);
             // A Modal chat is missing once its memory and its disk save are both gone, which
             // leaves only its backup.
@@ -1038,10 +1044,7 @@ export function createEnvironmentControl(
               );
             return { kind: "refused", reason: "missing", message: cause.message };
           }
-          if (
-            cause instanceof E2bPlacementUnavailable &&
-            cause.failure === "provider-unavailable"
-          ) {
+          if (isE2bPlacementUnavailable(cause) && cause.failure === "provider-unavailable") {
             const step = await noteUnplaceable(input.leaseId).catch((error: unknown) => {
               reportFailure("cloud box recovery could not start", {
                 chatId: input.leaseId,
@@ -1065,7 +1068,7 @@ export function createEnvironmentControl(
                 : rebuild === "started"
                   ? " Its chat is being rebuilt on a new machine from its last backup."
                   : "";
-          return cause instanceof E2bPlacementUnavailable
+          return isE2bPlacementUnavailable(cause)
             ? {
                 kind: "refused",
                 reason: "unknown",
@@ -1220,7 +1223,7 @@ export function createEnvironmentControl(
                 else await leaseRegistry.markPaused(lease.leaseId);
               }
             } catch (cause) {
-              if (cause instanceof ProvisionedSandboxMissing)
+              if (isProvisionedSandboxMissing(cause))
                 await leaseRegistry.markMissing(lease.leaseId).catch(() => undefined);
               // The next pass retries. A snapshot over its cap fails here every pass until the
               // deadline, so it must be visible.
@@ -1767,7 +1770,7 @@ export const layer = Layer.effect(
                   );
                   return resumed;
                 } catch (cause) {
-                  if (!(cause instanceof ProvisionedSandboxMissing))
+                  if (!isProvisionedSandboxMissing(cause))
                     await runLogged(
                       Effect.logError("cloud workspace could not be resumed", {
                         leaseId: input.leaseId,
@@ -2135,7 +2138,7 @@ export const layer = Layer.effect(
       await runLogged(logRefresh(requestId, refreshError));
     };
     const provider = (operation: ProvisionOperation) =>
-      Effect.tryPromise(async () => {
+      tryCloudPromise("loadProvisioningInputs", async () => {
         const manager = await resolve();
         if (!manager) throw new Error("Missing cloud configuration");
         const manifest = await manifests.load(operation.request.requestId);
@@ -2261,7 +2264,7 @@ export const layer = Layer.effect(
               },
               catch: (error) =>
                 new ProvisionProviderError({
-                  ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+                  ...(isProvisionRetentionError(error) ? { retentionFailed: true } : {}),
                   message: provisionFailureMessage(
                     error,
                     "Modal preparation did not finish. Retry the same request.",
@@ -2278,7 +2281,7 @@ export const layer = Layer.effect(
               },
               catch: (error) =>
                 new ProvisionProviderError({
-                  ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+                  ...(isProvisionRetentionError(error) ? { retentionFailed: true } : {}),
                   message: provisionFailureMessage(
                     error,
                     "Namespace preparation did not finish. Retry the same request.",
@@ -2310,7 +2313,7 @@ export const layer = Layer.effect(
             try: () => runtime.prepare(operation, sandboxId, manifest, record, build),
             catch: (error) =>
               new ProvisionProviderError({
-                ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+                ...(isProvisionRetentionError(error) ? { retentionFailed: true } : {}),
                 message: provisionFailureMessage(
                   error,
                   "Remote preparation did not finish. Retry the same request to resume.",
@@ -2875,7 +2878,7 @@ export const layer = Layer.effect(
         boxUsage,
       });
     }).pipe(Effect.forkScoped);
-    yield* Effect.tryPromise(async () => {
+    yield* tryCloudPromise("keepWarmBases", async () => {
       const manager = await resolve();
       if (!manager) return;
       const policy = warmBasePolicy(manager.config.provisioning?.warmBaseRefreshHours);
@@ -2890,14 +2893,14 @@ export const layer = Layer.effect(
     );
     // A server that runs agents itself reads `source` as an operator keeps it.
     if (!localAgentRuns)
-      yield* Effect.tryPromise(resolve).pipe(
+      yield* tryCloudPromise("resolveManager", resolve).pipe(
         Effect.flatMap((manager) =>
           Effect.forEach(
             (manager?.config.provisioning?.skills ?? []).flatMap(({ source, url }) =>
               url ? [{ source, url }] : [],
             ),
             (bundle) =>
-              Effect.tryPromise(() => refreshSkillBundle(bundle)).pipe(
+              tryCloudPromise("refreshSkillBundle", () => refreshSkillBundle(bundle)).pipe(
                 Effect.flatMap((result) =>
                   result === "updated" ? Effect.logInfo("skill bundle updated") : Effect.void,
                 ),
@@ -3194,7 +3197,7 @@ export const layer = Layer.effect(
       }, null),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
       provisionedSkills: localAgentRuns
-        ? Effect.succeed(undefined)
+        ? Effect.undefined
         : run(async (service) => {
             const bundles = service.config.provisioning?.skills ?? [];
             if (bundles.length === 0) return undefined;

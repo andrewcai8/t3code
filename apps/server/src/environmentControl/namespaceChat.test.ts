@@ -718,7 +718,8 @@ function makeWorld() {
 }
 type World = ReturnType<typeof makeWorld>;
 
-class ManagerCrash extends Error {}
+class ManagerCrash extends Schema.TaggedError<ManagerCrash>()("ManagerCrash", {}) {}
+const isManagerCrash = Schema.is(ManagerCrash);
 interface CrashPoint {
   readonly at: number;
   readonly when: "before" | "after";
@@ -775,7 +776,7 @@ function makeChat(world: World, chatId = "chat-1") {
         await drive(goal, ports);
         return { actions, crashed, completed: true };
       } catch (error) {
-        if (!(error instanceof ManagerCrash)) throw error;
+        if (!isManagerCrash(error)) throw error;
         return { actions, crashed, completed: false };
       } finally {
         crash = null;

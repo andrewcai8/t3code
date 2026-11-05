@@ -182,6 +182,16 @@ class Lost extends Schema.TaggedError<Lost>()("Lost", { cause: Schema.Defect() }
   }
 }
 
+/** A call to this host's own disk or Modal that is logged or swallowed, never matched on. */
+class ForkHostCallError extends Schema.TaggedError<ForkHostCallError>()("ForkHostCallError", {
+  operation: Schema.Literals(["save batch", "copy outputs back", "list sandboxes", "end sandbox"]),
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return `Could not ${this.operation}.`;
+  }
+}
+
 const notStarted = (error: { readonly message: string }) =>
   new NotStarted({ reason: error.message, cause: error });
 
@@ -334,13 +344,15 @@ interface Batch {
 
 /** Keeps the batch on disk, so t3_fork_status answers across a restart. */
 const saveBatch = (batch: Batch) =>
-  Effect.try(() =>
-    writeBatch(batch.resultsDir, {
-      owner: batch.owner,
-      jobs: batch.jobs,
-      finishedAt: batch.finishedAt,
-    } satisfies BatchRecord),
-  ).pipe(
+  Effect.try({
+    try: () =>
+      writeBatch(batch.resultsDir, {
+        owner: batch.owner,
+        jobs: batch.jobs,
+        finishedAt: batch.finishedAt,
+      } satisfies BatchRecord),
+    catch: (cause) => new ForkHostCallError({ operation: "save batch", cause }),
+  }).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("worktree fork batch could not be saved", { batch: batch.id, cause }),
     ),
@@ -630,9 +642,10 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       };
     if (exitCode !== 0) return { outputsProblem: "Packing the outputs failed." };
     const local = outputs.archive;
-    const download = yield* Effect.tryPromise(() =>
-      sandboxes.download(sandboxId, OUTPUTS, local),
-    ).pipe(Effect.option);
+    const download = yield* Effect.tryPromise({
+      try: () => sandboxes.download(sandboxId, OUTPUTS, local),
+      catch: (cause) => new ForkHostCallError({ operation: "copy outputs back", cause }),
+    }).pipe(Effect.option);
     if (Option.isNone(download)) {
       yield* Effect.sync(() => NodeFS.rmSync(local, { force: true }));
       return { outputsProblem: "Copying the outputs back failed." };
@@ -1310,12 +1323,14 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const running =
       records.length === 0
         ? new Set<string>()
-        : yield* Effect.tryPromise(() =>
-            sandboxes.list(host.modal.app, host.modal.environment, {
-              purpose: COPY_PURPOSE,
-              host: hostTag,
-            }),
-          ).pipe(
+        : yield* Effect.tryPromise({
+            try: () =>
+              sandboxes.list(host.modal.app, host.modal.environment, {
+                purpose: COPY_PURPOSE,
+                host: hostTag,
+              }),
+            catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
+          }).pipe(
             Effect.map((found) => new Set(found.map((sandbox) => sandbox.sandboxId))),
             // Unable to tell, it adopts them all; one whose sandbox is gone is lost as it follows.
             Effect.orElseSucceed(() => new Set(records.map((record) => record.sandboxId))),
@@ -1383,15 +1398,20 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   /** Ends this host's sandboxes that no running job or build owns, old results and unused uploads. */
   const sweep = Effect.gen(function* () {
     yield* cache.evict();
-    const found = yield* Effect.tryPromise(() =>
-      sandboxes.list(host.modal.app, host.modal.environment, {
-        purpose: COPY_PURPOSE,
-        host: hostTag,
-      }),
-    );
+    const found = yield* Effect.tryPromise({
+      try: () =>
+        sandboxes.list(host.modal.app, host.modal.environment, {
+          purpose: COPY_PURPOSE,
+          host: hostTag,
+        }),
+      catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
+    });
     for (const sandbox of found)
       if (!live.has(sandbox.tags.job ?? ""))
-        yield* Effect.tryPromise(() => sandboxes.terminate(sandbox.sandboxId)).pipe(Effect.ignore);
+        yield* Effect.tryPromise({
+          try: () => sandboxes.terminate(sandbox.sandboxId),
+          catch: (cause) => new ForkHostCallError({ operation: "end sandbox", cause }),
+        }).pipe(Effect.ignore);
     const now = yield* Clock.currentTimeMillis;
     yield* Effect.sync(() => {
       for (const entry of NodeFS.existsSync(resultsRoot) ? NodeFS.readdirSync(resultsRoot) : []) {

@@ -18,6 +18,7 @@ import {
   type RemoteAccess,
 } from "./ProvisionedLeaseRegistry.ts";
 import { ownerChat } from "./provisionedChats.ts";
+import { tryCloudPromise } from "./cloudPromiseError.ts";
 
 export type LeaseActivity = "busy" | "idle" | "unknown";
 
@@ -225,7 +226,9 @@ export const pullLeaseUsage = Effect.fn("pullLeaseUsage")(function* (
   lease: ProvisionedLease,
   timeoutMs = 10_000,
 ) {
-  const usage = yield* Effect.tryPromise(() => readLeaseUsage(lease, lease.createdAt, timeoutMs));
+  const usage = yield* tryCloudPromise("readLeaseUsage", () =>
+    readLeaseUsage(lease, lease.createdAt, timeoutMs),
+  );
   yield* store.replace({
     leaseId: lease.leaseId,
     origin: "box",

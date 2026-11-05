@@ -119,9 +119,10 @@ describe("Namespace identity", () => {
         yield* Effect.promise(() => resolveNamespaceIdentity(jwt({ tenant_id: "tenant-test" }))),
       ).toEqual({ tenantId: "tenant-test" });
       // Every credential must still name its tenant.
-      yield* Effect.flip(
-        Effect.tryPromise(() => resolveNamespaceIdentity(jwt({ actor_id: "user-test" }))),
+      const refused = yield* Effect.exit(
+        Effect.promise(() => resolveNamespaceIdentity(jwt({ actor_id: "user-test" }))),
       );
+      expect(refused._tag).toBe("Failure");
     }),
   );
 });

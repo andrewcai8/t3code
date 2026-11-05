@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { AuthenticationError, SandboxError, SandboxNotFoundError, ServiceBusyError } from "e2b";
 import {
   connectResumingE2b,
-  E2bPlacementUnavailable,
+  type E2bPlacementUnavailable,
   e2bResumeDecision,
+  isE2bPlacementUnavailable,
   type E2bResumeRetry,
 } from "./e2bResume.ts";
 
@@ -89,7 +90,7 @@ describe("connectResumingE2b", () => {
       throw new ServiceBusyError("503: no capacity");
     }).then(
       () => "connected",
-      (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
+      (error: Error) => [isE2bPlacementUnavailable(error), error.message],
     );
     expect(outcome).toEqual([true, "E2B could not place sandbox retained: 503: no capacity"]);
     expect(attempts).toBe(1);
@@ -121,7 +122,7 @@ describe("connectResumingE2b", () => {
       throw Object.assign(new SandboxError("502: Bad Gateway"), { statusCode: 502 });
     }).then(
       () => "connected",
-      (error: Error) => [error instanceof E2bPlacementUnavailable, error.message],
+      (error: Error) => [isE2bPlacementUnavailable(error), error.message],
     );
     expect(outcome).toEqual([true, "E2B could not start sandbox retained: 502: Bad Gateway"]);
     expect(attempts).toBe(1);

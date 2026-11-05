@@ -121,6 +121,14 @@ class BaseBuildFailed extends Schema.TaggedError<BaseBuildFailed>()("BaseBuildFa
   }
 }
 
+class BaseDeleteFailed extends Schema.TaggedError<BaseDeleteFailed>()("BaseDeleteFailed", {
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return "An old worktree fork base could not be deleted.";
+  }
+}
+
 /**
  * Puts the default branch at `$4` into the checkout at `$2`: $1 the uploaded archive (a bundle of
  * the commits the image lacks, when it lacks any, and the ship paths), $3 the branch, $5 owner/name.
@@ -395,7 +403,10 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
       sha: tip,
     });
     for (const dropped of next.drop)
-      yield* Effect.tryPromise(() => sandboxes.deleteImage(dropped)).pipe(
+      yield* Effect.tryPromise({
+        try: () => sandboxes.deleteImage(dropped),
+        catch: (cause) => new BaseDeleteFailed({ cause }),
+      }).pipe(
         Effect.catch((cause) =>
           Effect.logWarning("an old worktree fork base could not be deleted", { cause }),
         ),

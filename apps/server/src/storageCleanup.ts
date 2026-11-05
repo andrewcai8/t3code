@@ -81,6 +81,14 @@ class PnpmModulesManifestParseError extends Schema.TaggedError<PnpmModulesManife
   }
 }
 
+class WorktreeLstatError extends Schema.TaggedError<WorktreeLstatError>()("WorktreeLstatError", {
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return "Could not read a worktree entry's timestamps.";
+  }
+}
+
 const DAY_MS = 86_400_000;
 // Give settle scripts time to open terminals that protect the worktree.
 const SETTLE_SCRIPT_GRACE_MS = 60_000;
@@ -442,7 +450,10 @@ const make = Effect.gen(function* () {
         // about the files inside. Content copied in with `rsync -a`, `tar x` or
         // `cp -p` keeps its old mtime but gets a fresh ctime, which Effect's
         // File.Info does not expose.
-        const stat = yield* Effect.tryPromise(() => NodeFSP.lstat(target));
+        const stat = yield* Effect.tryPromise({
+          try: () => NodeFSP.lstat(target),
+          catch: (cause) => new WorktreeLstatError({ cause }),
+        });
         if (stat.isSymbolicLink()) continue;
         if (Math.max(stat.mtimeMs, stat.ctimeMs) > cutoff)
           return { status: "recent" as const, path: target };

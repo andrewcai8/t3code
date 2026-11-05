@@ -15,6 +15,7 @@ import {
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
+  resolveSidebarV2TopStatus,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
@@ -311,6 +312,9 @@ describe("resolveSidebarThreadStatus", () => {
         runtime: { ...runtime, status: "preparing" as const },
       }),
     ).toBe("preparing");
+    expect(resolveSidebarV2TopStatus({ status: "preparing", isUnread: true, isWoke: true })).toBe(
+      "preparing",
+    );
     expect(
       resolveSidebarThreadStatus({
         ...idle,

@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import { ProvisionProviderError, type ProvisionProviderPorts } from "./Provisioning.ts";
 
 import {
-  ProvisionRetentionError,
+  isProvisionRetentionError,
   retentionTimeoutMs,
   verifyRetentionDeadline,
 } from "./retention.ts";
@@ -111,7 +111,7 @@ export function makeE2bAllocationPorts(config: E2bAllocationConfig): E2bAllocati
         },
         catch: (error) =>
           new ProvisionProviderError({
-            ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+            ...(isProvisionRetentionError(error) ? { retentionFailed: true } : {}),
             message:
               "E2B create response is uncertain; recover the existing allocation before proceeding",
           }),
@@ -149,7 +149,7 @@ export function makeE2bAllocationPorts(config: E2bAllocationConfig): E2bAllocati
         },
         catch: (error) =>
           new ProvisionProviderError({
-            ...(error instanceof ProvisionRetentionError ? { retentionFailed: true } : {}),
+            ...(isProvisionRetentionError(error) ? { retentionFailed: true } : {}),
             message: "E2B fork response is uncertain; recover the existing child before proceeding",
           }),
       });

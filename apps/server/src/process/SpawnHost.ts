@@ -315,7 +315,7 @@ const makeHostSupervisor = (host: SpawnHostCommand, deadlines: SpawnHostDeadline
         );
       }
       case "Off":
-        if (!state.unreported) return Effect.succeed(undefined);
+        if (!state.unreported) return Effect.undefined;
         state = { _tag: "Off", unreported: false };
         return Effect.logWarning(
           "Spawn host is unavailable; child processes now fork the server.",
