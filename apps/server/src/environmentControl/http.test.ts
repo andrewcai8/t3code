@@ -80,7 +80,6 @@ it.effect(
           controlConfig: Effect.succeed(null),
           modalForkSource: () => Effect.succeed(null),
           modalBoxes: Effect.succeed(null),
-          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
           provisionedSkills: Effect.succeed(undefined),
           listProvisioned: () => Effect.succeed([]),
           start: () => Effect.die("Unused in provision HTTP proof"),

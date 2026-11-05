@@ -24,6 +24,7 @@ import { usageSourcePath } from "@t3tools/shared/usageMerge";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -169,10 +170,8 @@ export class BoxUsageStore extends Context.Service<
                 yield* sql`DELETE FROM box_usage WHERE lease_id = ${input.leaseId}`;
                 return;
               }
-              for (let index = 0; index < hours.length; index += HOUR_INSERT_CHUNK) {
-                yield* sql`INSERT INTO box_usage_hours ${sql.insert(
-                  hours.slice(index, index + HOUR_INSERT_CHUNK),
-                )}`;
+              for (const chunk of Arr.chunksOf(hours, HOUR_INSERT_CHUNK)) {
+                yield* sql`INSERT INTO box_usage_hours ${sql.insert(chunk)}`;
               }
               yield* sql`
                 INSERT INTO box_usage (lease_id, origin, account_ids_json, sources_json, pulled_at)

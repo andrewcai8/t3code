@@ -1,5 +1,7 @@
 import { CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import type * as Signature from "effect/crypto/Signature";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -31,6 +33,7 @@ import { makeManagedServerProvider } from "@t3tools/provider-core/server/managed
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { applyCodexModelCatalog } from "../codexModelCatalog.ts";
 import type { ProviderDriver, ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { resolveCodexProviderEnvironment } from "../codexProviderEnvironment.ts";
 import { makeCodexHostLogin } from "./codexHostLogin.ts";
@@ -99,7 +102,9 @@ export type CodexDriverEnv =
   | ProviderHost.ProviderHost
   | ChildProcessSpawner.ChildProcessSpawner
   | ResetCreditCoordinator.ResetCreditCoordinator
-  | Crypto.Crypto
+  | Digest.Digest
+  | SecureRandom.SecureRandom
+  | Signature.Signature
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions
@@ -151,7 +156,13 @@ export const CodexDriver: ProviderDriver<
     const installation = yield* CodexInstallation.CodexInstallation;
     const modelCatalog = yield* ModelCatalog.ModelCatalog;
     const currentCatalog = modelCatalog.current(DRIVER_KIND);
-    const homeLayout = yield* resolveCodexHomeLayout(config);
+    // Only the instance's own CODEX_HOME picks its home; the server's ambient one must not.
+    const environmentHome = (yield* mergeProviderInstanceEnvironment(environment, {})).CODEX_HOME;
+    const homeLayout = yield* resolveCodexHomeLayout(
+      !config.homePath.trim() && !config.shadowHomePath.trim() && environmentHome?.trim()
+        ? { ...config, homePath: environmentHome }
+        : config,
+    );
     const processEnv = yield* resolveCodexProviderEnvironment(
       environment,
       yield* HostProcess.Environment,

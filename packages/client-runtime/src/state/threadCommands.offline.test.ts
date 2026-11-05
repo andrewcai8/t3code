@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { EnvironmentId, ThreadId, type OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -29,11 +29,8 @@ import {
 } from "./threadLifecycleOverlay.ts";
 
 const TEST_CRYPTO_LAYER = Layer.succeed(
-  Crypto.Crypto,
-  Crypto.make({
-    randomBytes: (size) => new Uint8Array(size),
-    digest: (_algorithm, data) => Effect.succeed(data),
-  }),
+  SecureRandom.SecureRandom,
+  SecureRandom.make((size) => new Uint8Array(size)),
 );
 
 const OFFLINE_ENVIRONMENT_ID = EnvironmentId.make("environment-1");

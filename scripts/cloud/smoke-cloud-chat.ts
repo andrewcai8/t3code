@@ -5,6 +5,7 @@
  * Usage: node scripts/cloud/smoke-cloud-chat.ts --origin <url> --pairing-token-file <file> --provider e2b --agents codex,claudeAgent --report <file>
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
@@ -25,7 +26,9 @@ import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Hex from "effect/encoding/Hex";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -243,7 +246,7 @@ const mostUsedPercent = (provider: ServerProvider | undefined) =>
 const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const startedAt = DateTime.formatIso(yield* DateTime.now);
   const runStart = yield* Clock.currentTimeMillis;
@@ -263,15 +266,10 @@ const smoke = Effect.fn("smokeCloudChat")(function* (options: Options) {
     record(name, false, null, { error: message, ...(evidence ? { detail: evidence } : {}) }).pipe(
       Effect.andThen(Effect.fail(new SmokeFailure({ message: `${name}: ${message}` }))),
     );
-  const uuid = crypto.randomUUIDv4();
+  const uuid = crypto.uuidV4();
+  const digest = yield* Digest.Digest;
   const sha256 = (value: string) =>
-    crypto
-      .digest("SHA-256", new TextEncoder().encode(value))
-      .pipe(
-        Effect.map((bytes) =>
-          Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""),
-        ),
-      );
+    digest.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(Effect.map(Hex.encode));
 
   const bearerFor = Effect.fn("bearerFor")(function* () {
     const cachePath = `${options.pairingTokenFile}.bearer.json`;
@@ -1502,7 +1500,7 @@ const command = Command.make(
 
 if (import.meta.main) {
   Command.run(command, { version: "0.0.0" }).pipe(
-    Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
+    Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, FetchHttpClient.layer)),
     NodeRuntime.runMain,
   );
 }

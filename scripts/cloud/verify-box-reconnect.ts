@@ -6,6 +6,7 @@
  * Tokens and pairing URLs never reach stdout or the report; the box is disposed on every path.
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { TokenStore, bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
@@ -61,7 +62,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -486,7 +487,7 @@ const clientLayer = (
 const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const startedAt = DateTime.formatIso(yield* DateTime.now);
   const runStart = yield* Clock.currentTimeMillis;
   const elapsed = Effect.map(
@@ -962,7 +963,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       },
     );
 
-    const messageId = MessageId.make(yield* crypto.randomUUIDv4());
+    const messageId = MessageId.make(yield* crypto.uuidV4());
     const sentAt = yield* Clock.currentTimeMillis;
     yield* bounded(
       registry.run(
@@ -1087,9 +1088,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       const instance = config.providers.find((provider) => provider.enabled);
       if (instance === undefined)
         return yield* new VerifyFailure({ message: "the manager has no enabled provider account" });
-      const requestId = ProvisionRequestId.make(yield* crypto.randomUUIDv4());
+      const requestId = ProvisionRequestId.make(yield* crypto.uuidV4());
       created.requestId = requestId;
-      const threadId = ThreadId.make(yield* crypto.randomUUIDv4());
+      const threadId = ThreadId.make(yield* crypto.uuidV4());
       const model =
         instance.models.find((candidate) => candidate.isDefault === true) ?? instance.models[0];
       if (options.secondClient && model === undefined)
@@ -1100,7 +1101,7 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
           ? {
               threadId,
               firstTurn: {
-                messageId: MessageId.make(yield* crypto.randomUUIDv4()),
+                messageId: MessageId.make(yield* crypto.uuidV4()),
                 text: "Reply with the single word: ready.",
                 title: SECOND_CLIENT_CHAT_TITLE,
                 modelSelection: { instanceId: instance.instanceId, model: model.slug },
@@ -1493,7 +1494,11 @@ if (import.meta.main) {
     // The runtime's own logs can carry socket URLs; the transition lines report what matters.
     Effect.provideService(References.MinimumLogLevel, "None"),
     Effect.provide(
-      Layer.mergeAll(NodeServices.layer, RpcHttp.layerRemoteHttpClient(globalThis.fetch)),
+      Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        RpcHttp.layerRemoteHttpClient(globalThis.fetch),
+      ),
     ),
     NodeRuntime.runMain,
   );

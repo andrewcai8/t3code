@@ -51,6 +51,7 @@ describe("v2 thread shell lists with lifecycle overlays", () => {
     const threads = createEnvironmentThreadShellAtoms({
       catalogValueAtom,
       snapshotAtom: withThreadLifecycleOverlays(snapshotAtom, overlays),
+      hiddenThreadTagsAtom: () => Atom.make(null),
     });
     const ref = { environmentId, threadId: v2ThreadShell.id };
     const projectList = threads.threadShellsForProjectRefsAtom([

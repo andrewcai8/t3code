@@ -25,7 +25,7 @@ import {
 } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -151,7 +151,7 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const settings = yield* ServerSettings.ServerSettingsService;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const environmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
 
   // A retried request with the same clientRequestId maps to the same command
@@ -162,7 +162,7 @@ const make = Effect.gen(function* () {
     target?: { readonly threadId: ThreadId; readonly clientRequestId?: string | undefined },
   ) =>
     (target?.clientRequestId === undefined
-      ? crypto.randomUUIDv4().pipe(Effect.orDie)
+      ? crypto.uuidV4().pipe(Effect.orDie)
       : Effect.succeed(
           `${actor.environmentId}:${actor.threadId}:${target.threadId}:${target.clientRequestId}`,
         )

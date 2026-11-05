@@ -1,5 +1,6 @@
 import * as NodeOS from "node:os";
 
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { CodexSettings, ProviderSessionId, ThreadId } from "@t3tools/contracts";
@@ -12,6 +13,7 @@ import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../../config.ts";
+import * as PortScanner from "../../preview/PortScanner.ts";
 import { resolveCodexProviderEnvironment } from "../../provider/codexProviderEnvironment.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -35,8 +37,10 @@ describe("Codex instance home", () => {
     Effect.gen(function* () {
       const spawnedCodexHomes: Array<string | undefined> = [];
       const spawner = ChildProcessSpawner.make((command) => {
-        if (ChildProcess.isStandardCommand(command))
-          spawnedCodexHomes.push(command.options.env?.CODEX_HOME);
+        if (ChildProcess.isStandardCommand(command)) {
+          const home = command.options.env?.CODEX_HOME;
+          spawnedCodexHomes.push(typeof home === "string" ? home : undefined);
+        }
         return Effect.fail(
           PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
         );
@@ -51,7 +55,9 @@ describe("Codex instance home", () => {
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
-            CodexAdapterV2.layerAppServerClientFactory,
+            CodexAdapterV2.layerAppServerClientFactory.pipe(
+              Layer.provide(Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => {} })),
+            ),
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-codex-shared-home-" }),
           ),
         ),
@@ -74,7 +80,12 @@ describe("Codex instance home", () => {
       assert.deepEqual(spawnedCodexHomes, [path.join(NodeOS.homedir(), ".codex")]);
     }).pipe(
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
       ),
       Effect.provideService(HostProcess.Platform, "linux"),
       Effect.provideService(HostProcess.Environment, {

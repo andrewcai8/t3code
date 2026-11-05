@@ -464,8 +464,7 @@ const makeReader = Effect.fnUntraced(function* (
         if (current === reader) current = undefined;
         void reader.worker.terminate();
       }
-      // @effect-diagnostics-next-line effectSucceedWithVoid:off - The connection result distinguishes undefined from void.
-      if (pool.unavailable) return Effect.succeed(undefined);
+      if (pool.unavailable) return Effect.undefined;
       pool.unavailable = true;
       return Effect.logWarning("SQLite reader worker unavailable; reads use the main connection", {
         reason,
@@ -473,8 +472,7 @@ const makeReader = Effect.fnUntraced(function* (
     });
 
   return Effect.suspend((): Effect.Effect<Connection | undefined> => {
-    // @effect-diagnostics-next-line effectSucceedWithVoid:off - The connection result distinguishes undefined from void.
-    if (pool.unavailable) return Effect.succeed(undefined);
+    if (pool.unavailable) return Effect.undefined;
     let reader: NonNullable<typeof current>;
     try {
       reader = current ?? start();
@@ -494,8 +492,7 @@ const makeReader = Effect.fnUntraced(function* (
       (startup): Effect.Effect<Connection | undefined> =>
         // A late ready event must not hand out a worker retired by another acquire timeout.
         pool.unavailable || current !== reader
-          ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - The connection result distinguishes undefined from void.
-            Effect.succeed(undefined)
+          ? Effect.undefined
           : Option.isSome(startup) && startup.value.type === "ready"
             ? Effect.succeed(reader.connection)
             : turnOff(
@@ -650,6 +647,8 @@ const mainThreadCheckpointWriter = (writer: NodeSqlite.DatabaseSync): Checkpoint
   if (typeof writer.isTransaction !== "boolean" || typeof writer.setAuthorizer !== "function") {
     return "Node SQLite lacks transaction-state or statement-authorizer support";
   }
+  // These are the writer's first statements, before callers set their own wait.
+  writer.exec("PRAGMA busy_timeout = 5000;");
   const version = String(writer.prepare("SELECT sqlite_version() AS version").get()?.version);
   const [major = 0, minor = 0] = version.split(".").map(Number);
   // Older SQLite treats NOOP as PASSIVE, which would checkpoint on the writer.
@@ -1713,6 +1712,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
   );
 
   const client = yield* Client.make({
+    driver: "node:sqlite",
     acquirer: transactionAcquirer,
     borrower,
     compiler,

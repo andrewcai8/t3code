@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ProviderDriverKind,
@@ -117,9 +118,11 @@ const readSummary = (
         Layer.provideMerge(ProviderHostLive.layer),
         Layer.provideMerge(CodexUsageHistory.layer.pipe(Layer.provideMerge(Sqlite.layerMemory))),
         Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
-        Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+        Layer.provideMerge(
+          Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedNone }),
+        ),
         Layer.provideMerge(ServerConfig.layerTest(process.cwd(), NodePath.join(home, prefix))),
-        Layer.provideMerge(NodeServices.layer),
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         Layer.provideMerge(Layer.succeed(HostProcess.Platform, "linux")),
         Layer.provideMerge(
           ServerSettings.layerTest({

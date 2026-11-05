@@ -17,7 +17,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -153,7 +153,7 @@ const view = (batch: Batch): FleetForkBatch => ({
 
 const make = Effect.gen(function* () {
   const machines = yield* ForkMachines.ForkMachines;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const host = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor).environmentId;
   const scope = yield* Effect.scope;
   const batches = new Map<string, Batch>();
@@ -472,7 +472,7 @@ const make = Effect.gen(function* () {
       if (settings === null)
         return yield* failure("environment_unavailable", "This host has no cloud configuration.");
       const limits = forkLimits(settings.limits);
-      const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+      const id = yield* crypto.uuidV4().pipe(Effect.orDie);
       const done = yield* Deferred.make<void>();
       yield* prune;
       // A retried call while its batch runs joins it rather than paying for a second one. Nothing

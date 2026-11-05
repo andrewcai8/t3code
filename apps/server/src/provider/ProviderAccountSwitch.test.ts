@@ -15,7 +15,7 @@ import {
   ThreadId,
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -126,7 +126,7 @@ const claudeDriver = (
           attachmentsDir: cwd,
           fileSystem: yield* FileSystem.FileSystem,
           path: yield* Path.Path,
-          crypto: yield* Crypto.Crypto,
+          random: yield* SecureRandom.SecureRandom,
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           queryRunner: {
             allocateSessionId: Effect.succeed(nativeSession),
@@ -144,6 +144,10 @@ const claudeDriver = (
                   applyFlagSettings: () => Effect.void,
                   setPermissionMode: () => Effect.void,
                   backgroundTasks: () => Effect.succeed(false),
+                  mcpServerStatus: Effect.succeed([]),
+                  readMcpResource: () => Effect.die("unexpected MCP resource read"),
+                  callMcpTool: () => Effect.die("unexpected MCP tool call"),
+                  listPermissionRules: Effect.die("unexpected permission rules read"),
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
                   close: Effect.void,
@@ -172,7 +176,7 @@ const claudeDriver = (
     | McpProviderSessions.McpProviderSessions
     | FileSystem.FileSystem
     | Path.Path
-    | Crypto.Crypto
+    | SecureRandom.SecureRandom
     | ChildProcessSpawner.ChildProcessSpawner
   >;
 

@@ -5,7 +5,7 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { NodeWS } from "@effect/platform-node-shared/NodeSocket";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import { it } from "@effect/vitest";
 import { expect, vi } from "vite-plus/test";
 import { EnvironmentId, ProvisionRequestId } from "@t3tools/contracts";

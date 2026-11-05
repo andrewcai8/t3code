@@ -22,6 +22,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Redacted from "effect/Redacted";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -90,6 +91,10 @@ const DEFAULT_DEADLINES: SpawnHostDeadlines = { readyMillis: 30_000, spawnMillis
 const MAX_HOST_DEATHS = 3;
 const PROCESS_GROUP_GRACE_MILLIS = 1_000;
 const PROCESS_GROUP_POLL_MILLIS = 10;
+
+// The host spawns with plain strings; Redacted only keeps secrets out of errors and traces.
+const unwrapWord = (word: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(word) ? Redacted.value(word) : word;
 
 const killQuietly = (pid: number, signal: NodeJS.Signals) => {
   try {
@@ -310,7 +315,6 @@ const makeHostSupervisor = (host: SpawnHostCommand, deadlines: SpawnHostDeadline
         );
       }
       case "Off":
-        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
         if (!state.unreported) return Effect.succeed(undefined);
         state = { _tag: "Off", unreported: false };
         return Effect.logWarning(
@@ -441,9 +445,13 @@ const make = Effect.fn("SpawnHost.make")(function* (
       yield* fileSystem.access(options.cwd);
       cwd = path.resolve(options.cwd);
     }
-    const env = options.extendEnv
-      ? { ...process.env, ...options.env }
-      : (options.env ?? process.env);
+    let env: Record<string, string | undefined> = process.env;
+    if (options.env !== undefined) {
+      env = options.extendEnv ? { ...process.env } : {};
+      for (const [name, value] of Object.entries(options.env)) {
+        env[name] = value === undefined ? undefined : unwrapWord(value);
+      }
+    }
     const killSignal = options.killSignal ?? "SIGTERM";
     const exit = Deferred.makeUnsafe<ExitStatus, PlatformError.PlatformError>();
     // Set only by a reported exit; a lost host leaves it unset with `exit` failed.
@@ -458,7 +466,7 @@ const make = Effect.fn("SpawnHost.make")(function* (
       const abandon = connection.spawn(
         {
           command: command.command,
-          args: command.args,
+          args: command.args.map(unwrapWord),
           cwd,
           env,
           stdio: [toStdio(stdinConfig.stream), toStdio(stdoutConfig), toStdio(stderrConfig)],

@@ -27,7 +27,7 @@ import { THREAD_LINK_PROTOCOL } from "@t3tools/shared/threadLinks";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -221,7 +221,7 @@ const make = Effect.gen(function* () {
   const operations = yield* ProvisionOperationStore;
   const boxClient = yield* BoxFleetClient.BoxFleetClient;
   const forks = yield* WorkerForks.WorkerForks;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const hostScope = yield* Effect.scope;
   const leases = createProvisionedLeaseRegistry(sql);
   const chats = createProvisionedChatStore(sql);
@@ -239,7 +239,7 @@ const make = Effect.gen(function* () {
   const retries = new Map<string, { readonly failures: number; readonly retryAt: number }>();
   // The one launch each chat may have in flight, by what it asked for.
   const launching = new Map<string, string>();
-  const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
+  const uuid = crypto.uuidV4().pipe(Effect.orDie);
 
   /** Every cloud chat's box this host holds that is not removed. */
   const chatBoxes = listProvisionedEnvironments(sql, [], [], []).pipe(
