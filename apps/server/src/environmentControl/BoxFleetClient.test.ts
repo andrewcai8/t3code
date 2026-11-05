@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - a raw HTTP and WebSocket server stands in for a box.
 import { expect, it } from "@effect/vitest";
-import { NodeWS } from "@effect/platform-node/NodeSocket";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";

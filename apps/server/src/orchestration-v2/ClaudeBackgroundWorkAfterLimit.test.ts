@@ -12,7 +12,7 @@ import {
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -178,7 +178,7 @@ const runtime = (
             attachmentsDir: cwd,
             fileSystem: yield* FileSystem.FileSystem,
             path: yield* Path.Path,
-            crypto: yield* Crypto.Crypto,
+            random: yield* SecureRandom.SecureRandom,
             idAllocator: yield* IdAllocator.IdAllocatorV2,
             continuationRequests: yield* ProviderContinuationRequests.ProviderContinuationRequests,
             queryRunner: {
@@ -197,6 +197,10 @@ const runtime = (
                     applyFlagSettings: () => Effect.void,
                     setPermissionMode: () => Effect.void,
                     backgroundTasks: () => Effect.succeed(false),
+                    mcpServerStatus: Effect.succeed([]),
+                    readMcpResource: () => Effect.die("unexpected MCP resource read"),
+                    callMcpTool: () => Effect.die("unexpected MCP tool call"),
+                    listPermissionRules: Effect.die("unexpected permission rules read"),
                     stopTask: () => Effect.void,
                     interrupt: Effect.void,
                     close: Effect.asVoid(close),

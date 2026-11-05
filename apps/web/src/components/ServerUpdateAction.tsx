@@ -298,11 +298,11 @@ export function ServerUpdateAction({
   const isDesktopAppUpdate = selfUpdate === "desktop-managed";
   const serverVersion = useServerConfigs().get(environmentId)?.environment.serverVersion;
   const sessionStateAtom = environmentSession.sessionStateAtom(environmentId);
-  const sessionState = useAtomValue(sessionStateAtom);
+  const sessionMayUpdate = useAtomValue(sessionStateAtom, canUpdateServer);
   const guestLabel = guestServerUpdateLabel(environmentId, selfUpdate);
   const mayUpdate = () =>
     guestLabel !== null || canUpdateServer(appAtomRegistry.get(sessionStateAtom));
-  const canUpdate = guestLabel !== null || canUpdateServer(sessionState);
+  const canUpdate = guestLabel !== null || sessionMayUpdate;
   const updatesDenial = managedUpdatesDenial(useManagedPolicy(environmentId));
   const update = useServerUpdate();
   const { copyToClipboard } = useCopyToClipboard<{ command: string }>({

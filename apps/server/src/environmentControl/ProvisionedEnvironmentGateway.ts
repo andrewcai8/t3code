@@ -4,6 +4,7 @@ import * as Option from "effect/Option";
 import {
   HttpClient,
   HttpClientRequest,
+  HttpMethod,
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
@@ -74,6 +75,9 @@ const proxyHttp = Effect.fn("ProvisionedEnvironmentGateway.proxyHttp")(function*
 ) {
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   const method = request.method;
+  if (!HttpMethod.isHttpMethod(method)) {
+    return HttpServerResponse.text("Method Not Allowed", { status: 405 });
+  }
   const upstreamRequest = HttpClientRequest.make(method)(target.toString()).pipe(
     method === "GET" || method === "HEAD"
       ? (self) => self

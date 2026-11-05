@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
@@ -106,9 +107,11 @@ const serviceLayers = (input: {
       CodexUsageHistory.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
     ),
     Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
-    Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
+    Layer.provideMerge(
+      Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedNone }),
+    ),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: input.prefix })),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     Layer.provideMerge(
       input.boxUsage ??
         Layer.succeed(

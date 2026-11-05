@@ -12,14 +12,12 @@ import type * as Path from "effect/Path";
 import type { ChildProcessSpawner } from "effect/process";
 
 import { type ClaudeAuthStatusProbe, orClaudeAuthStatus } from "../claudeColdProbe.ts";
-import { type probeClaudeCapabilities, runClaudeCommand } from "../ClaudeProvider.ts";
+import { type ClaudeCapabilitiesProbe, runClaudeCommand } from "../ClaudeProvider.ts";
 import { makeClaudeUsageTurnReader, resolveClaudeProbeUsage } from "../claudeSetupTokenUsage.ts";
 import { resolveClaudeSdkExecutablePath } from "./ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "./ClaudeHome.ts";
 
-export type ClaudeCapabilities = NonNullable<
-  Effect.Success<ReturnType<typeof probeClaudeCapabilities>>
->;
+export type ClaudeCapabilities = ClaudeCapabilitiesProbe;
 
 export const makeClaudeHostProbe = Effect.fn("makeClaudeHostProbe")(function* (
   settings: ClaudeSettings,

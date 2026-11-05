@@ -3194,8 +3194,7 @@ export const layer = Layer.effect(
       }, null),
       provisionProviders: run(async (service) => provisionProviders(service.config), []),
       provisionedSkills: localAgentRuns
-        ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
-          Effect.succeed(undefined)
+        ? Effect.succeed(undefined)
         : run(async (service) => {
             const bundles = service.config.provisioning?.skills ?? [];
             if (bundles.length === 0) return undefined;

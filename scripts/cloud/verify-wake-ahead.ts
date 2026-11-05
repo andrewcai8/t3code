@@ -5,6 +5,7 @@
  * state file names). Exits nonzero on a failed check.
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import {
@@ -32,7 +33,7 @@ import {
 } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Fiber from "effect/Fiber";
@@ -171,7 +172,7 @@ const seconds = (from: number, to: number) => Math.round((to - from) / 100) / 10
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const uuid = (yield* Crypto.Crypto).randomUUIDv4();
+  const uuid = (yield* SecureRandom.SecureRandom).uuidV4();
   let state: State = (yield* fs.exists(statePath))
     ? yield* decodeState(yield* fs.readFileString(statePath))
     : { boxes: [], checks: [] };
@@ -641,6 +642,6 @@ const program = Effect.gen(function* () {
 });
 
 program.pipe(
-  Effect.provide(Layer.merge(NodeServices.layer, FetchHttpClient.layer)),
+  Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, FetchHttpClient.layer)),
   NodeRuntime.runMain,
 );

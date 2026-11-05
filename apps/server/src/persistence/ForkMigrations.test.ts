@@ -110,6 +110,9 @@ const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [74, "ExcludeAttachmentPlaceholdersFromSearch"],
   [75, "SubagentDeliveryState"],
   [76, "ProjectionProjectsPinArchive"],
+  [77, "RepairBooleanSettledOverride"],
+  [78, "DropOrchestrationEventCorrelationIndex"],
+  [79, "DelegatedRecoveryIndexes"],
 ];
 /** Upstream migrations newer than any fork-era ledger, which a moved ledger still runs. */
 const upstreamAfterForkEra = expectedUpstreamAbove51.filter(([id]) => id > 56);
@@ -122,6 +125,7 @@ const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [6, "ScheduledTaskTarget"],
   [7, "DiagnosticsReadGrants"],
   [8, "RecoveryScanIndexes"],
+  [9, "DropDuplicateDelegatedCompletionIndex"],
 ];
 
 /** Replaces the ledger above upstream's shared 51 with what an older fork build recorded. */

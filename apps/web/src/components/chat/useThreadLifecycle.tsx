@@ -12,7 +12,7 @@ import {
   makeThreadErrorSetter,
 } from "../ChatView.logic";
 import { useStableCallback } from "../../hooks/useStableCallback";
-import { useNowAfter } from "../../hooks/useDeadline";
+import { useDeadlinePassed, useNowAfter } from "../../hooks/useDeadline";
 import type { usePendingThreadRequests } from "./usePendingThreadRequests";
 import {
   AuthOrchestrationOperateScope,
@@ -28,6 +28,11 @@ import {
   snoozeWakeLabel,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  BACKGROUND_WORK_STOP_RETRY_AFTER_MS,
+  type BackgroundWorkStopRequest,
+  isBackgroundWorkStopPending,
+} from "@t3tools/client-runtime/state/thread-execution";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../../hooks/useThreadActions";
 import { settleAndAdvance } from "../../settleAndAdvance";
 import type { ChatShortcutCommands } from "./useChatShortcuts";
@@ -51,6 +56,7 @@ import { useEnvironmentScope } from "~/state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { vcsEnvironment } from "../../state/vcs";
 import { useChildThreadInputs, readThreadShell, waitForThreadShell } from "../../state/entities";
+import { serverEnvironment } from "../../state/server";
 import { environmentShell } from "../../state/shell";
 import { ThreadStatusLine } from "./ThreadStatusLine";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
@@ -400,21 +406,44 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   // The interrupt path also accepts a completed run while its provider still
   // has background work.
   const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
-  const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
-  const isStoppingBackgroundWork =
-    stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
+  const [backgroundWorkStops, setBackgroundWorkStops] = useState<
+    Record<string, BackgroundWorkStopRequest | undefined>
+  >({});
+  const backgroundWorkStop = backgroundWorkStops[`${environmentId}:${activeThreadId}`] ?? null;
+  const isStoppingBackgroundWork = isBackgroundWorkStopPending(
+    backgroundWorkStop,
+    `${environmentId}:${activeThreadId}`,
+    pendingBackgroundTasks,
+    useDeadlinePassed(backgroundWorkStop?.retryAt ?? null),
+  );
   const handleStopBackgroundWork = async () => {
-    if (!activeThread || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+    if (
+      isStoppingBackgroundWork ||
+      !activeThread ||
+      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+    )
       return;
-    const requestKey = `${environmentId}:${activeThread.id}`;
-    setStoppingBackgroundWorkKey(requestKey);
+    const request: BackgroundWorkStopRequest = {
+      threadKey: `${environmentId}:${activeThread.id}`,
+      taskIds: pendingBackgroundTasks.map((task) => task.taskId),
+      retryAt: null,
+    };
+    setBackgroundWorkStops((current) => ({ ...current, [request.threadKey]: request }));
     const result = await interruptThreadTurn({
       environmentId,
       input: { threadId: activeThread.id },
     });
-    // Acceptance does not confirm termination. Allow retry while the provider
-    // finishes stopping the tasks or reports a failure.
-    setStoppingBackgroundWorkKey((current) => (current === requestKey ? null : current));
+    setBackgroundWorkStops((current) =>
+      current[request.threadKey] !== request
+        ? current
+        : {
+            ...current,
+            [request.threadKey]:
+              result._tag === "Failure"
+                ? undefined
+                : { ...request, retryAt: Date.now() + BACKGROUND_WORK_STOP_RETRY_AFTER_MS },
+          },
+    );
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -427,21 +456,27 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   };
   const handleStopBackgroundWorkStable = useStableCallback(handleStopBackgroundWork);
   const openRelatedThreadGenerationRef = useRef(0);
-  const onOpenRelatedThread = async (threadId: ThreadId) => {
+  // A task delegated to a linked environment opens there; the default is this thread's own.
+  const onOpenRelatedThread = async (
+    threadId: ThreadId,
+    threadEnvironmentId: EnvironmentId = environmentId,
+  ) => {
     const generation = ++openRelatedThreadGenerationRef.current;
-    // Related threads live here, except a message Home sent from another environment.
+    // Related threads live in the given environment, except a message Home sent from another one.
     const serverThreadRefs = appAtomRegistry.get(environmentThreadShells.threadRefsAtom);
     const owner = serverThreadRefs.some(
-      (ref) => ref.environmentId === environmentId && ref.threadId === threadId,
+      (ref) => ref.environmentId === threadEnvironmentId && ref.threadId === threadId,
     )
-      ? environmentId
-      : (serverThreadRefs.find((ref) => ref.threadId === threadId)?.environmentId ?? environmentId);
+      ? threadEnvironmentId
+      : (serverThreadRefs.find((ref) => ref.threadId === threadId)?.environmentId ??
+        threadEnvironmentId);
     const threadRef = scopeThreadRef(owner, threadId);
     const isEnvironmentLive = () =>
       appAtomRegistry.get(environmentShell.stateValueAtom(owner)).status === "live";
     // The shell can leave idle subagent children out, so absence is not deletion there: the
     // route decides from the thread's own detail.
-    const shellOmitsChildren = serverConfig?.shellThreadFamilies === true;
+    const shellOmitsChildren =
+      appAtomRegistry.get(serverEnvironment.configValueAtom(owner))?.shellThreadFamilies === true;
     // A just-launched child can reach this timeline before its shell syncs.
     if (!shellOmitsChildren && isEnvironmentLive() && readThreadShell(threadRef) === null) {
       const location = router.latestLocation;

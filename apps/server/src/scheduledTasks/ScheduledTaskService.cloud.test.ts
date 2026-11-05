@@ -174,11 +174,7 @@ it.effect("refuses to run a cloud task that is already running, as it does a loc
       yield* service.runNow({ id: cloud.id });
       yield* Deferred.await(fireStarted);
       const again = yield* service.runNow({ id: cloud.id }).pipe(Effect.flip);
-      assert.equal(again.message, "Could not run schedule task.");
-      assert.equal(
-        (again.cause as { readonly message?: string } | undefined)?.message,
-        "Schedule task is already running.",
-      );
+      assert.equal(again.message, "Schedule task is already running.");
     }).pipe(
       Effect.provide(
         ScheduledTaskService.layer.pipe(

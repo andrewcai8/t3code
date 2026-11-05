@@ -33,6 +33,9 @@ const { values: flags } = NodeUtil.parseArgs({
     burst: { type: "string", default: "100" },
   },
 });
+// One JSON line per result, so a run pipes straight into jq.
+const printJson = (value: unknown) => console.log(JSON.stringify(value));
+
 const targetRssMb = Number(flags["rss-mb"]);
 const rounds = Number(flags.rounds);
 const sequentialSpawns = Number(flags.sequential);
@@ -204,7 +207,7 @@ const program = Effect.gen(function* () {
     hostRssMb: hostRssMb === undefined ? undefined : Math.round(hostRssMb),
     rawForkMsAtInflatedRss: rawForkMs(),
   };
-  console.log(JSON.stringify({ environment }));
+  printJson({ environment });
 
   const runners: Record<Mode, ProcessRunner.ProcessRunner["Service"]> = {
     direct: directRunner,
@@ -225,25 +228,21 @@ const program = Effect.gen(function* () {
       results[mode].stalls.push(...sequential.stalls);
       results[mode].bursts.push(burst);
       results[mode].failures += sequential.failures + burst.failures;
-      console.log(
-        JSON.stringify({ round, mode, burst, sequentialStallMs: quantiles(sequential.stalls) }),
-      );
+      printJson({ round, mode, burst, sequentialStallMs: quantiles(sequential.stalls) });
     }
   }
   const idle = yield* sequentialRound(undefined);
-  console.log(JSON.stringify({ summary: "idle floor", perSpawnStallMs: quantiles(idle.stalls) }));
+  printJson({ summary: "idle floor", perSpawnStallMs: quantiles(idle.stalls) });
   for (const mode of ["direct", "hosted"] as const) {
     const bursts = results[mode].bursts;
-    console.log(
-      JSON.stringify({
-        summary: mode,
-        perSpawnStallMs: quantiles(results[mode].stalls),
-        burstMaxDelayMs: quantiles(bursts.map((burst) => burst.delay.max)),
-        burstP99DelayMs: quantiles(bursts.map((burst) => burst.delay.p99)),
-        burstWallMs: quantiles(bursts.map((burst) => burst.wallMs)),
-        failures: results[mode].failures,
-      }),
-    );
+    printJson({
+      summary: mode,
+      perSpawnStallMs: quantiles(results[mode].stalls),
+      burstMaxDelayMs: quantiles(bursts.map((burst) => burst.delay.max)),
+      burstP99DelayMs: quantiles(bursts.map((burst) => burst.delay.p99)),
+      burstWallMs: quantiles(bursts.map((burst) => burst.wallMs)),
+      failures: results[mode].failures,
+    });
   }
   yield* Scope.close(scope, Exit.void);
 });

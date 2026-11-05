@@ -75,6 +75,7 @@ import {
   clampManagedRuntimeMode,
   managedCapabilityDenial,
 } from "@t3tools/contracts";
+import { resolvePastedPath } from "@t3tools/shared/path";
 import { useManagedPolicy } from "~/state/managedPolicy";
 import { ManagedNotice } from "../ManagedPolicy";
 import { readEnvironmentScope } from "~/state/session";
@@ -1601,7 +1602,10 @@ function ScheduledTaskEditorForm({
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    existingWorktreePath: event.target.value,
+                    existingWorktreePath: resolvePastedPath(
+                      current.existingWorktreePath,
+                      event.target.value,
+                    ),
                   }))
                 }
               />
