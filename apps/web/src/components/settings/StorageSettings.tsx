@@ -615,7 +615,7 @@ export function WorktreeCleanupSection() {
                 <SettingsRow
                   title="Delete unused worktrees"
                   status={ruleStatus("orphanWorktreeAfterDays")}
-                  description="Remove git worktrees that no thread uses, such as ones agents create themselves, once nothing in them has changed for this many days. Worktrees with local changes or a running process are kept, and other folders are only listed."
+                  description="Remove git worktrees no thread uses, such as ones agents made, once unchanged for this many days. Worktrees with local changes or a running process are kept; other folders are only listed."
                   serverScoped
                   control={
                     <RetentionControl
@@ -823,7 +823,7 @@ export function StorageCleanupSections() {
         <SettingsRow
           title="Remove unused cloud machines"
           status={ruleStatus("cloudMachinesAfterDays")}
-          description="Remove a paused cloud machine that keeps billing for its disk after this many unused days, or an hour after it pauses once its chat is settled. Unpushed work is first pushed to a t3-backup branch. A machine whose work can't be pushed is kept."
+          description="Remove a paused cloud machine after this many unused days, or an hour after it pauses once its chat is settled. Unpushed work goes to a t3-backup branch first; if that fails, the machine is kept."
           serverScoped
           control={
             <RetentionControl

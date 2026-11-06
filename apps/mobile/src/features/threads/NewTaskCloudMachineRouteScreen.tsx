@@ -12,7 +12,7 @@ import {
 } from "../../state/use-remote-environment-registry";
 import { NewCloudMachineForm } from "../connection/NewCloudMachineForm";
 import { useCreateCloudMachine } from "../connection/useCreateCloudMachine";
-import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
+import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 
 type NewTaskCloudMachineRouteParams = {
   /** The host that starts the machine: the project's own host, or the host of the box it is on. */

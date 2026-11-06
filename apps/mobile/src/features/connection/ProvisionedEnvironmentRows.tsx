@@ -15,7 +15,7 @@ import { provisionedSandboxLeases } from "../../state/provision-stores";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
+import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import {
   presentProvisionedEnvironment,
   type ProvisionedRowAction,

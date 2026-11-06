@@ -6,7 +6,9 @@ import {
   ScheduledTaskId,
   type ScheduledTask,
   type ScheduledTaskTarget,
+  type ScheduledTaskThreadMode,
   type ScheduledTaskUpsertSchedule,
+  scheduledTaskThreadMode,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -72,6 +74,7 @@ export interface DraftState {
   readonly projectId: string;
   readonly threadId: string;
   readonly target: ScheduledTaskTarget;
+  readonly threadMode: ScheduledTaskThreadMode;
   readonly workspaceMode: WorkspaceMode;
   readonly baseRef: string;
   readonly startFromOrigin: boolean;
@@ -257,6 +260,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     projectId: task.projectId,
     threadId: task.threadId ?? "",
     target: task.target,
+    threadMode: scheduledTaskThreadMode(task),
     workspaceMode: task.workspaceStrategy.type,
     // A cloud box clones a non-worktree strategy's branch, so that is the base branch to edit.
     baseRef:
@@ -353,4 +357,26 @@ export function defaultScheduledTaskProjectId<
       (scopedToProject ? scopedProjects[0] : undefined)
     )?.id ?? ""
   );
+}
+
+/**
+ * A task on a cloud machine can only start a new chat, so a one-thread mode or a bound thread
+ * rules cloud targets out, and a cloud target rules the one-thread modes out.
+ */
+export function scheduledTaskDestinationRules(draft: {
+  readonly threadId: string;
+  readonly threadMode: ScheduledTaskThreadMode;
+  readonly cloud: boolean;
+}) {
+  return {
+    cloudTargetsAllowed: draft.threadId === "" && draft.threadMode === "new_thread",
+    allowedThreadModes: (draft.cloud
+      ? ["new_thread"]
+      : [
+          "new_thread",
+          "continue",
+          "fresh_session",
+        ]) satisfies ReadonlyArray<ScheduledTaskThreadMode>,
+    threadMode: draft.cloud ? ("new_thread" as const) : draft.threadMode,
+  };
 }

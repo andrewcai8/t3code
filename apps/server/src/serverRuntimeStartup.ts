@@ -576,6 +576,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
         durationMs: (yield* Clock.currentTimeMillis) - startedAt,
       });
     }).pipe(
+      Effect.withSpan("server.shutdown"),
       Effect.catchCause((cause) =>
         Effect.logWarning("V2 orchestration shutdown failed", {
           cause: Cause.pretty(cause),

@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ProjectId,
   ScheduledTaskId,
+  ThreadId,
   type ScheduledTask,
 } from "@t3tools/contracts";
 import {
@@ -15,6 +16,8 @@ import {
   hasScheduledTaskDraftChanges,
   scheduleDraftForTask,
   scheduleFromDraft,
+  selectableScheduledTaskTargets,
+  threadModeForTarget,
 } from "./scheduledTaskDraft";
 
 describe("scheduleDraftForTask", () => {
@@ -147,6 +150,43 @@ describe("scheduled task run target", () => {
     expect([draft.target, draft.baseRef]).toEqual(["namespace", "release"]);
     expect(hasScheduledTaskDraftChanges(draft, { ...draft, target: "local" })).toBe(true);
     expect(hasScheduledTaskDraftChanges(draft, { ...draft, target: "namespace" })).toBe(false);
+  });
+});
+
+describe("scheduled task thread mode and cloud targets", () => {
+  const unbound = editDraft({ ...legacyTask, threadId: null, threadMode: "new_thread" });
+
+  it("offers cloud kinds only to a task that starts a new thread each run", () => {
+    expect(selectableScheduledTaskTargets(["local", "namespace"], unbound)).toEqual([
+      "local",
+      "namespace",
+    ]);
+    for (const threadMode of ["continue", "fresh_session"] as const) {
+      expect(
+        selectableScheduledTaskTargets(["local", "namespace"], { ...unbound, threadMode }),
+      ).toEqual(["local"]);
+    }
+  });
+
+  it("keeps cloud kinds out of reach of a task bound to a thread", () => {
+    const bound = editDraft({
+      ...legacyTask,
+      threadId: ThreadId.make("thread-1"),
+      threadMode: undefined,
+    });
+    expect(selectableScheduledTaskTargets(["local", "namespace"], bound)).toEqual(["local"]);
+  });
+
+  it("keeps a host's only targets when it offers no local run", () => {
+    expect(
+      selectableScheduledTaskTargets(["namespace"], { ...unbound, threadMode: "continue" }),
+    ).toEqual(["namespace"]);
+  });
+
+  it("saves new_thread for a cloud target whatever the draft held", () => {
+    const continuing = { ...unbound, threadMode: "continue" as const };
+    expect(threadModeForTarget(continuing, "namespace")).toBe("new_thread");
+    expect(threadModeForTarget(continuing, "local")).toBe("continue");
   });
 });
 

@@ -41,6 +41,11 @@ if (
   } else if (command === "fork-exec") {
     const { runForkExec } = await import("./cli/forkExec.ts");
     process.exitCode = await runForkExec(process.argv.slice(3));
+  } else if (command === "__speech-worker") {
+    const mode = process.argv[3];
+    if (mode !== "discover" && mode !== "model") throw new Error("Unknown speech worker mode.");
+    const { runNativeSpeechWorker } = await import("./speech/native.ts");
+    await runNativeSpeechWorker(mode, process.argv[4]);
   } else {
     enableCliCompileCache();
     // Windows desktop launches without stdin; attach before reading, except on fast paths using pipes.
