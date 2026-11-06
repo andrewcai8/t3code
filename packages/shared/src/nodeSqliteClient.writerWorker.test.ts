@@ -246,7 +246,7 @@ it.effect("finishes a statement sent before close and fails the ones after", () 
 );
 
 // The checkpoint worker holds writes at this many WAL frames until it can reset the log.
-const CHECKPOINT_BACKPRESSURE_FRAMES = 10_000;
+const CHECKPOINT_BACKPRESSURE_FRAMES = 32_768;
 
 const walFrames = (sql: SqlClient.SqlClient) =>
   Effect.map(
@@ -292,9 +292,9 @@ it.effect.each([{ writerWorker: false }, { writerWorker: true }])(
         Effect.gen(function* () {
           assert.deepEqual(yield* sql`PRAGMA wal_autocheckpoint`.values, [[0]]);
           yield* sql`CREATE TABLE blobs(data BLOB NOT NULL)`;
-          // 64 pages each, about 11,000 frames in all: past the ceiling.
+          // 64 pages each, about 35,000 frames in all: past the ceiling.
           const blob = new Uint8Array(256 * 1024);
-          for (let index = 0; index < 170; index++) {
+          for (let index = 0; index < 540; index++) {
             yield* sql`INSERT INTO blobs VALUES (${blob})`;
           }
           const [frames] = yield* sql<{

@@ -9,7 +9,6 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { withHostChat } from "../connection/hostBoxSync.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
-import type { RpcSession } from "../rpc/session.ts";
 import type { EnvironmentShellState } from "./shell.ts";
 
 /**
@@ -34,7 +33,7 @@ function adoptHostChat(
  */
 export const followHostChat = Effect.fn("EnvironmentShellState.followHostChat")(function* (
   state: SubscriptionRef.SubscriptionRef<EnvironmentShellState>,
-  lastAuthoritativeSession: Ref.Ref<RpcSession | null>,
+  authoritativeOmission: Ref.Ref<string | null>,
 ) {
   const registry = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
   if (Option.isNone(registry)) return;
@@ -53,10 +52,10 @@ export const followHostChat = Effect.fn("EnvironmentShellState.followHostChat")(
     Stream.runForEach(([chat]) =>
       Effect.gen(function* () {
         if (adoptHostChat(yield* SubscriptionRef.get(state), chat) === null) return;
-        // The copy's sequence is no cursor. Resuming from it on the same session would skip the
-        // box's other events, so the next subscription reloads the snapshot. Cleared first, so
-        // no subscription can read the copy's sequence as its own.
-        yield* Ref.set(lastAuthoritativeSession, null);
+        // The copy's sequence is no cursor. Resuming from it would skip the box's other events,
+        // so the next subscription reloads the snapshot. Cleared first, so no subscription can
+        // read the copy's sequence as its own.
+        yield* Ref.set(authoritativeOmission, null);
         yield* SubscriptionRef.update(state, (current) => adoptHostChat(current, chat) ?? current);
       }),
     ),

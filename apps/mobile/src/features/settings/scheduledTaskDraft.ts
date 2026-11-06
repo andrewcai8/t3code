@@ -1,4 +1,4 @@
-import { isWebhookDedupeTemplate } from "@t3tools/contracts";
+import { isWebhookDedupeTemplate, scheduledTaskThreadMode } from "@t3tools/contracts";
 import type {
   ModelSelection,
   ServerConfig,
@@ -6,6 +6,7 @@ import type {
   RuntimeMode,
   ScheduledTask,
   ScheduledTaskTarget,
+  ScheduledTaskThreadMode,
   ScheduledTaskUpsertSchedule,
   ScheduledTaskWebhookSignature,
 } from "@t3tools/contracts";
@@ -206,6 +207,7 @@ export type ScheduledTaskDraft = {
   readonly modelSelectionIsExplicit: boolean;
   readonly schedule: ScheduleDraft;
   readonly target: ScheduledTaskTarget;
+  readonly threadMode: ScheduledTaskThreadMode;
   readonly workspace: Workspace;
   readonly baseRef: string;
   readonly checkoutPath: string;
@@ -235,6 +237,7 @@ function draftSignature(draft: ScheduledTaskDraft): string {
     draft.schedule.coalesceKey,
     draft.schedule.coalesceWindowSeconds,
     draft.schedule.filters.map(({ path, op, value }) => [path, op, value]),
+    draft.threadMode,
     draft.workspace,
     draft.baseRef,
     draft.checkoutPath,
@@ -251,6 +254,34 @@ export function hasScheduledTaskDraftChanges(
   return draftSignature(initial) !== draftSignature(current);
 }
 
+/** A cloud machine starts a new chat each run, so a task bound to a thread or sharing one stays on this server. */
+export function cloudTargetAllowed(
+  draft: Pick<ScheduledTaskDraft, "task" | "threadMode">,
+): boolean {
+  return draft.threadMode === "new_thread" && !draft.task?.threadId;
+}
+
+/**
+ * The targets a draft may pick: cloud kinds drop out while it keeps one thread. A host that offers
+ * no local run keeps its cloud kinds, since nothing else could run the task.
+ */
+export function selectableScheduledTaskTargets(
+  targets: readonly ScheduledTaskTarget[],
+  draft: Pick<ScheduledTaskDraft, "task" | "threadMode">,
+): readonly ScheduledTaskTarget[] {
+  return cloudTargetAllowed(draft) || !targets.includes("local")
+    ? targets
+    : targets.filter((target) => target === "local");
+}
+
+/** The thread mode to save: a cloud target can only start a new thread. */
+export function threadModeForTarget(
+  draft: Pick<ScheduledTaskDraft, "threadMode">,
+  target: ScheduledTaskTarget,
+): ScheduledTaskThreadMode {
+  return target === "local" ? draft.threadMode : "new_thread";
+}
+
 export function createDraft(
   projectId: ProjectId | null,
   modelSelection: ModelSelection | null,
@@ -264,6 +295,7 @@ export function createDraft(
     modelSelectionIsExplicit: false,
     schedule: DEFAULT_SCHEDULE,
     target: "local",
+    threadMode: "new_thread",
     workspace: "worktree",
     baseRef: "main",
     checkoutPath: "",
@@ -283,6 +315,7 @@ export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
     modelSelectionIsExplicit: true,
     schedule: scheduleDraftForTask(task),
     target: task.target,
+    threadMode: scheduledTaskThreadMode(task),
     workspace: task.workspaceStrategy.type,
     // A cloud box clones a non-worktree strategy's branch, so that is the base branch to edit.
     baseRef:

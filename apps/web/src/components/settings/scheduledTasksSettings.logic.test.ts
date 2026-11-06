@@ -21,6 +21,7 @@ import {
   defaultScheduledTaskProjectId,
   matchesScheduledTaskScope,
   scheduleFromDraft,
+  scheduledTaskDestinationRules,
   taskToDraft,
 } from "./scheduledTasksSettings.logic";
 
@@ -380,4 +381,35 @@ it("rejects dedupe templates without a request placeholder", () => {
   const draft = taskToDraft({ ...legacyTask, schedule: { type: "webhook", signature: null } });
   expect(scheduleFromDraft({ ...draft, replayKey: "literal" })).toBeNull();
   expect(scheduleFromDraft({ ...draft, coalesceKey: "{{body.bad" })).toBeNull();
+});
+
+describe("scheduledTaskDestinationRules", () => {
+  it("lets a local task pick any thread mode and offers cloud targets only for a new thread", () => {
+    expect(
+      scheduledTaskDestinationRules({ threadId: "", threadMode: "new_thread", cloud: false }),
+    ).toEqual({
+      cloudTargetsAllowed: true,
+      allowedThreadModes: ["new_thread", "continue", "fresh_session"],
+      threadMode: "new_thread",
+    });
+    expect(
+      scheduledTaskDestinationRules({ threadId: "", threadMode: "fresh_session", cloud: false }),
+    ).toMatchObject({ cloudTargetsAllowed: false, threadMode: "fresh_session" });
+  });
+
+  it("rules cloud targets out for a bound thread", () => {
+    expect(
+      scheduledTaskDestinationRules({
+        threadId: "thread-1",
+        threadMode: "new_thread",
+        cloud: false,
+      }).cloudTargetsAllowed,
+    ).toBe(false);
+  });
+
+  it("limits a cloud target to a new thread whatever the draft held", () => {
+    expect(
+      scheduledTaskDestinationRules({ threadId: "", threadMode: "continue", cloud: true }),
+    ).toMatchObject({ allowedThreadModes: ["new_thread"], threadMode: "new_thread" });
+  });
 });

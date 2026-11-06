@@ -102,6 +102,10 @@ it.effect("fires a cloud task on a machine without holding the caller, and a loc
         .upsert({ ...taskInput("bound", "e2b"), threadId: "thread-1" as never })
         .pipe(Effect.flip);
       assert.equal(bound.message, "A task that runs on a cloud machine must start a new chat.");
+      const oneThread = yield* service
+        .upsert({ ...taskInput("one thread", "e2b"), threadMode: "fresh_session" })
+        .pipe(Effect.flip);
+      assert.equal(oneThread.message, "A task that runs on a cloud machine must start a new chat.");
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
