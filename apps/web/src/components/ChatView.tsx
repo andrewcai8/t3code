@@ -1847,6 +1847,7 @@ export default function ChatView(props: ChatViewProps) {
     draftThread,
     envLocked,
     automaticEnvironment,
+    startsCloudEnvironment: cloud.startsCloudEnvironment,
     logicalProjectEnvironments,
     environmentById,
     providersByEnvironment,

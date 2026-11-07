@@ -47,14 +47,16 @@ export function cloudCloneSource(
 /**
  * Whether auto balance must pick a machine: it has not picked one, or its pick
  * no longer takes new chats (such as a host whose local agent runs were
- * switched off after the pick).
+ * switched off after the pick). A draft that will start a cloud machine runs on
+ * none of these, so it never waits for one.
  */
 export function needsLoadBalancedPick(input: {
   readonly automatic: boolean;
+  readonly startsCloudEnvironment: boolean;
   readonly pickedEnvironmentId: EnvironmentId | null | undefined;
   readonly candidates: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
 }): boolean {
-  if (!input.automatic) return false;
+  if (!input.automatic || input.startsCloudEnvironment) return false;
   const picked = input.pickedEnvironmentId;
   return !picked || !input.candidates.some((candidate) => candidate.environmentId === picked);
 }

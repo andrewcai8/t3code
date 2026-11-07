@@ -103,6 +103,7 @@ describe("needsLoadBalancedPick", () => {
     expect(
       needsLoadBalancedPick({
         automatic: true,
+        startsCloudEnvironment: false,
         pickedEnvironmentId: host,
         candidates: [laptop, desktop],
       }),
@@ -113,18 +114,40 @@ describe("needsLoadBalancedPick", () => {
     expect(
       needsLoadBalancedPick({
         automatic: true,
+        startsCloudEnvironment: false,
         pickedEnvironmentId: laptop.environmentId,
         candidates: [laptop, desktop],
       }),
     ).toBe(false);
     expect(
-      needsLoadBalancedPick({ automatic: true, pickedEnvironmentId: null, candidates: [laptop] }),
+      needsLoadBalancedPick({
+        automatic: true,
+        startsCloudEnvironment: false,
+        pickedEnvironmentId: null,
+        candidates: [laptop],
+      }),
     ).toBe(true);
+  });
+
+  it("never picks for a draft that will start a cloud machine", () => {
+    expect(
+      needsLoadBalancedPick({
+        automatic: true,
+        startsCloudEnvironment: true,
+        pickedEnvironmentId: null,
+        candidates: [laptop, desktop],
+      }),
+    ).toBe(false);
   });
 
   it("never picks for a manually placed draft", () => {
     expect(
-      needsLoadBalancedPick({ automatic: false, pickedEnvironmentId: host, candidates: [laptop] }),
+      needsLoadBalancedPick({
+        automatic: false,
+        startsCloudEnvironment: false,
+        pickedEnvironmentId: host,
+        candidates: [laptop],
+      }),
     ).toBe(false);
   });
 });

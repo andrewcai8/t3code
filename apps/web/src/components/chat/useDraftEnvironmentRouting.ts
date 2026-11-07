@@ -27,6 +27,8 @@ interface DraftEnvironmentRoutingInput {
   readonly draftThread: DraftSessionState | null;
   readonly envLocked: boolean;
   readonly automaticEnvironment: boolean;
+  /** The draft's send starts a cloud machine, so no machine here needs to take it. */
+  readonly startsCloudEnvironment: boolean;
   readonly logicalProjectEnvironments: ReturnType<typeof useLogicalProjectEnvironments>;
   readonly environmentById: ReadonlyMap<EnvironmentId, EnvironmentPresentation>;
   readonly providersByEnvironment: ReturnType<typeof useEnvironmentProviders>;
@@ -56,6 +58,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     draftThread,
     envLocked,
     automaticEnvironment,
+    startsCloudEnvironment,
     logicalProjectEnvironments,
     environmentById,
     providersByEnvironment,
@@ -79,6 +82,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
   const { openScratchProject } = useScratchProject();
   const needsLoadBalancing = needsLoadBalancedPick({
     automatic: automaticEnvironment,
+    startsCloudEnvironment,
     pickedEnvironmentId: draftThread?.loadBalancedEnvironmentId,
     candidates: logicalProjectEnvironments,
   });
