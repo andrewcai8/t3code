@@ -16,7 +16,6 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
-import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import { MuseUsageHome } from "@t3tools/provider-muse/server";
 import * as Effect from "effect/Effect";
@@ -99,7 +98,7 @@ const serviceLayers = (input: {
   readonly boxUsage?: Layer.Layer<BoxUsageStore>;
 }) =>
   Layer.fresh(CursorUsageAccounts.layer).pipe(
-    Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
+    Layer.provide(CursorAccountReader.layer),
     Layer.provideMerge(AntigravityUsage.layer),
     Layer.provideMerge(MuseUsageHome.layer),
     Layer.provideMerge(ProviderHostLive.layer),

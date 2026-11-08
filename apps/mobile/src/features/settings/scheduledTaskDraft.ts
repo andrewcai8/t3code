@@ -9,6 +9,7 @@ import type {
   ScheduledTaskThreadMode,
   ScheduledTaskUpsertSchedule,
   ScheduledTaskWebhookSignature,
+  ThreadId,
 } from "@t3tools/contracts";
 
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
@@ -203,6 +204,7 @@ export type ScheduledTaskDraft = {
   readonly title: string;
   readonly prompt: string;
   readonly projectId: ProjectId | null;
+  readonly threadId: ThreadId | null;
   readonly modelSelection: ModelSelection | null;
   readonly modelSelectionIsExplicit: boolean;
   readonly schedule: ScheduleDraft;
@@ -221,6 +223,7 @@ function draftSignature(draft: ScheduledTaskDraft): string {
     draft.title,
     draft.prompt,
     draft.projectId,
+    draft.threadId,
     draft.modelSelection?.instanceId,
     draft.modelSelection?.model,
     [...(draft.modelSelection?.options ?? [])]
@@ -256,9 +259,9 @@ export function hasScheduledTaskDraftChanges(
 
 /** A cloud machine starts a new chat each run, so a task bound to a thread or sharing one stays on this server. */
 export function cloudTargetAllowed(
-  draft: Pick<ScheduledTaskDraft, "task" | "threadMode">,
+  draft: Pick<ScheduledTaskDraft, "threadId" | "threadMode">,
 ): boolean {
-  return draft.threadMode === "new_thread" && !draft.task?.threadId;
+  return draft.threadMode === "new_thread" && draft.threadId === null;
 }
 
 /**
@@ -267,7 +270,7 @@ export function cloudTargetAllowed(
  */
 export function selectableScheduledTaskTargets(
   targets: readonly ScheduledTaskTarget[],
-  draft: Pick<ScheduledTaskDraft, "task" | "threadMode">,
+  draft: Pick<ScheduledTaskDraft, "threadId" | "threadMode">,
 ): readonly ScheduledTaskTarget[] {
   return cloudTargetAllowed(draft) || !targets.includes("local")
     ? targets
@@ -282,6 +285,38 @@ export function threadModeForTarget(
   return target === "local" ? draft.threadMode : "new_thread";
 }
 
+export function moveDraftToThread(
+  draft: ScheduledTaskDraft,
+  thread: { readonly id: ThreadId; readonly projectId: ProjectId },
+): ScheduledTaskDraft {
+  return {
+    ...draft,
+    threadId: thread.id,
+    projectId: thread.projectId,
+    threadMode: draft.threadMode === "new_thread" ? "continue" : draft.threadMode,
+  };
+}
+
+/** Leaves the thread but keeps the mode. Matches MCP: new threads stay out of the shared checkout. */
+export function unbindDraftFromThread(draft: ScheduledTaskDraft): ScheduledTaskDraft {
+  if (draft.threadId === null) return draft;
+  return {
+    ...draft,
+    threadId: null,
+    ...(draft.workspace === "root"
+      ? { workspace: "worktree" as const, startFromOrigin: true }
+      : {}),
+  };
+}
+
+export function changeDraftProject(
+  draft: ScheduledTaskDraft,
+  projectId: ProjectId,
+): ScheduledTaskDraft {
+  if (projectId === draft.projectId) return draft;
+  return { ...unbindDraftFromThread(draft), projectId };
+}
+
 export function createDraft(
   projectId: ProjectId | null,
   modelSelection: ModelSelection | null,
@@ -291,6 +326,7 @@ export function createDraft(
     title: "",
     prompt: "",
     projectId,
+    threadId: null,
     modelSelection,
     modelSelectionIsExplicit: false,
     schedule: DEFAULT_SCHEDULE,
@@ -311,6 +347,7 @@ export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
     title: task.title,
     prompt: task.prompt,
     projectId: task.projectId,
+    threadId: task.threadId,
     modelSelection: task.modelSelection,
     modelSelectionIsExplicit: true,
     schedule: scheduleDraftForTask(task),

@@ -1,5 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off - the suite seeds real Cursor
-// login files on disk, outside the service's Effect FileSystem.
+// @effect-diagnostics nodeBuiltinImport:off - the suite makes a temporary home
+// outside the service's Effect FileSystem.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -44,19 +44,10 @@ const SAVED_USAGE_NOW = Date.parse("2026-08-15T00:00:00Z");
 
 const OUTPUT_BY_ACCOUNT: Record<string, number> = { user_a: 3, user_b: 5 };
 
-/** Stands in for Cursor's dashboard API: a login file names its account. */
+/** Stands in for Cursor's dashboard API: an API key names its account. */
 const readAccount: CursorAccountReader.CursorAccountReader["Service"]["read"] = (credential) =>
-  Effect.promise(async () => {
-    const accountKey =
-      typeof credential === "string" ? (await NodeFSP.readFile(credential, "utf8")).trim() : "";
-    if (!(accountKey in OUTPUT_BY_ACCOUNT)) {
-      return {
-        accountKey: null,
-        records: [],
-        missing: false,
-        error: "Cursor credentials could not be read.",
-      };
-    }
+  Effect.sync(() => {
+    const accountKey = credential.apiKey;
     const record: UsageRecord = {
       provider: "cursor",
       timestampMs: Date.parse("2026-08-01T10:00:00Z"),
@@ -86,16 +77,9 @@ const makeHome = Effect.gen(function* () {
   return home;
 });
 
-const writeLogin = (home: string, config: string, contents: string) =>
-  Effect.promise(async () => {
-    const directory = NodePath.join(home, config, "cursor");
-    await NodeFSP.mkdir(directory, { recursive: true });
-    await NodeFSP.writeFile(NodePath.join(directory, "auth.json"), contents);
-  });
-
-const cursorInstance = (home: string, config: string) => ({
+const cursorInstance = (apiKey: string) => ({
   driver: ProviderDriverKind.make("cursor"),
-  environment: [{ name: "XDG_CONFIG_HOME", value: NodePath.join(home, config), sensitive: false }],
+  environment: [{ name: "CURSOR_API_KEY", value: apiKey, sensitive: false }],
 });
 
 const readSummary = (
@@ -156,75 +140,14 @@ const readSummary = (
     ),
   );
 
-describe("UsageService with several Cursor logins", () => {
-  it.effect("reads every Cursor instance's login and counts each account once", () =>
+describe("UsageService Cursor history", () => {
+  it.effect("keeps a removed account's history", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(SAVED_USAGE_NOW);
       const home = yield* makeHome;
-      // The host's default login and two instance logins share user_a.
-      for (const [config, account] of [
-        ["config", "user_a"],
-        ["config-a", "user_a"],
-        ["config-b", "user_b"],
-        ["config-c", "user_a"],
-      ] as const) {
-        yield* writeLogin(home, config, account);
-      }
-
-      const summary = yield* readSummary(home, "usage-service-cursor-instances", {
-        cursor: cursorInstance(home, "config-a"),
-        "cursor-work": cursorInstance(home, "config-b"),
-        "cursor-alias": cursorInstance(home, "config-c"),
-      });
-
-      assert.deepStrictEqual(
-        summary.sources
-          .filter((source) => source.fingerprint.provider === "cursor")
-          .map((source) => [source.fingerprint.hostId, source.status]),
-        [
-          ["cursor.com", "ok"],
-          ["cursor.com", "ok"],
-        ],
-      );
-      assert.strictEqual(
-        summary.buckets
-          .filter((bucket) => bucket.provider === "cursor")
-          .reduce((sum, bucket) => sum + bucket.totals.outputTokens, 0),
-        8,
-      );
-    }).pipe(Effect.scoped),
-  );
-
-  it.live("reports only the Cursor instance whose saved login cannot be read", () =>
-    Effect.gen(function* () {
-      const home = yield* makeHome;
-      yield* writeLogin(home, "config-invalid", "invalid json");
-
-      const summary = yield* readSummary(home, "usage-service-cursor-invalid-and-missing", {
-        cursor: cursorInstance(home, "config-invalid"),
-        "cursor-empty": cursorInstance(home, "config-empty"),
-      });
-
-      assert.deepStrictEqual(
-        summary.sources
-          .filter((source) => source.fingerprint.provider === "cursor")
-          .map((source) => source.message),
-        ["Cursor credentials could not be read."],
-      );
-    }).pipe(Effect.scoped),
-  );
-
-  it.effect("keeps a removed login's account history", () =>
-    Effect.gen(function* () {
-      yield* TestClock.setTime(SAVED_USAGE_NOW);
-      const home = yield* makeHome;
-      yield* writeLogin(home, "config-b", "user_b");
       yield* readSummary(home, "usage-service-cursor-removed", {
-        "cursor-work": cursorInstance(home, "config-b"),
+        "cursor-work": cursorInstance("user_b"),
       });
-      yield* Effect.promise(() =>
-        NodeFSP.rm(NodePath.join(home, "config-b"), { recursive: true, force: true }),
-      );
 
       const summary = yield* readSummary(home, "usage-service-cursor-removed", {});
 
