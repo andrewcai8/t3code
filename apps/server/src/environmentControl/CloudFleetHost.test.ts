@@ -632,10 +632,10 @@ const resultOf = (response: FleetHostResponse) =>
 it.effect("answers with the thread links boxes on builds before #200 still require", () =>
   withBoxes(({ relay, send, responses, answers, provisioned }) =>
     Effect.gen(function* () {
-      // A sleeping box's list already carries the current link format, which old decoders accept.
+      // A sleeping box's list already carries the current labeled link format, which old decoders accept.
       const listed = yield* relay(environment(2), { op: "threads.list", input: {} });
       expect(decodeLegacyList(resultOf(listed)).threads.map((thread) => thread.link)).toEqual([
-        "<t3-thread://v2/box-2/chat-2>",
+        "[Write docs](t3-thread://v2/box-2/chat-2)",
       ]);
 
       answers.set("threads.read", {

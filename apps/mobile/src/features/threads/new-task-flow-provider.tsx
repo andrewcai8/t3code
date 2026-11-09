@@ -7,7 +7,6 @@ import React, { useEffect, useRef, useState } from "react";
 import type {
   EnvironmentId,
   ModelSelection,
-  ProviderInteractionMode,
   ProviderOptionSelection,
   RuntimeMode,
   ServerProvider,
@@ -84,11 +83,6 @@ import {
 } from "../home/homeThreadList";
 import { useMobileProjectGroupingSettings } from "../../state/project-grouping";
 import {
-  resolvePendingTaskInteractionMode,
-  resolveProviderInteractionMode,
-} from "../../state/legacy-plan-mode";
-import { useLegacyPlanModeState } from "./use-legacy-plan-mode-enabled";
-import {
   resolveNewTaskDraftWorkspace,
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskLocalWorkspaceSelection,
@@ -162,8 +156,6 @@ type NewTaskFlowContextValue = {
   readonly availableBranches: ReadonlyArray<VcsRef>;
   readonly currentCheckoutBranchName: string | null;
   readonly runtimeMode: RuntimeMode;
-  readonly interactionMode: ProviderInteractionMode;
-  readonly planModeEnabled: boolean;
   readonly expandedProvider: string | null;
   readonly environments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
@@ -216,7 +208,6 @@ type NewTaskFlowContextValue = {
   readonly setSubmitting: (value: boolean) => void;
   readonly loadBranches: () => void;
   readonly setRuntimeMode: (value: RuntimeMode) => void;
-  readonly setInteractionMode: (value: ProviderInteractionMode) => void;
   readonly setSelectedModelOptions: (
     value: ReadonlyArray<ProviderOptionSelection> | undefined,
   ) => void;
@@ -237,7 +228,6 @@ export function NewTaskFlowProvider(
   const threads = useThreadShells();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const groupingSettings = useMobileProjectGroupingSettings();
-  const { enabled: legacyPlanModeEnabled } = useLegacyPlanModeState();
 
   const projectScopes = sortHomeProjectScopes({
     scopes: buildHomeProjectScopes({
@@ -490,11 +480,6 @@ export function NewTaskFlowProvider(
     selectedEnvironmentServerConfig?.providers.find(
       (provider) => provider.instanceId === selectedModel?.instanceId,
     ) ?? null;
-  const planModeEnabled =
-    legacyPlanModeEnabled && selectedProviderStatus?.showInteractionModeToggle !== false;
-  const interactionMode = planModeEnabled
-    ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
-    : DEFAULT_PROVIDER_INTERACTION_MODE;
   const setSelectedModelKey = (
     key: string | null,
     options?: ReadonlyArray<ProviderOptionSelection>,
@@ -509,15 +494,7 @@ export function NewTaskFlowProvider(
     const selection = withRememberedModelOptions(
       options ? { ...option.selection, options } : option.selection,
     );
-    const provider = selectedEnvironmentServerConfig?.providers.find(
-      (candidate) => candidate.instanceId === selection.instanceId,
-    );
-    updateComposerDraftSettings(selectedProjectDraftKey, {
-      modelSelection: selection,
-      ...(provider?.showInteractionModeToggle === false
-        ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
-        : {}),
-    });
+    updateComposerDraftSettings(selectedProjectDraftKey, { modelSelection: selection });
     setStickyComposerModelSelection(selection);
   };
   const setSelectedModelOptions = (options: ReadonlyArray<ProviderOptionSelection> | undefined) => {
@@ -723,13 +700,6 @@ export function NewTaskFlowProvider(
       updateComposerDraftSettings(selectedProjectDraftKey, { runtimeMode: value });
     }
   };
-  const setInteractionMode = (value: ProviderInteractionMode) => {
-    if (selectedProjectDraftKey) {
-      updateComposerDraftSettings(selectedProjectDraftKey, {
-        interactionMode: resolveProviderInteractionMode(selectedProviderStatus, value),
-      });
-    }
-  };
 
   const buildPendingTaskMessage = (
     metadata: TurnCommandMetadata,
@@ -775,13 +745,7 @@ export function NewTaskFlowProvider(
         defaultRuntimeMode,
         managedPolicy,
       ),
-      interactionMode: resolvePendingTaskInteractionMode({
-        planModeEnabled: legacyPlanModeEnabled,
-        draftInteractionMode: draft.interactionMode,
-        provider: selectedEnvironmentServerConfig?.providers.find(
-          (candidate) => candidate.instanceId === draftModelSelection.instanceId,
-        ),
-      }),
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       creation: {
         projectId: selectedProject.id,
         projectTitle: selectedProject.title,
@@ -890,8 +854,6 @@ export function NewTaskFlowProvider(
     availableBranches,
     currentCheckoutBranchName,
     runtimeMode,
-    interactionMode,
-    planModeEnabled,
     expandedProvider,
     environments,
     cloud,
@@ -923,7 +885,6 @@ export function NewTaskFlowProvider(
     setSubmitting: (value: boolean) => updateFlow({ submitting: value }),
     loadBranches,
     setRuntimeMode,
-    setInteractionMode,
     setSelectedModelOptions,
     setExpandedProvider: (value: string | null) => updateFlow({ expandedProvider: value }),
   } satisfies NewTaskFlowContextValue;
