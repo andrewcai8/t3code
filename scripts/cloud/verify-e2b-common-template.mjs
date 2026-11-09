@@ -82,7 +82,7 @@ try {
   });
   const info = await owned();
   NodeAssert.equal(info.cpuCount, Number(values["cpu-count"]));
-  NodeAssert.equal(info.memoryMB, 8192);
+  NodeAssert.equal(info.memoryMB, 16384);
   await record("fresh owned sandbox created", {
     sandboxId: sandbox.sandboxId,
     durationMs: Math.round(performance.now() - started),
