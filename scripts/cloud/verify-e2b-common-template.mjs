@@ -124,10 +124,10 @@ try {
   );
   await record("vp executed a package script and disposable Redis answered PING");
   await run(
-    "env -i HOME=/home/user PATH=/home/user/.local/bin:/home/user/.bun/bin:/usr/local/bin:/usr/bin:/bin bash -c 'test \"$(bun --version)\" = 1.4.0; swift --version; vp --version; agent --version; python3 -m venv /tmp/t3-clean-venv; rm -rf /tmp/t3-clean-venv'",
+    "env -i HOME=/home/user PATH=/home/user/.local/bin:/home/user/.bun/bin:/usr/local/bin:/usr/bin:/bin bash -c 'test \"$(bun --version)\" = 1.4.3; swift --version; vp --version; agent --version; python3 -m venv /tmp/t3-clean-venv; rm -rf /tmp/t3-clean-venv'",
   );
   await run(
-    'env -i HOME=/home/user PATH=/usr/bin:/bin bash -lc \'test "$(bun --version)" = 1.4.0; swift --version; agent --version; test "$(npm config get prefix)" = /home/user/.local\'',
+    'env -i HOME=/home/user PATH=/usr/bin:/bin bash -lc \'test "$(bun --version)" = 1.4.3; swift --version; agent --version; test "$(npm config get prefix)" = /home/user/.local\'',
   );
   await record("selected-provider PATH and fresh login shell passed");
   const cloudClis = await run(
@@ -162,7 +162,7 @@ try {
     startTicks,
   );
   await run(
-    'test "$(bun --version)" = 1.4.0 && swift --version && codex --version && agent --version && grep -q "^/swapfile " /proc/swaps',
+    'test "$(bun --version)" = 1.4.3 && swift --version && codex --version && agent --version && grep -q "^/swapfile " /proc/swaps',
   );
   await record("pause/resume retained process, sentinel, tools, and swap", {
     durationMs: Math.round(performance.now() - resumeStarted),
