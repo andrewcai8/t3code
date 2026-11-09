@@ -264,7 +264,12 @@ const make = Effect.gen(function* () {
         return yield* failure("thread_not_found", `Thread ${input.threadId} was not found.`);
       }
       const target = yield* threads
-        .getThreadRecords(input.threadId, ["runs", "runtimeRequests", "contextTransfers"])
+        .getThreadRecords(input.threadId, [
+          "runs",
+          "providerTurns",
+          "runtimeRequests",
+          "contextTransfers",
+        ])
         .pipe(Effect.mapError(threadManagementFailure));
       return (yield* readThreadPage(
         { environmentId, client: undefined },
@@ -339,7 +344,7 @@ const make = Effect.gen(function* () {
       const run = result.projection.runs.find((candidate) => candidate.userMessageId === messageId);
       return {
         threadId: thread.id,
-        link: formatThreadLink({ environmentId, threadId: thread.id }),
+        link: formatThreadLink({ environmentId, threadId: thread.id }, thread.title),
         projectId: thread.projectId,
         modelSelection: thread.modelSelection,
         runId: run?.id ?? null,
@@ -367,7 +372,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(threadManagementFailure));
       return {
         threadId: input.threadId,
-        link: formatThreadLink({ environmentId, threadId: input.threadId }),
+        link: formatThreadLink({ environmentId, threadId: input.threadId }, shell.title),
         messageId,
         runId: result.run.id,
         status: result.run.status,

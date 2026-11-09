@@ -93,7 +93,6 @@ export const UsageSource = Schema.Struct({
   message: Schema.NullOr(TrimmedNonEmptyString),
   /** Its buckets' `sourcePath` when not the home path: cloud boxes a host keeps share one. */
   sourcePath: Schema.optionalKey(TrimmedNonEmptyString),
-  action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
   /** Cached response during refresh; repeat with awaitRefresh for fresh data. */
   refreshing: Schema.optionalKey(Schema.Literal(true)),
 });

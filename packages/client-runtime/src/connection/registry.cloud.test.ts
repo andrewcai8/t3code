@@ -520,6 +520,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         authorizeDpop: () => Effect.die(new Error("Authorization is not used.")),
         authorizeDpopHttp: () => Effect.die(new Error("Authorization is not used.")),
         renewDpopBeforeExpiry: () => Effect.void,
+        rememberCheckedDescriptor: () => Effect.void,
       }),
     ),
     // Route checks find nothing, so each saved route is dialed as it would be after a check.

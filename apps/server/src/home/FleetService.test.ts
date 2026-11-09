@@ -382,7 +382,7 @@ it.effect("returns a ready link for the thread it sends to", () => {
     });
     expect(result).toMatchObject({
       threadId,
-      link: formatThreadLink({ environmentId: EnvironmentId.make("studio"), threadId }),
+      link: formatThreadLink({ environmentId: EnvironmentId.make("studio"), threadId }, "worker"),
     });
   }).pipe(Effect.provide(layer));
 });

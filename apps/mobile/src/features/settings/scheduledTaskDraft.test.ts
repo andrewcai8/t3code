@@ -17,6 +17,7 @@ import {
   scheduleDraftForTask,
   scheduleFromDraft,
   selectableScheduledTaskTargets,
+  unbindDraftFromThread,
   threadModeForTarget,
 } from "./scheduledTaskDraft";
 
@@ -175,6 +176,12 @@ describe("scheduled task thread mode and cloud targets", () => {
       threadMode: undefined,
     });
     expect(selectableScheduledTaskTargets(["local", "namespace"], bound)).toEqual(["local"]);
+    expect(
+      selectableScheduledTaskTargets(["local", "namespace"], {
+        ...unbindDraftFromThread(bound),
+        threadMode: "new_thread",
+      }),
+    ).toEqual(["local", "namespace"]);
   });
 
   it("keeps a host's only targets when it offers no local run", () => {

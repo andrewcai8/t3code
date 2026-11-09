@@ -35,7 +35,6 @@ import { Command, Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
-import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import { MuseUsageHome } from "@t3tools/provider-muse/server";
 
@@ -100,7 +99,6 @@ const scanHistory = Effect.fn("import-machine-usage.scanHistory")(function* (inp
   const settingsLayer = ServerSettingsService.layerTest({
     ...settings,
     providerInstances,
-    cursorKeychainUsageEnabled: false,
   });
   // The scanner reads only its cache directory from the config and its homes from
   // settings, so the in-memory layers stand in for a server without starting one.
@@ -113,9 +111,7 @@ const scanHistory = Effect.fn("import-machine-usage.scanHistory")(function* (inp
         Layer.mergeAll(
           AntigravityUsage.layer,
           MuseUsageHome.layer,
-          CursorUsageAccounts.layer.pipe(
-            Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
-          ),
+          CursorUsageAccounts.layer.pipe(Layer.provide(CursorAccountReader.layer)),
         ).pipe(
           Layer.provide(ProviderHostLive.layer),
           // Usage scans never ask the host for background work or stored credentials.

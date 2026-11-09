@@ -3,7 +3,6 @@ import { NodeServices } from "@effect/platform-node";
 import { limitsNotice } from "@t3tools/shared/usageLimits";
 import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
-import * as CursorKeychain from "./CursorKeychain.ts";
 import cursorPeriod from "./testFixtures/cursorPeriod.json" with { type: "json" };
 import { readCursorUsageLimits } from "./usageLimits.ts";
 
@@ -19,9 +18,6 @@ it.effect("gives each Cursor pool the billing cycle's pace marker", () =>
           Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(cursorPeriod))),
         ),
       ),
-      Effect.provideService(CursorKeychain.CursorKeychain, {
-        accessToken: Effect.die("must not read Keychain"),
-      }),
       Effect.provide(NodeServices.layer),
     );
     expect(

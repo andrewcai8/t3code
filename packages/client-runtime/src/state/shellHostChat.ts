@@ -9,6 +9,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { withHostChat } from "../connection/hostBoxSync.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import type { ShellCacheOrigin } from "../platform/persistence.ts";
 import type { EnvironmentShellState } from "./shell.ts";
 
 /**
@@ -33,7 +34,7 @@ function adoptHostChat(
  */
 export const followHostChat = Effect.fn("EnvironmentShellState.followHostChat")(function* (
   state: SubscriptionRef.SubscriptionRef<EnvironmentShellState>,
-  authoritativeOmission: Ref.Ref<string | null>,
+  origin: Ref.Ref<ShellCacheOrigin | undefined>,
 ) {
   const registry = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
   if (Option.isNone(registry)) return;
@@ -55,7 +56,7 @@ export const followHostChat = Effect.fn("EnvironmentShellState.followHostChat")(
         // The copy's sequence is no cursor. Resuming from it would skip the box's other events,
         // so the next subscription reloads the snapshot. Cleared first, so no subscription can
         // read the copy's sequence as its own.
-        yield* Ref.set(authoritativeOmission, null);
+        yield* Ref.set(origin, undefined);
         yield* SubscriptionRef.update(state, (current) => adoptHostChat(current, chat) ?? current);
       }),
     ),
