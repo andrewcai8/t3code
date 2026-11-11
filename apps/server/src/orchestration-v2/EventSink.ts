@@ -107,10 +107,10 @@ export interface EventSinkV2Shape {
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
     /**
-     * Rebuilds each run.updated, or only those of the listed runs, from the stored row with only
-     * its delegatedCompletion replaced. The batch must not also change that run's lifecycle.
+     * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
+     * The batch must not also change that run's lifecycle.
      */
-    readonly updateDelegatedCompletionOnly?: boolean | ReadonlyArray<RunId>;
+    readonly updateDelegatedCompletionOnly?: boolean;
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
@@ -464,14 +464,9 @@ const layerBase: Layer.Layer<
           }
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
-          const cohortOnly = input.updateDelegatedCompletionOnly ?? false;
-          const events =
-            cohortOnly === false
-              ? input.events
-              : yield* updateDelegatedCompletionOnly(
-                  input.events,
-                  (runId) => cohortOnly === true || cohortOnly.includes(runId),
-                );
+          const events = input.updateDelegatedCompletionOnly
+            ? yield* updateDelegatedCompletionOnly(input.events, () => true)
+            : input.events;
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(events)

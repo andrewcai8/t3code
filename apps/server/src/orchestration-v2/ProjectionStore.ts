@@ -345,6 +345,7 @@ export interface ProjectionRecordFilter {
   readonly turnItemRunId?: RunId;
   readonly messageIds?: ReadonlyArray<MessageId>;
   readonly messageRunIds?: ReadonlyArray<RunId>;
+  readonly messageNodeIds?: ReadonlyArray<NodeId>;
   readonly turnItemRunIds?: ReadonlyArray<RunId | null>;
   readonly turnItemNodeIds?: ReadonlyArray<NodeId>;
   readonly runIds?: ReadonlyArray<RunId>;
@@ -3679,7 +3680,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           `,
           (fields !== undefined && !fields.includes("messages")) ||
           (window === undefined &&
-            matchesNothing(filter?.messageIds, filter?.messageRoles, filter?.messageRunIds))
+            matchesNothing(
+              filter?.messageIds,
+              filter?.messageRoles,
+              filter?.messageRunIds,
+              filter?.messageNodeIds,
+            ))
             ? Effect.succeed([])
             : window === undefined
               ? sql<PayloadRow>`
@@ -3689,6 +3695,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ${filter?.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
                   ${filter?.monitorNotificationsOnly === true ? sql`AND json_extract(payload_json, '$.notification.source.kind') = 'monitor'` : sql``}
                   ${filter?.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
+                  ${filter?.messageNodeIds === undefined ? sql`` : sql`AND node_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageNodeIds)}))`}
                 ORDER BY created_at ASC, message_id ASC
               `
               : sql<PayloadRow>`

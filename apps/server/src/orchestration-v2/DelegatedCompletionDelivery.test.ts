@@ -53,6 +53,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
+import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryService.ts";
 
 const layerPlatformTest = Layer.merge(
   Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
@@ -1830,14 +1831,14 @@ it.layer(layerContinuationWorkerTest)("interrupted completion wakes", (it) => {
     }),
   );
 
-  it.effect(
-    "starts every waiting automated message as one turn and leaves user messages theirs",
-    () =>
+  it.effect.each(["the turn ends", "the server restarts"] as const)(
+    "starts waiting automated messages as one turn and settles them when %s",
+    (outcome) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const sink = yield* EventSink.EventSinkV2;
         const now = yield* DateTime.now;
-        const key = "coalesced-wakes";
+        const key = `coalesced-wakes-${outcome === "the turn ends" ? "end" : "restart"}`;
         const threadId = ThreadId.make(`${key}-parent`);
         const firstParentId = RunId.make(`${key}-first-parent`);
         const secondParentId = RunId.make(`${key}-second-parent`);
@@ -1973,11 +1974,12 @@ it.layer(layerContinuationWorkerTest)("interrupted completion wakes", (it) => {
         assert.deepEqual(
           [agentMessageId, secondDelivery.messageId].map((messageId) => [
             runFor(messageId).status,
-            after.messages.find((message) => message.id === messageId)?.runId,
+            runFor(messageId).joinedRunId,
+            after.messages.find((message) => message.id === messageId)?.nodeId,
           ]),
           [
-            ["cancelled", started.id],
-            ["cancelled", started.id],
+            ["cancelled", started.id, started.rootNodeId],
+            ["cancelled", started.id, started.rootNodeId],
           ],
         );
         assert.deepEqual(
@@ -1988,17 +1990,71 @@ it.layer(layerContinuationWorkerTest)("interrupted completion wakes", (it) => {
         );
         assert.equal(runFor(userMessageId).status, "queued");
         assert.equal(runFor(bufferedWakeId).status, "queued");
-        // A wake that joined another turn is delivered like a steer; the turn's own settles with it.
-        assert.deepEqual(
+        const taskStates = (projection: typeof after) =>
           [firstTaskId, secondTaskId].map(
             (taskId) =>
-              after.subagents.find((task) => task.id === taskId)?.completionDelivery?.state,
+              projection.subagents.find((task) => task.id === taskId)?.completionDelivery?.state,
+          );
+        assert.deepEqual(taskStates(after), ["claimed", "claimed"]);
+
+        if (outcome === "the server restarts") {
+          const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+          yield* recovery.reconcile("startup");
+          const restarted = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            [agentMessageId, secondDelivery.messageId].map((messageId) => {
+              const run = restarted.runs.find(
+                (candidate) => candidate.userMessageId === messageId,
+              )!;
+              const message = restarted.messages.find((candidate) => candidate.id === messageId);
+              return [
+                run.status,
+                run.queueHeld,
+                run.joinedRunId,
+                message?.nodeId === run.rootNodeId,
+              ];
+            }),
+            [
+              ["queued", true, undefined, true],
+              ["queued", true, undefined, true],
+            ],
+          );
+          assert.equal(taskStates(restarted)[1], "claimed");
+          assert.deepEqual(
+            restarted.runs.find((run) => run.id === secondParentId)?.delegatedCompletion?.delivery,
+            secondDelivery,
+          );
+          return;
+        }
+        const [ended] = yield* sink.write({
+          events: [
+            {
+              ...runEvent({
+                threadId,
+                runId: started.id,
+                ordinal: started.ordinal,
+                status: "completed",
+                now,
+              }),
+              payload: { ...started, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        yield* sink.stream({ afterSequence: ended!.sequence, eventType: "subagent.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" &&
+              (stored.event.payload.id === firstTaskId ||
+                stored.event.payload.id === secondTaskId) &&
+              stored.event.payload.completionDelivery?.state === "delivered",
           ),
-          ["claimed", "delivered"],
+          Stream.take(2),
+          Stream.runDrain,
         );
-        assert.isNull(
-          after.runs.find((run) => run.id === secondParentId)?.delegatedCompletion?.delivery,
-        );
+        assert.deepEqual(taskStates(yield* orchestrator.getThreadProjection(threadId)), [
+          "delivered",
+          "delivered",
+        ]);
       }),
   );
 

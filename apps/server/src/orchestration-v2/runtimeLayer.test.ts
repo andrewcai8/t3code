@@ -7078,10 +7078,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const after = yield* orchestrator.getThreadProjection(threadId);
       const delivered = after.runs.find((run) => run.id === agent.id)!;
       assert.equal(delivered.status, "cancelled");
-      assert.equal(
-        after.messages.find((message) => message.id === agent.userMessageId)?.runId,
-        picked.id,
-      );
+      assert.equal(delivered.joinedRunId, picked.id);
       assert.deepEqual(delivered.modelSelection, pickedSelection);
       assert.deepEqual(after.thread.modelSelection, pickedSelection);
     }),

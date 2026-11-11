@@ -417,13 +417,106 @@ export const make = Effect.gen(function* () {
         });
       }
       runs = runs.filter((run) => !retryableRunIds.has(run.id));
-      const heldRuns = [...retryableRuns, ...queuedRunsInDeliveryOrder({ runs: queuedRuns })];
+      const readError = (cause: unknown) =>
+        new ProviderRuntimeRecoveryError({
+          operation: "read-projections",
+          threadId: projection.thread.id,
+          cause,
+        });
+      const unstartedRunIds = new Set(unstartedRuns.map((run) => run.id));
+      // The provider never took these turns, so each message that joined one waits on its own again.
+      const joinedRuns =
+        unstartedRuns.length === 0
+          ? []
+          : (yield* projections
+              .getThreadRecords(projection.thread.id, ["runs"])
+              .pipe(Effect.mapError(readError))).runs.filter(
+              (run) =>
+                run.status === "cancelled" &&
+                run.joinedRunId !== undefined &&
+                unstartedRunIds.has(run.joinedRunId),
+            );
+      if (joinedRuns.length > 0) {
+        const joined = yield* projections
+          .getThreadRecords(projection.thread.id, ["attempts", "nodes", "messages", "turnItems"], {
+            nodeIds: joinedRuns.flatMap((run) => (run.rootNodeId === null ? [] : [run.rootNodeId])),
+            messageIds: joinedRuns.map((run) => run.userMessageId),
+            turnItemTypes: ["user_message"],
+            turnItemRunIds: [...unstartedRunIds],
+          })
+          .pipe(Effect.mapError(readError));
+        for (const run of joinedRuns) {
+          const attempt = joined.attempts.find((candidate) => candidate.id === run.activeAttemptId);
+          const node = joined.nodes.find((candidate) => candidate.id === run.rootNodeId);
+          const message = joined.messages.find((candidate) => candidate.id === run.userMessageId);
+          const item = joined.turnItems.find(
+            (candidate) =>
+              candidate.type === "user_message" && candidate.messageId === run.userMessageId,
+          );
+          if (attempt !== undefined) {
+            events.push({
+              id: yield* allocateEventId(),
+              type: "run-attempt.updated",
+              threadId: projection.thread.id,
+              runId: run.id,
+              nodeId: attempt.rootNodeId,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+              payload: { ...attempt, status: "pending", completedAt: null },
+            });
+          }
+          if (node !== undefined) {
+            events.push({
+              id: yield* allocateEventId(),
+              type: "node.updated",
+              threadId: projection.thread.id,
+              runId: run.id,
+              nodeId: node.id,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+              payload: { ...node, status: "pending", completedAt: null },
+            });
+          }
+          if (message !== undefined && run.rootNodeId !== null) {
+            events.push({
+              id: yield* allocateEventId(),
+              type: "message.updated",
+              threadId: projection.thread.id,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+              payload: { ...message, nodeId: run.rootNodeId, updatedAt: now },
+            });
+          }
+          if (item !== undefined) {
+            events.push({
+              id: yield* allocateEventId(),
+              type: "turn-item.updated",
+              threadId: projection.thread.id,
+              ...(item.runId === null ? {} : { runId: item.runId }),
+              occurredAt: now,
+              payload: cancelledItem(item, now),
+            });
+          }
+        }
+      }
+      const released = joinedRuns.map(({ joinedRunId: _joinedRunId, ...run }) => ({
+        ...run,
+        completedAt: null,
+      }));
+      const heldRuns = [
+        ...retryableRuns,
+        ...released,
+        ...queuedRunsInDeliveryOrder({ runs: queuedRuns }),
+      ];
+      const reposition = retryableRuns.length > 0 || released.length > 0;
       for (const [index, run] of heldRuns.entries()) {
         if (bufferedMessageIds.has(run.userMessageId)) {
           runs.push(run);
           continue;
         }
-        if (run.queueHeld === true && retryableRuns.length === 0) continue;
+        if (run.queueHeld === true && !reposition) continue;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -435,7 +528,7 @@ export const make = Effect.gen(function* () {
             ...run,
             status: "queued",
             queueHeld: true,
-            ...(retryableRuns.length === 0 ? {} : { queuePosition: index + 1 }),
+            ...(reposition ? { queuePosition: index + 1 } : {}),
           },
         });
       }
