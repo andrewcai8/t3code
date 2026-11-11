@@ -24,6 +24,8 @@ runs:
         sudo find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) \
           -exec grep -lE 'launchpad(content)?\.net|esm\.ubuntu\.com' {} + \
           | xargs -r sudo rm -f || true
+        # Ubuntu Pro's apt hook calls Canonical on every update.
+        sudo rm -f /etc/apt/apt.conf.d/20apt-esm-hook.conf
 
         # Move on to a fallback before an unreachable server exhausts the job.
         printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' \
