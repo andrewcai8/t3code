@@ -114,6 +114,7 @@ const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [78, "DropOrchestrationEventCorrelationIndex"],
   [79, "DelegatedRecoveryIndexes"],
   [80, "ScheduledTaskThreadMode"],
+  [81, "ProjectionMessageSearchText"],
 ];
 /** Upstream migrations newer than any fork-era ledger, which a moved ledger still runs. */
 const upstreamAfterForkEra = expectedUpstreamAbove51.filter(([id]) => id > 56);
