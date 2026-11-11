@@ -19,6 +19,12 @@ runs:
           -exec sed -i -E \
           's#https?://(([^/]+\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' {} +
 
+        # Runner images also list Launchpad PPAs and ESM, which have no mirror; when Canonical is
+        # down they stall apt-get update. Everything CI installs comes from the archive.
+        sudo find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) \
+          -exec grep -lE 'launchpad(content)?\.net|esm\.ubuntu\.com' {} + \
+          | xargs -r sudo rm -f || true
+
         # Move on to a fallback before an unreachable server exhausts the job.
         printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' \
           | sudo tee /etc/apt/apt.conf.d/80-mirror-timeouts > /dev/null
