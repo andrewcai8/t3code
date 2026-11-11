@@ -10156,6 +10156,48 @@ it.layer(layerLimitSwitchTest(limitSwitchAccounts(10, 50)))(
         assert.equal((yield* newChat).instanceId, modelSelection.instanceId);
       }),
     );
+
+    // A user can reset an account's limit early; a run that completes on it shows it has room.
+    it.effect("routes chats back to a limited account once a later run on it completes", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventSink.EventSinkV2;
+        const routeAccount = yield* makeAccountRouting;
+        const projectId = ProjectId.make("project:limit-switch-early-reset");
+        const threadId = yield* limitedThread("early-reset", projectId);
+        const newChat = routeAccount({ projectId, selection: modelSelection });
+        assert.equal((yield* newChat).instanceId, alternateInstanceId);
+
+        yield* TestClock.adjust("1 minute");
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("limit-switch:after-reset"),
+          threadId,
+          messageId: MessageId.make("limit-switch:after-reset"),
+          text: "Continue.",
+          attachments: [],
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        const now = yield* DateTime.now;
+        yield* events.write({
+          commandId: CommandId.make("limit-switch:after-reset:completed"),
+          events: [
+            {
+              id: EventId.make("limit-switch:after-reset:completed"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+            },
+          ],
+        });
+
+        assert.equal((yield* newChat).instanceId, modelSelection.instanceId);
+      }),
+    );
   },
 );
 

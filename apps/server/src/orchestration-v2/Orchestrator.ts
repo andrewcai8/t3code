@@ -7016,7 +7016,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
       ...(freshContext ? sessionsReleasedByFreshContext(projection, activeProviderThread) : []),
     ]);
-    for (const detaching of sessionsToDetach) {
+    // The usage-limit check above already validated this continuation. A limited session can't run
+    // the turn that reports its background work done, so waiting would hold the chat to the reset.
+    const limitSwitch = command.usageLimitContinuationOfRunId !== undefined && !freshContext;
+    for (const detaching of limitSwitch ? [] : sessionsToDetach) {
       if (yield* sessionHasBackgroundWork(detaching, projection.providerThreads)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
