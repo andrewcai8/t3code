@@ -190,11 +190,12 @@ jobs:
       - name: Finish installing browser secret helper build libraries
         id: apt
         if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
-        timeout-minutes: 5
+        timeout-minutes: 6
         run: |
-          until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done
+          # Prints the log even when apt hangs, so a stalled source shows up.
+          timeout 300 bash -c 'until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done' || true
           cat "$RUNNER_TEMP/apt.log"
-          exit "$(cat "$RUNNER_TEMP/apt-status")"
+          exit "$(cat "$RUNNER_TEMP/apt-status" 2>/dev/null || echo 124)"
 
       - name: Build desktop pipeline
         id: build
@@ -334,11 +335,12 @@ jobs:
         run: node --test .github/scripts/check-nightly-release.test.cjs .github/scripts/vercel-deployment-output.test.cjs .github/scripts/mobile-preview-comment.test.cjs
 
       - name: Finish installing browser secret helper build libraries
-        timeout-minutes: 5
+        timeout-minutes: 6
         run: |
-          until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done
+          # Prints the log even when apt hangs, so a stalled source shows up.
+          timeout 300 bash -c 'until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done' || true
           cat "$RUNNER_TEMP/apt.log"
-          exit "$(cat "$RUNNER_TEMP/apt-status")"
+          exit "$(cat "$RUNNER_TEMP/apt-status" 2>/dev/null || echo 124)"
 
       # `changes` lists the affected packages, or nothing when all of them are.
       - name: Test
