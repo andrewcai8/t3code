@@ -7,9 +7,11 @@ import {
   CommandId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2DomainEvent,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -35,7 +37,9 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const nativeSession = "native-session-1";
@@ -164,15 +168,18 @@ const limitedWakeTurn = [
 const runtime = (
   cli: Ref.Ref<FakeCli | undefined>,
   cwd: string,
-  options: { readonly runContinuationWorker?: boolean } = {},
+  options: {
+    readonly runContinuationWorker?: boolean;
+    readonly otherAccounts?: ReadonlyArray<ProviderInstanceId>;
+  } = {},
 ) =>
   ProviderReplayHarness.layerWithRegistry(
     { name: "claude-background-after-limit" },
     ProviderAdapterRegistry.layerFromAdaptersEffect(
-      Effect.gen(function* () {
-        return [
-          yield* ClaudeAdapterV2.makeClaudeAdapterV2({
-            instanceId,
+      Effect.forEach([instanceId, ...(options.otherAccounts ?? [])], (account) =>
+        Effect.gen(function* () {
+          return yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+            instanceId: account,
             settings: decodeClaudeSettings({}),
             environment: {},
             attachmentsDir: cwd,
@@ -210,12 +217,44 @@ const runtime = (
               subagentLaunchToolUseId: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
-          }),
-        ];
-      }),
+          });
+        }),
+      ),
     ).pipe(Layer.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer, NodeCrypto.layer))),
-    { ...options, exposeStoresAndSettings: true },
+    {
+      ...(options.runContinuationWorker === undefined
+        ? {}
+        : { runContinuationWorker: options.runContinuationWorker }),
+      exposeStoresAndSettings: true,
+    },
   );
+
+const claudeAccount = (account: ProviderInstanceId, usedPercent: number) =>
+  ({
+    instanceId: account,
+    driver: ProviderDriverKind.make("claudeAgent"),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "1970-01-01T00:00:00.000Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+    usageLimits: {
+      checkedAt: "1970-01-01T00:00:00.000Z",
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          usedPercent,
+          resetsAt: "1970-01-01T01:00:00.000Z",
+        },
+      ],
+    },
+  }) satisfies ServerProvider;
 
 /**
  * Starts waiting for the first domain event matching `predicate` from now on, and returns the
@@ -439,6 +478,69 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
             [],
           );
         }).pipe(Effect.provide(runtime(cli, cwd)));
+      }),
+    ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  // A limited session can't run the turn that reports its background work done, so waiting for
+  // that work would hold the chat until the reset.
+  it.effect("moves a limited chat to an account with room while its shell still runs", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("claude-background-after-limit-switch");
+        const cli = yield* Ref.make<FakeCli | undefined>(undefined);
+        const roomy = ProviderInstanceId.make("claude_roomy");
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          yield* settings.updateSettings({
+            autoResumeLimitedThreads: true,
+            providerInstances: {
+              [roomy]: { driver: ProviderDriverKind.make("claudeAgent"), enabled: true },
+            },
+          });
+          const accounts = Effect.succeed([
+            claudeAccount(instanceId, 100),
+            claudeAccount(roomy, 10),
+          ]);
+          const sweep = yield* UsageLimitRecoveryWorker.makeSweep.pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                Layer.mock(ProviderRegistry.ProviderRegistry)({
+                  getProviders: accounts,
+                  refresh: () => accounts,
+                }),
+                // As ThreadManagementService routes the switch to the account with room.
+                Layer.mock(ThreadManagement.ThreadManagementService)({
+                  dispatch: (command) =>
+                    orchestrator.dispatch(
+                      command.type === "message.dispatch" && command.modelSelection !== undefined
+                        ? {
+                            ...command,
+                            modelSelection: { ...command.modelSelection, instanceId: roomy },
+                          }
+                        : command,
+                    ),
+                }),
+              ),
+            ),
+          );
+          const { closed } = yield* limitedChat(cli, cwd, [
+            backgroundTasks([{ task_id: devServer.taskId, description: devServer.description }]),
+            rejectedLimit("turn-limit"),
+          ]);
+
+          yield* sweep();
+          yield* worker.drain();
+
+          const { runs } = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            runs.map((run) => run.modelSelection.instanceId),
+            [instanceId, roomy],
+          );
+          assert.isTrue(yield* Ref.get(closed));
+        }).pipe(Effect.provide(runtime(cli, cwd, { otherAccounts: [roomy] })));
       }),
     ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
