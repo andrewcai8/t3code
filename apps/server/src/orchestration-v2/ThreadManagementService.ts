@@ -537,13 +537,17 @@ export function latestRun(
   return projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
 }
 
-function latestRestartContinuation(
+function latestContinuation(
   runs: ReadonlyArray<OrchestrationV2Run>,
   run: OrchestrationV2Run,
 ): OrchestrationV2Run {
   let current = run;
   for (let hops = 0; hops < runs.length; hops++) {
-    const next = runs.find((candidate) => candidate.restartContinuationOfRunId === current.id);
+    const joinedRunId = current.joinedRunId;
+    const next =
+      joinedRunId === undefined
+        ? runs.find((candidate) => candidate.restartContinuationOfRunId === current.id)
+        : runs.find((candidate) => candidate.id === joinedRunId);
     if (next === undefined) break;
     current = next;
   }
@@ -992,8 +996,9 @@ const make = Effect.gen(function* () {
     if (selectedRun === undefined) {
       return { threadId: input.threadId, run: null, timedOut: false };
     }
-    // A restart cuts a run and continues it as a new run. Follow that chain,
-    // so a cut run is not the answer while its continuation is pending.
+    // A restart cuts a run and continues it as a new run, and a queued message can
+    // join another run's turn. Follow that chain, so a cut or joined run is not the
+    // answer while the run that carries it on is pending.
     // Runs per matching event and is already covered by the waitForThread span.
     const outcome = Effect.fnUntraced(function* (runs: ReadonlyArray<OrchestrationV2Run>) {
       const current = runs.find((candidate) => candidate.id === selectedRun.id);
@@ -1003,7 +1008,7 @@ const make = Effect.gen(function* () {
           runId: selectedRun.id,
         });
       }
-      const run = latestRestartContinuation(runs, current);
+      const run = latestContinuation(runs, current);
       const pending =
         isTerminalRunStatus(run.status) && (yield* orchestrator.restartContinuationPending(run));
       return { run, pending, settled: isTerminalRunStatus(run.status) && !pending };
@@ -1077,7 +1082,8 @@ const make = Effect.gen(function* () {
             untilDelegatedWorkSettled ||
             stored.event.type !== "run.updated" ||
             stored.event.payload.id === selectedRun.id ||
-            stored.event.payload.restartContinuationOfRunId !== undefined,
+            stored.event.payload.restartContinuationOfRunId !== undefined ||
+            isTerminalRunStatus(stored.event.payload.status),
         ),
       ),
       initial.pending

@@ -345,6 +345,7 @@ export interface ProjectionRecordFilter {
   readonly turnItemRunId?: RunId;
   readonly messageIds?: ReadonlyArray<MessageId>;
   readonly messageRunIds?: ReadonlyArray<RunId>;
+  readonly messageNodeIds?: ReadonlyArray<NodeId>;
   readonly turnItemRunIds?: ReadonlyArray<RunId | null>;
   readonly turnItemNodeIds?: ReadonlyArray<NodeId>;
   readonly runIds?: ReadonlyArray<RunId>;
@@ -3246,7 +3247,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ? yield* sql<PayloadRow>`
                 SELECT payload_json
                 FROM orchestration_v2_projection_turn_items
-                WHERE thread_id = ${threadId}
+                WHERE ${threadColumn(filter?.turnItemRunId === undefined ? undefined : [filter.turnItemRunId])} = ${threadId}
                   ${filter?.turnItemRequestIds === undefined ? sql`` : sql`AND json_extract(payload_json, '$.requestId') IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemRequestIds)}))`}
                   ${filter?.turnItemTypes === undefined ? sql`` : sql`AND type IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemTypes)}))`}
                   ${filter?.turnItemStatuses === undefined ? sql`` : sql`AND status IN (SELECT value FROM json_each(${encodeIdList(filter.turnItemStatuses)}))`}
@@ -3679,16 +3680,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           `,
           (fields !== undefined && !fields.includes("messages")) ||
           (window === undefined &&
-            matchesNothing(filter?.messageIds, filter?.messageRoles, filter?.messageRunIds))
+            matchesNothing(
+              filter?.messageIds,
+              filter?.messageRoles,
+              filter?.messageRunIds,
+              filter?.messageNodeIds,
+            ))
             ? Effect.succeed([])
             : window === undefined
               ? sql<PayloadRow>`
                 SELECT payload_json FROM orchestration_v2_projection_messages
-                WHERE ${threadColumn(filter?.messageIds)} = ${threadId}
+                WHERE ${threadColumn(filter?.messageIds ?? filter?.messageNodeIds)} = ${threadId}
                   ${filter?.messageIds === undefined ? sql`` : sql`AND message_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageIds)}))`}
                   ${filter?.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${encodeIdList(filter.messageRoles)}))`}
                   ${filter?.monitorNotificationsOnly === true ? sql`AND json_extract(payload_json, '$.notification.source.kind') = 'monitor'` : sql``}
                   ${filter?.messageRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageRunIds)}))`}
+                  ${filter?.messageNodeIds === undefined ? sql`` : sql`AND node_id IN (SELECT value FROM json_each(${encodeIdList(filter.messageNodeIds)}))`}
                 ORDER BY created_at ASC, message_id ASC
               `
               : sql<PayloadRow>`
@@ -4648,6 +4655,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE thread_id = ${threadId} AND (
                 message_id IN (SELECT json_extract(payload_json, '$.userMessageId') FROM orchestration_v2_projection_runs
                   WHERE thread_id = ${threadId} AND run_id = ${runId})
+                -- Queued messages that joined the run's prompt share its root node.
+                OR (role = 'user' AND node_id IN (SELECT json_extract(payload_json, '$.rootNodeId') FROM orchestration_v2_projection_runs
+                  WHERE thread_id = ${threadId} AND run_id = ${runId}))
                 OR (role = 'user' AND lower(trim(json_extract(payload_json, '$.text'), ${javascriptTrimWhitespace})) = '/compact')
                 -- Earlier /goal turns defer context too; parseGoalCommand narrows this prefix match.
                 OR (role = 'user' AND trim(json_extract(payload_json, '$.text'), ${javascriptTrimWhitespace}) GLOB '/goal*')

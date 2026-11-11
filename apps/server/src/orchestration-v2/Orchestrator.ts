@@ -895,6 +895,52 @@ function queuedRunModelSelection(
     : run.modelSelection;
 }
 
+/** Queued text that can share a turn: not a command, fresh session, continuation, task, or schedule. */
+function isPlainQueuedPrompt(
+  run: OrchestrationV2Run,
+  message: OrchestrationV2ConversationMessage,
+): boolean {
+  return (
+    run.freshContext !== true &&
+    run.restartContinuationOfRunId === undefined &&
+    run.usageLimitContinuationOfRunId === undefined &&
+    run.delegatedTaskId === undefined &&
+    message.scheduledTaskId === undefined &&
+    message.creationSource !== "provider" &&
+    !message.text.trimStart().startsWith("/")
+  );
+}
+
+/**
+ * Waiting agent, server, and monitor messages join the queued turn that starts, so however fast
+ * they arrive the thread never queues more than one turn of automated work. A provider's own
+ * wake stays alone: it drains output that provider already produced instead of prompting.
+ */
+function queuedRunRiders(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "messages">,
+  starting: OrchestrationV2Run,
+  startingMessage: OrchestrationV2ConversationMessage,
+): ReadonlyArray<{
+  readonly run: OrchestrationV2Run;
+  readonly message: OrchestrationV2ConversationMessage;
+}> {
+  if (!isPlainQueuedPrompt(starting, startingMessage)) return [];
+  return queuedRunsInDeliveryOrder(projection).flatMap((run) => {
+    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+    return run.id !== starting.id &&
+      run.queueHeld !== true &&
+      message !== undefined &&
+      message.createdBy !== "user" &&
+      isPlainQueuedPrompt(run, message) &&
+      !isStalePullRequestWatchWake(projection, run) &&
+      (followsCurrentConversation(message) ||
+        (run.providerThreadId === starting.providerThreadId &&
+          modelSelectionsEqual(run.modelSelection, starting.modelSelection)))
+      ? [{ run, message }]
+      : [];
+  });
+}
+
 /** The selection the thread will be on once every queued run has started. */
 function queueTailModelSelection(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "messages">,
@@ -2530,36 +2576,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           queueDelivery,
         ),
       };
+      const queuedPromptItem = (
+        message: OrchestrationV2ConversationMessage,
+      ): Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }> => ({
+        id: idAllocator.derive.userTurnItem({ messageId: message.id }),
+        threadId,
+        runId: queuedRun.id,
+        nodeId: rootNodeId,
+        providerThreadId: queuedProviderThread.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: ordinal * 100,
+        status: "completed",
+        title: null,
+        type: "user_message",
+        messageId: message.id,
+        inputIntent: "queued_turn",
+        text: message.text,
+        attachments: message.attachments,
+        ...(message.context ? { context: message.context } : {}),
+        createdBy: message.createdBy,
+        creationSource: message.creationSource,
+        ...(message.scheduledTaskId === undefined
+          ? {}
+          : { scheduledTaskId: message.scheduledTaskId }),
+        ...(message.senderThreadId === undefined ? {} : { senderThreadId: message.senderThreadId }),
+        ...(message.idleCompaction === undefined ? {} : { idleCompaction: message.idleCompaction }),
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      });
       const userTurnItem: OrchestrationV2TurnItem = {
-        ...(legacyQueuedTurnItem ?? {
-          id: idAllocator.derive.userTurnItem({ messageId: queuedMessage.id }),
-          threadId,
-          runId: queuedRun.id,
-          nodeId: rootNodeId,
-          providerThreadId: queuedProviderThread.id,
-          providerTurnId: null,
-          nativeItemRef: null,
-          parentItemId: null,
-          ordinal: ordinal * 100,
-          status: "completed",
-          title: null,
-          type: "user_message",
-          messageId: queuedMessage.id,
-          text: queuedMessage.text,
-          attachments: queuedMessage.attachments,
-          ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
-          createdBy: queuedMessage.createdBy,
-          creationSource: queuedMessage.creationSource,
-          ...(queuedMessage.scheduledTaskId === undefined
-            ? {}
-            : { scheduledTaskId: queuedMessage.scheduledTaskId }),
-          ...(queuedMessage.senderThreadId === undefined
-            ? {}
-            : { senderThreadId: queuedMessage.senderThreadId }),
-          ...(queuedMessage.idleCompaction === undefined
-            ? {}
-            : { idleCompaction: queuedMessage.idleCompaction }),
-        }),
+        ...(legacyQueuedTurnItem ?? queuedPromptItem(queuedMessage)),
         ...(freshContext ? { freshContext: true } : {}),
         providerThreadId: queuedProviderThread.id,
         inputIntent: "queued_turn",
@@ -2652,6 +2701,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               },
             ]
           : [];
+      const riders = queuedRunRiders(projection, queuedRun, queuedMessage);
+      const riderEvents: Array<Omit<OrchestrationV2DomainEvent, "id">> = [];
+      for (const [index, rider] of riders.entries()) {
+        const tasks = yield* notificationTasks(threadId, rider.message, projection.subagents);
+        riderEvents.push(
+          ...queuedRunCancellationEvents(
+            projection,
+            { ...rider.run, joinedRunId: queuedRun.id },
+            now,
+          ),
+          // The message keeps its own run, whose wake then settles when this turn ends.
+          {
+            type: "message.updated",
+            threadId,
+            runId: rider.run.id,
+            nodeId: rootNodeId,
+            providerInstanceId: queuedRun.providerInstanceId,
+            occurredAt: now,
+            payload: { ...rider.message, nodeId: rootNodeId, updatedAt: now },
+          },
+          {
+            type: "turn-item.updated",
+            threadId,
+            runId: queuedRun.id,
+            nodeId: rootNodeId,
+            providerInstanceId: queuedRun.providerInstanceId,
+            occurredAt: now,
+            payload: notificationTurnItem(
+              { ...queuedPromptItem(rider.message), ordinal: ordinal * 100 + index + 1 },
+              rider.message,
+              tasks,
+            ),
+          },
+        );
+      }
       const detachReason = freshContext
         ? FRESH_CONTEXT_DETACH_REASON
         : "Provider or model selection changed.";
@@ -2779,6 +2863,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               yield* notificationTasks(threadId, queuedMessage, projection.subagents),
             ),
           },
+          ...riderEvents,
           {
             type: "run.updated",
             threadId,
@@ -5980,15 +6065,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: checkpointScope,
     });
-    // The restart replaces the run's input, so the wake it was running can no longer be
-    // settled at its terminal. Its provider turn was running, so the wake already landed.
-    yield* acceptDelegatedCompletionDelivery({
-      command: input.command,
-      events: input.events,
-      projection: input.projection,
-      messageId: targetRun.userMessageId,
-      now,
-    });
+    // The restart replaces the run's input, so the wakes it was running, its own and those that
+    // joined its turn, can no longer be settled at its terminal. Its provider turn was running,
+    // so they already landed.
+    for (const messageId of [
+      targetRun.userMessageId,
+      ...input.projection.runs.flatMap((run) =>
+        run.joinedRunId === targetRun.id ? [run.userMessageId] : [],
+      ),
+    ]) {
+      yield* acceptDelegatedCompletionDelivery({
+        command: input.command,
+        events: input.events,
+        projection: input.projection,
+        messageId,
+        now,
+      });
+    }
     yield* appendSteeringMessage({
       runId: targetRun.id,
       nodeId: nextRootNodeId,
@@ -10477,19 +10570,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: "Automatic completion deliveries cannot be reordered.",
       });
     }
-    const automaticRuns = queuedRuns.filter((run) => isAutomaticCompletionRun(projection, run));
-    if (
-      command.beforeRunId !== null &&
-      automaticRuns.some((run) => run.id === command.beforeRunId)
-    ) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: "Queued messages cannot be reordered ahead of automatic completion delivery.",
-      });
-    }
-    const reorderableRuns = queuedRuns.filter((run) => !isAutomaticCompletionRun(projection, run));
-    const withoutMoving = reorderableRuns.filter((run) => run.id !== command.runId);
+    const withoutMoving = queuedRuns.filter((run) => run.id !== command.runId);
     const beforeIndex =
       command.beforeRunId === null
         ? withoutMoving.length
@@ -10502,7 +10583,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const reordered = [
-      ...automaticRuns,
       ...withoutMoving.slice(0, beforeIndex),
       moving,
       ...withoutMoving.slice(beforeIndex),
@@ -13535,29 +13615,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
-  const finalizeDelegatedCompletionDelivery = Effect.fn(
-    "Orchestrator.finalizeDelegatedCompletionDelivery",
-  )(function* (threadId: ThreadId, runId: RunId) {
-    // Ordinary turns do not own a delegated delivery. Read just their input
-    // before loading the cohort state needed to settle an actual delivery.
-    const message = yield* projectionStore.getRunMessage(threadId, runId);
-    if (message?.delegatedCompletion === undefined) return;
-    const projection = yield* projectionStore.getThreadRecords(
-      threadId,
-      ["runs", "messages", "subagents"],
-      {
-        runIds: [runId, message.delegatedCompletion.parentRunId],
-        messageIds: [message.id],
-        subagentRunIds: [message.delegatedCompletion.parentRunId],
-      },
-    );
+  const settleDelegatedCompletionDelivery = Effect.fn(
+    "Orchestrator.settleDelegatedCompletionDelivery",
+  )(function* (
+    threadId: ThreadId,
+    runId: RunId,
+    carrierRunId: RunId,
+    message: OrchestrationV2ConversationMessage,
+  ) {
+    const messageOwnership = message.delegatedCompletion;
+    if (messageOwnership === undefined) return;
+    const projection = yield* projectionStore.getThreadRecords(threadId, ["runs", "subagents"], {
+      runIds: [runId, carrierRunId, messageOwnership.parentRunId],
+      subagentRunIds: [messageOwnership.parentRunId],
+    });
     const deliveryRun = projection.runs.find((candidate) => candidate.id === runId);
-    const deliveryMessage =
-      deliveryRun === undefined
-        ? undefined
-        : projection.messages.find((candidate) => candidate.id === deliveryRun.userMessageId);
-    const messageOwnership = deliveryMessage?.delegatedCompletion;
-    if (deliveryRun === undefined || messageOwnership === undefined) {
+    const carrier = projection.runs.find((candidate) => candidate.id === carrierRunId);
+    // A wake that joined another run's turn settles when that turn ends.
+    if (
+      deliveryRun === undefined ||
+      carrier === undefined ||
+      deliveryRun.userMessageId !== message.id ||
+      (deliveryRun.joinedRunId ?? deliveryRun.id) !== carrier.id
+    ) {
       return;
     }
     const parentRun = projection.runs.find(
@@ -13570,7 +13650,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       cohort === undefined ||
       delivery === null ||
       delivery === undefined ||
-      delivery.messageId !== deliveryRun.userMessageId ||
+      delivery.messageId !== message.id ||
       delivery.generation !== messageOwnership.generation
     ) {
       return;
@@ -13591,7 +13671,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         continue;
       }
       nextTaskStates.set(task.id, {
-        state: deliveryRun.status === "cancelled" ? "pending" : "delivered",
+        state: carrier.status === "cancelled" ? "pending" : "delivered",
         observedByRunId: null,
       });
     }
@@ -13677,6 +13757,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ]);
     if (nextDelivery !== null) {
       yield* offerDelegatedCompletionDelivery(threadId, parentRun.id);
+    }
+  });
+
+  const finalizeDelegatedCompletionDelivery = Effect.fn(
+    "Orchestrator.finalizeDelegatedCompletionDelivery",
+  )(function* (threadId: ThreadId, runId: RunId) {
+    // Ordinary turns do not own a delegated delivery. Read just their input
+    // before loading the cohort state needed to settle an actual delivery.
+    const message = yield* projectionStore.getRunMessage(threadId, runId);
+    if (message?.delegatedCompletion !== undefined) {
+      yield* settleDelegatedCompletionDelivery(threadId, runId, runId, message);
+    }
+    if (message?.nodeId == null) return;
+    // Queued wakes that joined this turn sit on its root node but keep their own runs.
+    const joined = yield* projectionStore.getThreadRecords(threadId, ["messages"], {
+      messageNodeIds: [message.nodeId],
+      messageRoles: ["user"],
+    });
+    for (const joinedMessage of joined.messages) {
+      if (joinedMessage.runId !== null && joinedMessage.runId !== runId) {
+        yield* settleDelegatedCompletionDelivery(
+          threadId,
+          joinedMessage.runId,
+          runId,
+          joinedMessage,
+        );
+      }
     }
   });
 
@@ -14699,18 +14806,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         : [run.delegatedCompletion.delivery.messageId],
                     ),
                   );
-                  const terminalDeliveryRunIds = projection.runs
-                    .filter(
-                      (run) =>
-                        delegatedTaskTerminalStatus(run.status) !== null &&
-                        openDeliveryMessageIds.has(run.userMessageId),
-                    )
-                    .map((run) => run.id);
+                  const runsById = new Map(projection.runs.map((run) => [run.id, run]));
+                  const terminalDeliveryRunIds = new Set(
+                    projection.runs.flatMap((run) => {
+                      // A wake that joined another run's turn settles when that turn ends.
+                      const carrier =
+                        run.joinedRunId === undefined ? run : runsById.get(run.joinedRunId);
+                      return openDeliveryMessageIds.has(run.userMessageId) &&
+                        carrier !== undefined &&
+                        delegatedTaskTerminalStatus(carrier.status) !== null
+                        ? [carrier.id]
+                        : [];
+                    }),
+                  );
                   for (const runId of terminalDeliveryRunIds) {
                     yield* finalizeDelegatedCompletionDelivery(threadId, runId);
                   }
                   const refreshed =
-                    terminalDeliveryRunIds.length === 0
+                    terminalDeliveryRunIds.size === 0
                       ? projection
                       : yield* projectionStore.getThreadRecords(threadId, ["runs"]);
                   for (const run of refreshed.runs) {

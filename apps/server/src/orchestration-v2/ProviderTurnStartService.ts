@@ -835,10 +835,26 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
-      const userText = projectComposerContextForProvider({
-        text: message.text,
-        records: message.context?.records ?? [],
-      });
+      // Queued messages that joined this turn share its root node; a steer cannot reach a run
+      // that has not started.
+      const prompts = [
+        message,
+        ...projection.messages.filter(
+          (candidate) =>
+            candidate.role === "user" &&
+            candidate.nodeId === run.rootNodeId &&
+            candidate.id !== message.id,
+        ),
+      ];
+      const userText = prompts
+        .map((prompt) =>
+          projectComposerContextForProvider({
+            text: prompt.text,
+            records: prompt.context?.records ?? [],
+          }),
+        )
+        .join("\n\n");
+      const attachments = prompts.flatMap((prompt) => prompt.attachments);
       // Native goal commands go verbatim; handoff history waits a turn.
       const goalDriver =
         session.driver === "codex" ||
@@ -1024,7 +1040,7 @@ export const layer: Layer.Layer<
               tokenCap,
               modelContextWindow,
               userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
-              attachments: message.attachments,
+              attachments,
               providerThread: budgetProviderThread,
               nativeContextEstimate:
                 budgetProviderThread.contextUsage?.usedTokens === undefined
@@ -1773,7 +1789,7 @@ export const layer: Layer.Layer<
         message: {
           messageId: message.id,
           text: userText,
-          attachments: message.attachments,
+          attachments,
           createdBy: message.createdBy,
           creationSource: message.creationSource,
           ...(message.scheduledTaskId === undefined

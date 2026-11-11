@@ -9,24 +9,15 @@ export function isAutomaticCompletionRun(
   );
 }
 
+/** Automatic input does not jump the queue: it joins whichever queued turn starts next. */
 export function queuedRunsInDeliveryOrder(
-  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+  projection: Pick<OrchestrationV2ThreadProjection, "runs">,
 ): ReadonlyArray<OrchestrationV2Run> {
-  const automaticCompletionMessageIds = new Set(
-    projection.messages
-      .filter((message) => message.delegatedCompletion !== undefined)
-      .map((message) => message.id),
-  );
   return projection.runs
     .filter((run) => run.status === "queued")
-    .toSorted((left, right) => {
-      const deliveryPriority =
-        Number(automaticCompletionMessageIds.has(right.userMessageId)) -
-        Number(automaticCompletionMessageIds.has(left.userMessageId));
-      return (
-        deliveryPriority ||
+    .toSorted(
+      (left, right) =>
         (left.queuePosition ?? left.ordinal) - (right.queuePosition ?? right.ordinal) ||
-        left.ordinal - right.ordinal
-      );
-    });
+        left.ordinal - right.ordinal,
+    );
 }

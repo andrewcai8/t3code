@@ -279,6 +279,8 @@ function makeLocalCommandHarness(input: {
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
+  /** Automated messages that joined this queued turn when it started. */
+  readonly riders?: ReadonlyArray<string>;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
@@ -464,6 +466,13 @@ function makeLocalCommandHarness(input: {
         text,
       })),
       message,
+      ...(input.riders ?? []).map((text, index) => ({
+        ...message,
+        id: MessageId.make(`rider-message-${index}`),
+        text,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+      })),
     ],
     checkpointScopes: [
       {
@@ -2069,6 +2078,23 @@ effectIt.effect(
         /Note: you are on a cloud machine used only by this chat \(\d+ CPUs, .* `t3 fork-exec -- <command>`.* use t3_fork_run; .*\n\nUser message:\nRun the evals$/s,
       );
     }),
+);
+
+effectIt.effect("sends the automated messages that joined a queued turn with its prompt", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Check the deploy",
+      riders: ["Delegated task finished", "ALARM: queue depth high"],
+      deliverTurn: { earlierTurn: false },
+    });
+
+    yield* harness.start;
+
+    expect(harness.deliveredTexts).toHaveLength(1);
+    expect(harness.deliveredTexts[0]).toMatch(
+      /Check the deploy\n\nDelegated task finished\n\nALARM: queue depth high$/,
+    );
+  }),
 );
 
 effectIt.effect(
