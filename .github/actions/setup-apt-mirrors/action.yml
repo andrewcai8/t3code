@@ -6,16 +6,28 @@ runs:
     - shell: bash
       run: |
         # Replace the existing Blacksmith mirror list as well as direct sources.
+        # archive.ubuntu.com goes last: when it is down, the 15 s per-file failover below
+        # overruns the 5-minute apt step.
         printf '%s\tpriority:%s\n' \
-          https://archive.ubuntu.com/ubuntu 1 \
-          https://mirrors.edge.kernel.org/ubuntu 2 \
-          https://mirror.math.princeton.edu/pub/ubuntu 3 \
+          https://mirrors.edge.kernel.org/ubuntu 1 \
+          https://mirror.math.princeton.edu/pub/ubuntu 2 \
+          https://archive.ubuntu.com/ubuntu 3 \
           | sudo tee /etc/apt/blacksmith-ubuntu-mirrors.txt > /dev/null
 
-        # APT's mirror transport retries each file against the next server.
+        # APT's mirror transport retries each file against the next server. GitHub-hosted images
+        # point at their own list (azure, archive, security), which has no outside mirror.
         sudo find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) \
           -exec sed -i -E \
-          's#https?://(([^/]+\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' {} +
+          -e 's#https?://(([^/]+\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' \
+          -e 's#mirror\+file:/etc/apt/apt-mirrors\.txt#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' {} +
+
+        # Runner images also list Launchpad PPAs and ESM, which have no mirror; when Canonical is
+        # down they stall apt-get update. Everything CI installs comes from the archive.
+        sudo find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) \
+          -exec grep -lE 'launchpad(content)?\.net|esm\.ubuntu\.com' {} + \
+          | xargs -r sudo rm -f || true
+        # Ubuntu Pro's apt hook calls Canonical on every update.
+        sudo rm -f /etc/apt/apt.conf.d/20apt-esm-hook.conf
 
         # Move on to a fallback before an unreachable server exhausts the job.
         printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' \
