@@ -37,6 +37,12 @@ describe("withoutArrivedCreations", () => {
           ),
         ),
         drafts: {},
+        sendGate: {
+          connectedEnvironmentIds: new Set(),
+          operableEnvironmentIds: new Set(),
+          shellStatuses: new Map(),
+          retryingMessageIds: {},
+        },
       }).map((task) => task.title);
 
     expect(listed([])).toEqual(["queued a"]);
