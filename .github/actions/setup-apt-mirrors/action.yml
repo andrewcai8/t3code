@@ -14,10 +14,12 @@ runs:
           https://archive.ubuntu.com/ubuntu 3 \
           | sudo tee /etc/apt/blacksmith-ubuntu-mirrors.txt > /dev/null
 
-        # APT's mirror transport retries each file against the next server.
+        # APT's mirror transport retries each file against the next server. GitHub-hosted images
+        # point at their own list (azure, archive, security), which has no outside mirror.
         sudo find /etc/apt -maxdepth 2 -type f \( -name '*.list' -o -name '*.sources' \) \
           -exec sed -i -E \
-          's#https?://(([^/]+\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' {} +
+          -e 's#https?://(([^/]+\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' \
+          -e 's#mirror\+file:/etc/apt/apt-mirrors\.txt#mirror+file:/etc/apt/blacksmith-ubuntu-mirrors.txt#g' {} +
 
         # Runner images also list Launchpad PPAs and ESM, which have no mirror; when Canonical is
         # down they stall apt-get update. Everything CI installs comes from the archive.
