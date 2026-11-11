@@ -257,6 +257,10 @@ not been sent yet. On mobile they appear above the composer. Each shows its text
 images. **Send now** sends a message right away, into the running turn if there is one. You can
 also edit or remove it.
 
+Messages from other agents, monitors, and finished delegated tasks do not wait for turns of their
+own. When the next queued turn starts, every one of them waiting in the queue goes along with it,
+so your own messages are never stuck behind a backlog of automated ones.
+
 If you stop the agent or the server restarts, queued messages keep their order and are held.
 Press **Resume** in an empty composer to continue. **Resume** also continues a stopped
 run or one that hit a usage limit, even with nothing queued. Sending a new message also resumes the queue, unless it steers a turn that is already

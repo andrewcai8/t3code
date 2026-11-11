@@ -417,10 +417,7 @@ export const make = Effect.gen(function* () {
         });
       }
       runs = runs.filter((run) => !retryableRunIds.has(run.id));
-      const heldRuns = [
-        ...retryableRuns,
-        ...queuedRunsInDeliveryOrder({ runs: queuedRuns, messages: queuedMessages }),
-      ];
+      const heldRuns = [...retryableRuns, ...queuedRunsInDeliveryOrder({ runs: queuedRuns })];
       for (const [index, run] of heldRuns.entries()) {
         if (bufferedMessageIds.has(run.userMessageId)) {
           runs.push(run);
