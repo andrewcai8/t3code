@@ -127,6 +127,7 @@ const expectedForkLedger: ReadonlyArray<readonly [number, string]> = [
   [7, "DiagnosticsReadGrants"],
   [8, "RecoveryScanIndexes"],
   [9, "DropDuplicateDelegatedCompletionIndex"],
+  [10, "CompletedRunsByAccountIndex"],
 ];
 
 /** Replaces the ledger above upstream's shared 51 with what an older fork build recorded. */

@@ -18,6 +18,7 @@ import ScheduledTaskTarget from "./ForkMigrations/006_ScheduledTaskTarget.ts";
 import DiagnosticsReadGrants from "./ForkMigrations/007_DiagnosticsReadGrants.ts";
 import RecoveryScanIndexes from "./ForkMigrations/008_RecoveryScanIndexes.ts";
 import DropDuplicateDelegatedCompletionIndex from "./ForkMigrations/009_DropDuplicateDelegatedCompletionIndex.ts";
+import CompletedRunsByAccountIndex from "./ForkMigrations/010_CompletedRunsByAccountIndex.ts";
 
 export const forkMigrationEntries = [
   [1, "ProvisionOperations", ProvisionOperations],
@@ -29,6 +30,7 @@ export const forkMigrationEntries = [
   [7, "DiagnosticsReadGrants", DiagnosticsReadGrants],
   [8, "RecoveryScanIndexes", RecoveryScanIndexes],
   [9, "DropDuplicateDelegatedCompletionIndex", DropDuplicateDelegatedCompletionIndex],
+  [10, "CompletedRunsByAccountIndex", CompletedRunsByAccountIndex],
 ] as const;
 
 // Fork migrations that older builds recorded in upstream's ledger and that no longer run. The

@@ -139,16 +139,27 @@ function withUsageLimitFailures(
 
 /** Accounts this host's runs failed on with a usage limit that has not reset yet. */
 const readSpentAccounts = (sql: SqlClient.SqlClient, now: number) =>
+  // A run requested after the failure that completed means the limit lifted early, as when a
+  // user resets it; without that the account would stay spent until the failure's reset.
   sql<{ readonly providerInstanceId: string; readonly resetAt: string }>`
+    WITH latest_success AS (
+      SELECT provider_instance_id, julianday(MAX(requested_at)) AS requested_at
+      FROM orchestration_v2_projection_runs
+      WHERE status = 'completed' AND provider_instance_id IS NOT NULL
+      GROUP BY provider_instance_id
+    )
     SELECT run.provider_instance_id AS "providerInstanceId",
       MAX(json_extract(item.payload_json, '$.failure.resetAt')) AS "resetAt"
     FROM orchestration_v2_projection_turn_items item
     INNER JOIN orchestration_v2_projection_runs run ON run.run_id = item.run_id
+    LEFT JOIN latest_success ON latest_success.provider_instance_id = run.provider_instance_id
     WHERE item.type = 'error' AND item.status = 'failed'
       AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
       AND julianday(json_extract(item.payload_json, '$.failure.resetAt'))
         > julianday(${DateTime.formatIso(DateTime.makeUnsafe(now))})
       AND run.provider_instance_id IS NOT NULL
+      AND (latest_success.requested_at IS NULL
+        OR latest_success.requested_at <= julianday(item.updated_at))
     GROUP BY run.provider_instance_id
   `.pipe(
     Effect.map(
