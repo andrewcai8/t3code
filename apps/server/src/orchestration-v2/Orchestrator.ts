@@ -6065,15 +6065,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: checkpointScope,
     });
-    // The restart replaces the run's input, so the wake it was running can no longer be
-    // settled at its terminal. Its provider turn was running, so the wake already landed.
-    yield* acceptDelegatedCompletionDelivery({
-      command: input.command,
-      events: input.events,
-      projection: input.projection,
-      messageId: targetRun.userMessageId,
-      now,
-    });
+    // The restart replaces the run's input, so the wakes it was running, its own and those that
+    // joined its turn, can no longer be settled at its terminal. Its provider turn was running,
+    // so they already landed.
+    for (const messageId of [
+      targetRun.userMessageId,
+      ...input.projection.runs.flatMap((run) =>
+        run.joinedRunId === targetRun.id ? [run.userMessageId] : [],
+      ),
+    ]) {
+      yield* acceptDelegatedCompletionDelivery({
+        command: input.command,
+        events: input.events,
+        projection: input.projection,
+        messageId,
+        now,
+      });
+    }
     yield* appendSteeringMessage({
       runId: targetRun.id,
       nodeId: nextRootNodeId,

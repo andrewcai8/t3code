@@ -2019,6 +2019,16 @@ it.layer(layerContinuationWorkerTest)("interrupted completion wakes", (it) => {
               ["queued", true, undefined, true],
             ],
           );
+          assert.deepEqual(
+            restarted.turnItems
+              .filter(
+                (item) =>
+                  item.runId === started.id &&
+                  (item.type === "user_message" || item.type === "notification"),
+              )
+              .map((item) => item.status),
+            ["completed", "cancelled", "cancelled"],
+          );
           assert.equal(taskStates(restarted)[1], "claimed");
           assert.deepEqual(
             restarted.runs.find((run) => run.id === secondParentId)?.delegatedCompletion?.delivery,

@@ -429,7 +429,7 @@ export const make = Effect.gen(function* () {
         unstartedRuns.length === 0
           ? []
           : (yield* projections
-              .getThreadRecords(projection.thread.id, ["runs"])
+              .getThreadRecords(projection.thread.id, ["runs"], { runStatuses: ["cancelled"] })
               .pipe(Effect.mapError(readError))).runs.filter(
               (run) =>
                 run.status === "cancelled" &&
@@ -438,21 +438,31 @@ export const make = Effect.gen(function* () {
             );
       if (joinedRuns.length > 0) {
         const joined = yield* projections
-          .getThreadRecords(projection.thread.id, ["attempts", "nodes", "messages", "turnItems"], {
+          .getThreadRecords(projection.thread.id, ["attempts", "nodes", "messages"], {
             nodeIds: joinedRuns.flatMap((run) => (run.rootNodeId === null ? [] : [run.rootNodeId])),
             messageIds: joinedRuns.map((run) => run.userMessageId),
-            turnItemTypes: ["user_message"],
-            turnItemRunIds: [...unstartedRunIds],
           })
           .pipe(Effect.mapError(readError));
+        const joinedItems = yield* Effect.forEach(
+          new Set(
+            joinedRuns.flatMap((run) => (run.joinedRunId === undefined ? [] : [run.joinedRunId])),
+          ),
+          (turnItemRunId) =>
+            projections
+              .getThreadRecords(projection.thread.id, ["turnItems"], {
+                turnItemRunId,
+                turnItemTypes: ["user_message", "notification"],
+              })
+              .pipe(Effect.mapError(readError)),
+        );
         for (const run of joinedRuns) {
           const attempt = joined.attempts.find((candidate) => candidate.id === run.activeAttemptId);
           const node = joined.nodes.find((candidate) => candidate.id === run.rootNodeId);
           const message = joined.messages.find((candidate) => candidate.id === run.userMessageId);
-          const item = joined.turnItems.find(
-            (candidate) =>
-              candidate.type === "user_message" && candidate.messageId === run.userMessageId,
-          );
+          const itemId = ids.derive.userTurnItem({ messageId: run.userMessageId });
+          const item = joinedItems
+            .flatMap((records) => records.turnItems)
+            .find((candidate) => candidate.id === itemId);
           if (attempt !== undefined) {
             events.push({
               id: yield* allocateEventId(),

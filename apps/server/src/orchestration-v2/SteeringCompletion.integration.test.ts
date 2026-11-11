@@ -1232,6 +1232,7 @@ const restartCompletionWake = Effect.fn("restartCompletionWake")(function* (
     "events" | "started" | "startFirstTurn"
   >,
   siblingFinishesFirst: boolean,
+  wakeJoinsTurn = false,
 ) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
@@ -1332,7 +1333,24 @@ const restartCompletionWake = Effect.fn("restartCompletionWake")(function* (
       },
     })),
   });
-  yield* finishTurn(origin);
+  const joinedTurn = MessageId.make("message:joined-turn");
+  if (wakeJoinsTurn) {
+    // Queued behind the origin turn, so the wake queued next joins it when it starts.
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("command:joined-turn"),
+      threadId,
+      messageId: joinedTurn,
+      text: "check the deploy",
+      attachments: [],
+      modelSelection: runSelection,
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+  } else {
+    yield* finishTurn(origin);
+  }
 
   const completeTask = (taskId: NodeId) =>
     orchestrator.dispatch({
@@ -1367,11 +1385,18 @@ const restartCompletionWake = Effect.fn("restartCompletionWake")(function* (
     creationSource: "server",
   });
   const wakeRunning = yield* watchTurnRunning(2);
+  if (wakeJoinsTurn) yield* finishTurn(origin);
   yield* orchestrator.resumeQueuedRuns;
   yield* worker.drain();
   yield* Fiber.join(wakeRunning);
   const wake = harness.started[1]!;
-  assert.equal(wake.message.messageId, firstDelivery.messageId);
+  assert.equal(wake.message.messageId, wakeJoinsTurn ? joinedTurn : firstDelivery.messageId);
+  if (wakeJoinsTurn) {
+    const wakeRun = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+      (run) => run.userMessageId === firstDelivery.messageId,
+    );
+    assert.equal(wakeRun?.joinedRunId, wake.runId);
+  }
 
   if (siblingFinishesFirst) {
     yield* completeTask(siblingTaskId);
@@ -1414,10 +1439,17 @@ const restartCompletionWake = Effect.fn("restartCompletionWake")(function* (
   };
 });
 
-it.effect("wakes the parent for a sibling result after a steer restarts the completion wake", () =>
+it.effect.each([
+  { name: "the completion wake", wakeJoinsTurn: false },
+  { name: "a turn a completion wake joined", wakeJoinsTurn: true },
+])("wakes the parent for a sibling result after a steer restarts $name", ({ wakeJoinsTurn }) =>
   Effect.scoped(
     Effect.gen(function* () {
-      const harness = yield* nextTurnSelectionHarness("steered-completion-wake", true, false);
+      const harness = yield* nextTurnSelectionHarness(
+        `steered-completion-wake${wakeJoinsTurn ? "-joined" : ""}`,
+        true,
+        false,
+      );
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const {
@@ -1430,7 +1462,7 @@ it.effect("wakes the parent for a sibling result after a steer restarts the comp
           watchRun,
           finishTurn,
           completeTask,
-        } = yield* restartCompletionWake(harness, false);
+        } = yield* restartCompletionWake(harness, false, wakeJoinsTurn);
 
         // A follow-up queued behind the wake starts once the terminal-run listener has settled it.
         const followUp = MessageId.make("message:follow-up");
