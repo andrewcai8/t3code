@@ -83,8 +83,11 @@ export function routeSelection(
     selection.instanceId,
     input.load,
   );
+  // An API key reports no usage but has room unless a usage-limit failure marked it spent.
+  const canTake = (limits: ServerProvider["usageLimits"]) =>
+    hasKnownRoom(driver, limits, input.now) || limits?.unavailable?.reason === "unsupported";
   if (current !== undefined)
-    return best !== undefined && hasKnownRoom(driver, best.usageLimits, input.now)
+    return best !== undefined && canTake(best.usageLimits)
       ? pick(best.instanceId)
       : pick(current.instanceId);
   return best === undefined ? selection : pick(best.instanceId);
