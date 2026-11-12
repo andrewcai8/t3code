@@ -4136,11 +4136,19 @@ function gatewayCooldownResetAt(
   if (cooldown === null) return undefined;
   const seconds =
     Number(cooldown[1] ?? 0) * 3_600 + Number(cooldown[2] ?? 0) * 60 + Number(cooldown[3] ?? 0);
+  return resetAfter(completedAt, seconds);
+}
+
+function resetAfter(completedAt: DateTime.Utc, seconds: number): string | undefined {
   const resetMs = DateTime.toEpochMillis(completedAt) + seconds * 1_000;
   return seconds > 0 && resetMs < 8.64e15
     ? DateTime.formatIso(DateTime.makeUnsafe(resetMs))
     : undefined;
 }
+
+// Proxies such as CLIProxyAPI send their cooldown only as Retry-After, which the SDK drops. Without
+// a reset the account never reads as spent and limit recovery never moves the chat, so assume one.
+const UNREPORTED_RATE_LIMIT_SECONDS = 30 * 60;
 
 const CLAUDE_UNSUPPORTED_VERSION_ERROR =
   /^API Error: 400 Claude Code (\d+\.\d+\.\d+) does not support this model; version (\d+\.\d+\.\d+) or newer is required\./;
@@ -4232,7 +4240,10 @@ function providerFailureFromResult(
         : `api_error_${apiErrorStatus}`,
     class: failureClass,
     retryable: apiErrorStatus === 429 || apiErrorStatus === 529 ? true : null,
-    resetAt: resetAt ?? null,
+    resetAt:
+      resetAt ??
+      (apiErrorStatus === 429 ? resetAfter(receivedAt, UNREPORTED_RATE_LIMIT_SECONDS) : null) ??
+      null,
   });
 }
 

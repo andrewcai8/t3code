@@ -168,9 +168,8 @@ function accountHeadroom(
   limits: ServerProviderUsageLimits | undefined,
   now: number,
 ): AccountHeadroom | null {
-  if (!limits || limits.unavailable?.reason === "probeFailed") return null;
-  if (limits.unavailable?.reason === "unsupported")
-    return { remainingPercent: 100, resetsAt: null };
+  // An API key or proxy reports no usage, and a proxy over subscriptions runs out like one.
+  if (!limits || limits.unavailable !== undefined) return null;
   const checkedAt = Date.parse(limits.checkedAt);
   if (!Number.isFinite(checkedAt)) return null;
   const stale = now - checkedAt > USAGE_LIMITS_STALE_MS;
