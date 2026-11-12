@@ -170,7 +170,7 @@ describe("rankAccounts", () => {
     expect(ids(ranked)).toEqual(["api-left", "auto-left", "both-spent"]);
   });
 
-  it("puts API keys at full headroom and unknown accounts last", () => {
+  it("ranks API keys and proxies with unknown accounts, below any account with room", () => {
     const ranked = rankAccounts(
       [
         account("failed", { checkedAt, windows: [], unavailable: { reason: "probeFailed" } }),
@@ -180,7 +180,7 @@ describe("rankAccounts", () => {
       ],
       now,
     );
-    expect(ids(ranked)).toEqual(["api-key", "used", "failed", "unreported"]);
+    expect(ids(ranked)).toEqual(["used", "api-key", "failed", "unreported"]);
   });
 
   it("ranks an old reading by what it said, unless it saw a spent window with no reset", () => {

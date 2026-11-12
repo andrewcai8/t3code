@@ -158,6 +158,25 @@ describe("routeSelection", () => {
         { current: "claudeAgent" },
       ),
     ).toBe("claude_home");
+    const apiKey = provider("claude_work", null, {
+      usageLimits: {
+        checkedAt: "2026-09-03T11:55:00.000Z",
+        windows: [],
+        unavailable: { reason: "unsupported" },
+      },
+    });
+    const probeFailed = provider("claude_home", null, {
+      usageLimits: {
+        checkedAt: "2026-09-03T11:55:00.000Z",
+        windows: [],
+        unavailable: { reason: "probeFailed" },
+      },
+    });
+    expect(
+      route("claudeAgent", [provider("claudeAgent", 100), probeFailed, apiKey], {
+        current: "claudeAgent",
+      }),
+    ).toBe("claude_work");
   });
 
   it("keeps a thread on its spent account while no other account is known to have room", () => {

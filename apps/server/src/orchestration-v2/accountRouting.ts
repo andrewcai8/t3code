@@ -72,7 +72,7 @@ export function routeSelection(
       (provider.models.length === 0 ||
         provider.models.some((model) => model.slug === selection.model)),
   );
-  const [best] = rankAccounts(
+  const ranked = rankAccounts(
     accounts.map((provider) => ({
       instanceId: provider.instanceId,
       driver: provider.driver,
@@ -83,10 +83,12 @@ export function routeSelection(
     selection.instanceId,
     input.load,
   );
+  // An API key reports no usage but has room unless a usage-limit failure marked it spent.
+  const canTake = (limits: ServerProvider["usageLimits"]) =>
+    hasKnownRoom(driver, limits, input.now) || limits?.unavailable?.reason === "unsupported";
   if (current !== undefined)
-    return best !== undefined && hasKnownRoom(driver, best.usageLimits, input.now)
-      ? pick(best.instanceId)
-      : pick(current.instanceId);
+    return pick((ranked.find((account) => canTake(account.usageLimits)) ?? current).instanceId);
+  const [best] = ranked;
   return best === undefined ? selection : pick(best.instanceId);
 }
 

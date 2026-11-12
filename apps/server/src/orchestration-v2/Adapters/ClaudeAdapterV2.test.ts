@@ -7893,7 +7893,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   it.effect.each([
     { cooldown: " (reset after 1h2m3s)", seconds: 3723 },
     { cooldown: " (reset after 4m 6s) (last error: rate limited)", seconds: 246 },
-    { cooldown: "", seconds: 0 },
+    { cooldown: "", seconds: 30 * 60 },
   ])("keeps a gateway's reset on a direct 429 with cooldown '$cooldown'", (input) =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
@@ -7930,11 +7930,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.equal(terminal.failure.class, "usage_limit");
       assert.equal(
         terminal.failure.resetAt,
-        input.seconds > 0
-          ? DateTime.formatIso(
-              DateTime.makeUnsafe(DateTime.toEpochMillis(now) + input.seconds * 1_000),
-            )
-          : null,
+        DateTime.formatIso(
+          DateTime.makeUnsafe(DateTime.toEpochMillis(now) + input.seconds * 1_000),
+        ),
       );
     }).pipe(
       Effect.provide(
