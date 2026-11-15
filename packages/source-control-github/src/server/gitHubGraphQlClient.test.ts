@@ -469,8 +469,9 @@ describe("GitHubGraphQlAuth with an installation read token", () => {
         yield* TestClock.setTime(NOW);
         expect(yield* readStats("github.com", 1)).toEqual({ repository: { pullRequest: stats } });
         yield* readStats("github.com", 2);
+        yield* Effect.ignore(callStats({ allowReserve: true }));
         yield* readUser;
-        expect(authorizations(requests)).toEqual([INSTALLATION, USER, USER, USER]);
+        expect(authorizations(requests)).toEqual([INSTALLATION, USER, USER, USER, USER]);
       }).pipe(Effect.provide(layer));
     },
   );
@@ -524,10 +525,11 @@ describe("GitHubGraphQlAuth with an installation read token", () => {
     () => {
       const { layer, requests, commandRuns } = harness(
         (request) =>
-          request.headers["authorization"] === "Bearer first-token"
+          request.headers["authorization"] === "Bearer first-token" ||
+          request.headers["authorization"] === "Bearer second-token"
             ? json({ message: "Bad credentials" }, { status: 401 })
             : answered(),
-        { readTokens: ["first-token", "first-token", "second-token"] },
+        { readTokens: ["first-token", "first-token", "second-token", "first-token"] },
       );
       return Effect.gen(function* () {
         yield* readStats("github.com", 1);
@@ -536,14 +538,17 @@ describe("GitHubGraphQlAuth with an installation read token", () => {
         expect(commandRuns).toHaveLength(2);
         yield* TestClock.adjust("30 seconds");
         yield* readStats("github.com", 4);
+        yield* readStats("github.com", 5);
         expect(authorizations(requests)).toEqual([
           "Bearer first-token",
           USER,
           USER,
           USER,
           "Bearer second-token",
+          USER,
+          USER,
         ]);
-        expect(commandRuns).toHaveLength(3);
+        expect(commandRuns).toHaveLength(4);
       }).pipe(Effect.provide(layer));
     },
   );
@@ -577,15 +582,17 @@ describe("GitHubGraphQlAuth with an installation read token", () => {
   });
 
   it.effect(
-    "asks the installation first under a pinned credential, which takes its refusals",
+    "keeps a read under a pinned credential on it, where the installation could see more",
     () => {
-      const { layer, requests } = harness(
-        (request) => (request.headers["authorization"] === INSTALLATION ? NOT_FOUND() : answered()),
+      const { layer, requests, commandRuns } = harness(
+        (request) => (request.headers["authorization"] === INSTALLATION ? answered() : NOT_FOUND()),
         { readTokens: ["installation-token"] },
       );
       return Effect.gen(function* () {
-        expect(yield* readStats("github.com")).toEqual({ repository: { pullRequest: stats } });
-        expect(authorizations(requests)).toEqual([INSTALLATION, "Bearer pinned"]);
+        const exit = yield* Effect.exit(readStats("github.com"));
+        expect(exit._tag).toBe("Failure");
+        expect(authorizations(requests)).toEqual(["Bearer pinned"]);
+        expect(commandRuns).toHaveLength(0);
       }).pipe(
         Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
           host: "github.com",

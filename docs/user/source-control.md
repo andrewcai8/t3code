@@ -48,8 +48,10 @@ To keep background pull request reads on github.com off your own rate limit, set
 `T3CODE_GITHUB_READ_TOKEN_COMMAND` in the server's environment to an executable that prints a
 GitHub App installation token and exits 0, or exits non-zero when it has none. T3 Code runs it
 without a shell or arguments. Reads whose answer is the same for anyone who can see the
-repository use that token; writes, searches and anything about your own account keep your
-credential, and so does a repository the app cannot see.
+repository use that token; writes, searches, reviews and anything about your own account keep
+your credential, and so does a repository the app cannot see. Install the app only where your own
+account can read: a repository the app can see answers with its data even when your account could
+not.
 
 ### Forgejo and Gitea
 

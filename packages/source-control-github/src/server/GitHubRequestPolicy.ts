@@ -211,7 +211,7 @@ export interface GitHubRequest {
   readonly timeout?: Duration.Input | undefined;
   /**
    * Every reader that can see what the request names gets the same answer, so the installation
-   * read token may give it in place of the user's own credential.
+   * read token may give it in place of the user's own credential, unless one is pinned.
    */
   readonly shareable?: boolean | undefined;
 }
@@ -469,7 +469,11 @@ export const make = Effect.gen(function* () {
     });
 
     const chosen = yield* choose(host, false);
-    const installation = input.shareable === true ? yield* readToken.get(host) : Option.none();
+    // A pinned credential holds a read to one account's view, which the installation may exceed.
+    const installation =
+      input.shareable === true && (yield* PinnedGitHubCredential) === null
+        ? yield* readToken.get(host)
+        : Option.none();
 
     /** The rung a request that `rung` hands on goes to, if there is one. */
     const next = (rung: Rung): Effect.Effect<Option.Option<Rung>> => {
@@ -491,7 +495,13 @@ export const make = Effect.gen(function* () {
             const sent = yield* Effect.result(
               quota.admit(host, input.resource, { allowReserve: input.allowReserve }).pipe(
                 Effect.andThen(
-                  limits.check(key, input.allowReserve ? { allowPaused: true } : undefined),
+                  // The user's credential stands behind a paused installation, so nothing waits on it.
+                  limits.check(
+                    key,
+                    input.allowReserve && rung.kind !== "installation"
+                      ? { allowPaused: true }
+                      : undefined,
+                  ),
                 ),
                 Effect.tapError((paused) =>
                   rung.kind === "installation"

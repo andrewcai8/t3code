@@ -38,7 +38,7 @@ export const make = Effect.gen(function* () {
   if (command === "") return GitHubReadToken.defaultValue();
   const process = (yield* SourceControlHost.SourceControlHost).process;
   const cwd = yield* HostProcess.WorkingDirectory;
-  let refused: string | undefined;
+  const refused = new Set<string>();
 
   const cache = yield* Cache.makeWith(
     () =>
@@ -55,7 +55,7 @@ export const make = Effect.gen(function* () {
           Effect.map((output) => output.stdout.trim()),
           // A command that keeps printing a token GitHub refused waits out FAILURE_TTL.
           Effect.filterOrFail(
-            (token) => /^\S+$/.test(token) && token !== refused,
+            (token) => /^\S+$/.test(token) && !refused.has(token),
             () => "no usable token",
           ),
           Effect.map(Redacted.make),
@@ -71,7 +71,7 @@ export const make = Effect.gen(function* () {
       normalizeHost(host) === HOST ? Effect.option(Cache.get(cache, HOST)) : Effect.succeedNone,
     invalidate: (rejected: Redacted.Redacted<string>) =>
       Effect.suspend(() => {
-        refused = Redacted.value(rejected);
+        refused.add(Redacted.value(rejected));
         return Cache.invalidate(cache, HOST);
       }),
   };
