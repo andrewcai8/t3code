@@ -245,8 +245,23 @@ export interface GitHubHeldCredential {
   readonly fingerprint: string;
 }
 
-interface ChosenCredential extends GitHubHeldCredential {
-  readonly fromApp: boolean;
+/**
+ * A credential a request can go out with. `app`, the app sign-in, passes an answer refused to the
+ * app on to the user's own credential; `user` settles every answer.
+ */
+interface Rung {
+  readonly kind: "app" | "user";
+  readonly held: GitHubHeldCredential;
+}
+
+/** Whether `answer` goes on to the next rung rather than to the caller. */
+function handsOn<A>(kind: Rung["kind"], answer: GitHubAnswer<A>): boolean {
+  switch (kind) {
+    case "app":
+      return refusedToApp(answer);
+    case "user":
+      return false;
+  }
 }
 
 /**
@@ -279,11 +294,9 @@ export const make = Effect.gen(function* () {
 
   const personalCredential = (host: string) =>
     credentials.get(host).pipe(
-      Effect.map((held): ChosenCredential => ({
-        token: held.token,
-        fingerprint: held.fingerprint,
-        source: held.source,
-        fromApp: false,
+      Effect.map(({ token, fingerprint, source }): Rung => ({
+        kind: "user",
+        held: { token, fingerprint, source },
       })),
     );
 
@@ -299,27 +312,28 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const choose = Effect.fn("GitHubRest.credential")(function* (host: string, personal: boolean) {
+  const choose = Effect.fn("GitHubRest.credential")(function* (
+    host: string,
+    personal: boolean,
+  ): Effect.fn.Return<Rung, GitHubApiError> {
     const pinned = yield* PinnedGitHubCredential;
     if (pinned !== null) {
       if (pinned.host !== host) {
         return yield* new GitHubApiAuthenticationError({ host, operation: "credential" });
       }
       return {
-        token: pinned.token,
-        fingerprint: pinned.credentialFingerprint,
-        ...(pinned.source === undefined ? {} : { source: pinned.source }),
-        fromApp: false,
-      } satisfies ChosenCredential;
+        kind: "user",
+        held: {
+          token: pinned.token,
+          fingerprint: pinned.credentialFingerprint,
+          ...(pinned.source === undefined ? {} : { source: pinned.source }),
+        },
+      };
     }
     const saved = yield* credentials.saved(host);
     if (Option.isSome(saved)) {
-      return {
-        token: saved.value.token,
-        fingerprint: saved.value.fingerprint,
-        source: saved.value.source,
-        fromApp: false,
-      };
+      const { token, fingerprint, source } = saved.value;
+      return { kind: "user", held: { token, fingerprint, source } };
     }
     if (personal) return yield* personalCredential(host);
     const app = yield* Effect.result(appCredential(host));
@@ -328,12 +342,12 @@ export const make = Effect.gen(function* () {
       return yield* personalCredential(host).pipe(Effect.mapError(() => app.failure));
     }
     if (Option.isNone(app.success)) return yield* personalCredential(host);
-    return { ...app.success.value, fromApp: true } satisfies ChosenCredential;
+    return { kind: "app", held: app.success.value };
   });
 
   const credential: GitHubRequestPolicy["Service"]["credential"] = (host, options) =>
     choose(normalizeHost(host), options?.personal === true).pipe(
-      Effect.map(({ token, fingerprint, source }) => ({
+      Effect.map(({ held: { token, fingerprint, source } }) => ({
         token,
         fingerprint,
         ...(source === undefined ? {} : { source }),
@@ -363,7 +377,7 @@ export const make = Effect.gen(function* () {
     const settle = Effect.fnUntraced(function* (
       lease: number,
       answer: GitHubAnswer<A>,
-      held: ChosenCredential,
+      held: GitHubHeldCredential,
     ) {
       yield* quota.observe(host, answer.headers);
       yield* Effect.annotateCurrentSpan({
@@ -405,8 +419,18 @@ export const make = Effect.gen(function* () {
       }
     });
 
-    /** One send under `held`; `Retry` hands an app-refused request to the user's credential. */
-    const attempt = (held: ChosenCredential) =>
+    /** The rung a request that `rung` hands on goes to, if there is one. */
+    const next = (rung: Rung): Effect.Effect<Option.Option<Rung>> => {
+      switch (rung.kind) {
+        case "app":
+          return Effect.option(personalCredential(host));
+        case "user":
+          return Effect.succeedNone;
+      }
+    };
+
+    /** One send under `rung`; `Retry` hands the request on to the next rung. */
+    const attempt = (rung: Rung) =>
       slots
         .withPermit(
           Effect.gen(function* () {
@@ -426,8 +450,8 @@ export const make = Effect.gen(function* () {
             // One deadline covers the headers and the body: a host that answers headers and then
             // stalls must not hold a shared slot for undici's own five-minute body timeout.
             const answer = yield* send(
-              { ...REQUEST_HEADERS, authorization: `Bearer ${Redacted.value(held.token)}` },
-              held.source,
+              { ...REQUEST_HEADERS, authorization: `Bearer ${Redacted.value(rung.held.token)}` },
+              rung.held.source,
             ).pipe(
               Effect.timeoutOrElse({
                 duration: input.timeout ?? DEFAULT_TIMEOUT,
@@ -437,29 +461,31 @@ export const make = Effect.gen(function* () {
                   ),
               }),
             );
-            if (held.fromApp && refusedToApp(answer)) {
-              const personal = yield* Effect.option(personalCredential(host));
-              if (Option.isSome(personal)) {
+            if (handsOn(rung.kind, answer)) {
+              const following = yield* next(rung);
+              if (Option.isSome(following)) {
                 yield* quota.observe(host, answer.headers);
                 yield* limits.recordSuccess({ ...key, lease });
                 yield* Effect.annotateCurrentSpan({ "github.app_refused": true });
-                return { _tag: "Retry", with: personal.value } as const;
+                return { _tag: "Retry", with: following.value } as const;
               }
             }
-            return { _tag: "Done", value: yield* settle(lease, answer, held) } as const;
+            return { _tag: "Done", value: yield* settle(lease, answer, rung.held) } as const;
           }),
         )
         // The rate-limit scope follows the credential, so a pause on one account never blocks another.
         .pipe(
-          Effect.provideService(SourceControlRateLimit.CredentialScope, scope || held.fingerprint),
+          Effect.provideService(
+            SourceControlRateLimit.CredentialScope,
+            scope || rung.held.fingerprint,
+          ),
         );
 
-    // Only an app credential is handed on, so this runs at most twice.
-    let held = yield* choose(host, false);
+    let rung = yield* choose(host, false);
     while (true) {
-      const outcome = yield* attempt(held);
+      const outcome = yield* attempt(rung);
       if (outcome._tag === "Done") return outcome.value;
-      held = outcome.with;
+      rung = outcome.with;
     }
   });
 
