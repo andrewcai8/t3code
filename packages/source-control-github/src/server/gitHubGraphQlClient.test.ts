@@ -369,6 +369,21 @@ const searchPullRequests = Effect.gen(function* () {
     .PullRequestSearch({ q: "is:pr repo:acme/web", first: 10, stacks: false, stats: false })
     .pipe(GitHubGraphQlClient.call(github));
 });
+const pullRequestReviews = Effect.gen(function* () {
+  const client = yield* GraphQLClient.make(
+    PullRequestReadsGraphQLGroup.middleware(GitHubGraphQlClient.GitHubGraphQlAuth),
+  ).pipe(Effect.provide(GitHubGraphQlClient.layer));
+  return yield* client
+    .PullRequestActivity({
+      owner: "acme",
+      name: "web",
+      number: 7,
+      head: false,
+      withComments: false,
+      withReviews: true,
+    })
+    .pipe(GitHubGraphQlClient.call(github));
+});
 const readUser = Effect.gen(function* () {
   const api = yield* GitHubRest.GitHubRest;
   return yield* api.rest({ host: "github.com", operation: "user", path: "user" });
@@ -390,6 +405,7 @@ describe("GitHubGraphQlAuth with an installation read token", () => {
     { name: "a read of the viewer's own standing", call: viewerPermissions },
     { name: "a write", call: addReaction },
     { name: "a search, which leaves out what the reader cannot see", call: searchPullRequests },
+    { name: "reviews, which hold a pending review only for its author", call: pullRequestReviews },
     { name: "REST", call: readUser },
   ])("keeps the user's own credential for $name", ({ call }) => {
     const { layer, requests } = harness(answered, { readTokens: ["installation-token"] });

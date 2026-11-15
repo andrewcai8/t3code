@@ -57,7 +57,7 @@ const SHAREABLE_ROOTS: ReadonlySet<string> = new Set(["repository", "node", "nod
 /**
  * Whether every reader that can see what a request names gets the same answer: a query read only
  * through those roots that never asks for the viewer's own standing (`viewerPermission`,
- * `isReadByViewer`).
+ * `isReadByViewer`) or a pull request's `reviews`, which hold a pending review only for its author.
  */
 function isShareable(operation: GraphQL.Any, request: GraphQLProtocol.GraphQLRequest): boolean {
   return (
@@ -66,7 +66,7 @@ function isShareable(operation: GraphQL.Any, request: GraphQLProtocol.GraphQLReq
     operation.template.selections.every(
       (selection) => selection.name !== undefined && SHAREABLE_ROOTS.has(selection.name),
     ) &&
-    !/\bviewer|[a-z]Viewer/.test(request.query)
+    !/\bviewer|[a-z]Viewer|\breviews\b/.test(request.query)
   );
 }
 
