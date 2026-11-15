@@ -8,7 +8,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 import * as Headers from "effect/http/Headers";
-import { GraphQLClientError, GraphQLMiddleware, GraphQLProtocol } from "effect/graphql";
+import {
+  type GraphQL,
+  GraphQLClientError,
+  GraphQLMiddleware,
+  GraphQLProtocol,
+} from "effect/graphql";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 
@@ -41,6 +46,28 @@ function queryHash(query: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Roots GitHub answers NOT_FOUND for a reader who cannot see them, which hands the request back to
+ * the user's own credential. `search` instead leaves out what the reader cannot see.
+ */
+const SHAREABLE_ROOTS: ReadonlySet<string> = new Set(["repository", "node", "nodes"]);
+
+/**
+ * Whether every reader that can see what a request names gets the same answer: a query read only
+ * through those roots that never asks for the viewer's own standing (`viewerPermission`,
+ * `isReadByViewer`).
+ */
+function isShareable(operation: GraphQL.Any, request: GraphQLProtocol.GraphQLRequest): boolean {
+  return (
+    request.kind === "query" &&
+    operation.template !== undefined &&
+    operation.template.selections.every(
+      (selection) => selection.name !== undefined && SHAREABLE_ROOTS.has(selection.name),
+    ) &&
+    !/\bviewer|[a-z]Viewer/.test(request.query)
+  );
 }
 
 /**
@@ -79,7 +106,7 @@ export class GitHubGraphQlAuth extends GraphQLMiddleware.Service<
     Effect.gen(function* () {
       const policy = yield* GitHubRequestPolicy.GitHubRequestPolicy;
       return GitHubGraphQlAuth.of({
-        execute: Effect.fn("GitHubGraphQlAuth.execute")(function* ({ request, next }) {
+        execute: Effect.fn("GitHubGraphQlAuth.execute")(function* ({ operation, request, next }) {
           const target = yield* GitHubGraphQlTarget;
           const host = normalizeHost(target.host);
           yield* Effect.annotateCurrentSpan({
@@ -92,6 +119,7 @@ export class GitHubGraphQlAuth extends GraphQLMiddleware.Service<
               operation: target.operation,
               resource: "graphql",
               allowReserve: target.allowReserve ?? (yield* SourceControlRateLimit.Interactive),
+              shareable: isShareable(operation, request),
             },
             (headers, source) =>
               next({ ...request, headers: Headers.setAll(request.headers, headers) }).pipe(

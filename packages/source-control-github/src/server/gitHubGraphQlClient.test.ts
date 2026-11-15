@@ -4,15 +4,29 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
-import { HttpClient, HttpClientResponse, type HttpClientRequest } from "effect/http";
+import {
+  HttpClient,
+  HttpClientError,
+  HttpClientResponse,
+  type HttpClientRequest,
+} from "effect/http";
 import { GraphQLClient, GraphQLResolver } from "effect/graphql";
+import { VcsProcessExitError } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
 import * as GitHubRest from "./GitHubRest.ts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubGraphQlClient from "./gitHubGraphQlClient.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
+import * as GitHubReadToken from "./GitHubReadToken.ts";
+import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
 import { PullRequestBatchesGraphQLGroup } from "./pullRequestBatches.graphql.ts";
+import { PullRequestListingsGraphQLGroup } from "./pullRequestListings.graphql.ts";
+import { PullRequestMutationsGraphQLGroup } from "./pullRequestMutations.graphql.ts";
+import { PullRequestReadsGraphQLGroup } from "./pullRequestReads.graphql.ts";
 import * as GitHubAppSignIn from "./GitHubAppSignIn.ts";
 
 const appSignedOut = Layer.mock(GitHubAppSignIn.GitHubAppSignIn)({
@@ -24,11 +38,49 @@ const appSignedOut = Layer.mock(GitHubAppSignIn.GitHubAppSignIn)({
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 
 function harness(
-  respond: (request: HttpClientRequest.HttpClientRequest) => Response,
-  options?: { readonly appToken?: string },
+  respond: (request: HttpClientRequest.HttpClientRequest) => Response | "unreachable",
+  options?: {
+    readonly appToken?: string;
+    /** What each run of the read token command prints; null exits non-zero. Unset, it is unset. */
+    readonly readTokens?: ReadonlyArray<string | null>;
+  },
 ) {
   const requests: Array<HttpClientRequest.HttpClientRequest> = [];
   let invalidations = 0;
+  const commandRuns: Array<SourceControlHost.SourceControlProcessInput> = [];
+  const readTokens = [...(options?.readTokens ?? [])];
+  const readToken = GitHubReadToken.layer.pipe(
+    Layer.provide(
+      TestSourceControlHost.layer({
+        process: {
+          run: (input) =>
+            Effect.suspend(() => {
+              commandRuns.push(input);
+              const token = readTokens.shift();
+              return token === undefined || token === null
+                ? Effect.fail(
+                    new VcsProcessExitError({
+                      operation: input.operation,
+                      command: input.command,
+                      cwd: input.cwd,
+                      exitCode: 1,
+                      detail: "no installation token",
+                    }),
+                  )
+                : Effect.succeed(TestSourceControlHost.processOutput(`${token}\n`));
+            }),
+        },
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(
+        HostProcess.Environment,
+        options?.readTokens === undefined
+          ? {}
+          : { [GitHubReadToken.COMMAND_VARIABLE]: "/opt/read-token" },
+      ),
+    ),
+  );
   const services = Layer.mergeAll(
     Layer.succeed(GitHubCredentials.GitHubCredentials, {
       get: (host) =>
@@ -49,11 +101,19 @@ function harness(
       HttpClient.HttpClient,
       HttpClient.make((request) => {
         requests.push(request);
-        return Effect.succeed(HttpClientResponse.fromWeb(request, respond(request)));
+        const response = respond(request);
+        return response === "unreachable"
+          ? Effect.fail(
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({ request }),
+              }),
+            )
+          : Effect.succeed(HttpClientResponse.fromWeb(request, response));
       }),
     ),
     GitHubQuota.layer,
     SourceControlRateLimit.layer,
+    readToken,
     options?.appToken === undefined
       ? appSignedOut
       : Layer.mock(GitHubAppSignIn.GitHubAppSignIn)({
@@ -63,7 +123,7 @@ function harness(
         }),
   );
   const layer = GitHubRest.layer.pipe(Layer.provideMerge(services));
-  return { layer, requests, invalidations: () => invalidations };
+  return { layer, requests, invalidations: () => invalidations, commandRuns };
 }
 
 const json = (body: unknown, init?: ResponseInit) =>
@@ -271,6 +331,255 @@ describe("GitHubGraphQlAuth", () => {
       expect(requests).toHaveLength(2);
     }).pipe(Effect.provide(layer));
   });
+});
+
+const INSTALLATION = "Bearer installation-token";
+const USER = "Bearer secret";
+const NOT_FOUND = () =>
+  json({
+    data: { _0_repository: null },
+    errors: [{ type: "NOT_FOUND", message: "Could not resolve to a Repository" }],
+  });
+const answered = () => json({ data: { _0_repository: { pullRequest: stats } } });
+const authorizations = (requests: ReadonlyArray<HttpClientRequest.HttpClientRequest>) =>
+  requests.map((request) => request.headers["authorization"]);
+
+const github = { host: "github.com", operation: "test" };
+const viewerPermissions = Effect.gen(function* () {
+  const client = yield* GraphQLClient.make(
+    PullRequestReadsGraphQLGroup.middleware(GitHubGraphQlClient.GitHubGraphQlAuth),
+  ).pipe(Effect.provide(GitHubGraphQlClient.layer));
+  return yield* client
+    .ViewerPermissions({ owner: "acme", name: "web", number: 7 })
+    .pipe(GitHubGraphQlClient.call(github));
+});
+const addReaction = Effect.gen(function* () {
+  const client = yield* GraphQLClient.make(
+    PullRequestMutationsGraphQLGroup.middleware(GitHubGraphQlClient.GitHubGraphQlAuth),
+  ).pipe(Effect.provide(GitHubGraphQlClient.layer));
+  return yield* client
+    .AddReaction({ subjectId: "PR_7", content: "HEART" })
+    .pipe(GitHubGraphQlClient.call(github));
+});
+const searchPullRequests = Effect.gen(function* () {
+  const client = yield* GraphQLClient.make(
+    PullRequestListingsGraphQLGroup.middleware(GitHubGraphQlClient.GitHubGraphQlAuth),
+  ).pipe(Effect.provide(GitHubGraphQlClient.layer));
+  return yield* client
+    .PullRequestSearch({ q: "is:pr repo:acme/web", first: 10, stacks: false, stats: false })
+    .pipe(GitHubGraphQlClient.call(github));
+});
+const readUser = Effect.gen(function* () {
+  const api = yield* GitHubRest.GitHubRest;
+  return yield* api.rest({ host: "github.com", operation: "user", path: "user" });
+});
+
+describe("GitHubGraphQlAuth with an installation read token", () => {
+  it.effect("answers a read any reader shares with the token the command prints", () => {
+    const { layer, requests, commandRuns } = harness(answered, {
+      readTokens: ["installation-token"],
+    });
+    return Effect.gen(function* () {
+      expect(yield* readStats("github.com")).toEqual({ repository: { pullRequest: stats } });
+      expect(authorizations(requests)).toEqual([INSTALLATION]);
+      expect(commandRuns).toMatchObject([{ command: "/opt/read-token", args: [] }]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect.each([
+    { name: "a read of the viewer's own standing", call: viewerPermissions },
+    { name: "a write", call: addReaction },
+    { name: "a search, which leaves out what the reader cannot see", call: searchPullRequests },
+    { name: "REST", call: readUser },
+  ])("keeps the user's own credential for $name", ({ call }) => {
+    const { layer, requests } = harness(answered, { readTokens: ["installation-token"] });
+    return Effect.gen(function* () {
+      yield* readStats("github.com");
+      yield* Effect.ignore(call);
+      expect(authorizations(requests)).toEqual([INSTALLATION, USER]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect.each([
+    { name: "NOT_FOUND", answer: NOT_FOUND },
+    {
+      name: "FORBIDDEN",
+      answer: () =>
+        json({
+          data: { _0_repository: null },
+          errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }],
+        }),
+    },
+    {
+      name: "HTTP 403 not accessible by integration",
+      answer: () => json({ message: "Resource not accessible by integration" }, { status: 403 }),
+    },
+    {
+      name: "a refused token",
+      answer: () => json({ message: "Bad credentials" }, { status: 401 }),
+    },
+    { name: "a server error", answer: () => new Response("bad gateway", { status: 502 }) },
+    { name: "no answer at all", answer: () => "unreachable" as const },
+  ])("hands the user's credential a read the installation meets with $name", ({ answer }) => {
+    const { layer, requests, invalidations } = harness(
+      (request) => (request.headers["authorization"] === INSTALLATION ? answer() : answered()),
+      { readTokens: ["installation-token"] },
+    );
+    return Effect.gen(function* () {
+      expect(yield* readStats("github.com")).toEqual({ repository: { pullRequest: stats } });
+      expect(authorizations(requests)).toEqual([INSTALLATION, USER]);
+      expect(invalidations()).toBe(0);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect(
+    "pauses only the installation when it is rate limited, and the user's reads go on",
+    () => {
+      const reset = Math.floor(NOW / 1000) + 600;
+      const { layer, requests } = harness(
+        (request) =>
+          request.headers["authorization"] === INSTALLATION
+            ? json(
+                {
+                  data: null,
+                  errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }],
+                },
+                { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } },
+              )
+            : answered(),
+        { readTokens: ["installation-token"] },
+      );
+      return Effect.gen(function* () {
+        yield* TestClock.setTime(NOW);
+        expect(yield* readStats("github.com", 1)).toEqual({ repository: { pullRequest: stats } });
+        yield* readStats("github.com", 2);
+        yield* readUser;
+        expect(authorizations(requests)).toEqual([INSTALLATION, USER, USER, USER]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("keeps the installation's quota reserve apart from the user's", () => {
+    const reset = Math.floor(NOW / 1000) + 600;
+    const { layer, requests } = harness(
+      (request) =>
+        request.headers["authorization"] === INSTALLATION
+          ? json(
+              { data: { _0_repository: { pullRequest: stats } } },
+              {
+                headers: {
+                  "x-ratelimit-resource": "graphql",
+                  "x-ratelimit-limit": "5000",
+                  "x-ratelimit-remaining": "100",
+                  "x-ratelimit-reset": String(reset),
+                },
+              },
+            )
+          : answered(),
+      { readTokens: ["installation-token"] },
+    );
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      yield* readStats("github.com", 1);
+      yield* Effect.ignore(viewerPermissions);
+      yield* readStats("github.com", 2);
+      expect(authorizations(requests)).toEqual([INSTALLATION, USER, USER]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("runs the command again once GitHub refuses its token", () => {
+    const { layer, requests, commandRuns } = harness(
+      (request) =>
+        request.headers["authorization"] === "Bearer first-token"
+          ? json({ message: "Bad credentials" }, { status: 401 })
+          : answered(),
+      { readTokens: ["first-token", "second-token"] },
+    );
+    return Effect.gen(function* () {
+      yield* readStats("github.com", 1);
+      yield* readStats("github.com", 2);
+      expect(authorizations(requests)).toEqual(["Bearer first-token", USER, "Bearer second-token"]);
+      expect(commandRuns).toHaveLength(2);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect(
+    "never sends a refused token again, and asks a failing command again after 30 s",
+    () => {
+      const { layer, requests, commandRuns } = harness(
+        (request) =>
+          request.headers["authorization"] === "Bearer first-token"
+            ? json({ message: "Bad credentials" }, { status: 401 })
+            : answered(),
+        { readTokens: ["first-token", "first-token", "second-token"] },
+      );
+      return Effect.gen(function* () {
+        yield* readStats("github.com", 1);
+        yield* readStats("github.com", 2);
+        yield* readStats("github.com", 3);
+        expect(commandRuns).toHaveLength(2);
+        yield* TestClock.adjust("30 seconds");
+        yield* readStats("github.com", 4);
+        expect(authorizations(requests)).toEqual([
+          "Bearer first-token",
+          USER,
+          USER,
+          USER,
+          "Bearer second-token",
+        ]);
+        expect(commandRuns).toHaveLength(3);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("runs the command once per five minutes", () => {
+    const { layer, requests, commandRuns } = harness(answered, {
+      readTokens: ["first-token", "second-token"],
+    });
+    return Effect.gen(function* () {
+      yield* readStats("github.com", 1);
+      yield* TestClock.adjust("4 minutes");
+      yield* readStats("github.com", 2);
+      yield* TestClock.adjust("2 minutes");
+      yield* readStats("github.com", 3);
+      expect(authorizations(requests)).toEqual([
+        "Bearer first-token",
+        "Bearer first-token",
+        "Bearer second-token",
+      ]);
+      expect(commandRuns).toHaveLength(2);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("sends every read with the user's credential when no command is set", () => {
+    const { layer, requests, commandRuns } = harness(answered);
+    return Effect.gen(function* () {
+      yield* readStats("github.com");
+      expect(authorizations(requests)).toEqual([USER]);
+      expect(commandRuns).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect(
+    "asks the installation first under a pinned credential, which takes its refusals",
+    () => {
+      const { layer, requests } = harness(
+        (request) => (request.headers["authorization"] === INSTALLATION ? NOT_FOUND() : answered()),
+        { readTokens: ["installation-token"] },
+      );
+      return Effect.gen(function* () {
+        expect(yield* readStats("github.com")).toEqual({ repository: { pullRequest: stats } });
+        expect(authorizations(requests)).toEqual([INSTALLATION, "Bearer pinned"]);
+      }).pipe(
+        Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
+          host: "github.com",
+          token: Redacted.make("pinned"),
+          credentialFingerprint: "github.com:pinned",
+        }),
+        Effect.provide(layer),
+      );
+    },
+  );
 });
 
 const callStats = (target: Partial<GitHubGraphQlClient.GitHubGraphQlTarget["Service"]> = {}) =>

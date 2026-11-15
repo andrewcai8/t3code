@@ -11,6 +11,7 @@ import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStr
 import * as GitHubAppSignIn from "./GitHubAppSignIn.ts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
+import * as GitHubReadToken from "./GitHubReadToken.ts";
 import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 
@@ -226,6 +227,7 @@ export const layer = Layer.effect(GitHubRest, make).pipe(
  */
 export const layerWithDependencies = layer.pipe(
   Layer.provideMerge(GitHubCredentials.layer),
+  Layer.provideMerge(GitHubReadToken.layer),
   Layer.provideMerge(GitHubAppSignIn.layer),
   Layer.provideMerge(GitHubQuota.layer),
 );
