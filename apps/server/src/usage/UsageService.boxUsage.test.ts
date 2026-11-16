@@ -123,6 +123,7 @@ const serviceLayers = (input: {
         ),
     ),
     Layer.provideMerge(Layer.succeed(HostProcess.Platform, "linux")),
+    Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, input.home)),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
       Layer.succeed(
@@ -168,7 +169,9 @@ describe("UsageService with cloud box usage", () => {
       const summary = yield* service.readSummary(WINDOW);
       assert.deepStrictEqual(
         summary.sources
-          .filter((source) => source.fingerprint.provider === "claude")
+          .filter(
+            (source) => source.fingerprint.provider === "claude" && source.status !== "missing",
+          )
           .map((source) => source.fingerprint.hostId),
         ["lease-a"],
       );

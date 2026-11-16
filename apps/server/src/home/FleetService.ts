@@ -251,7 +251,26 @@ const make = Effect.gen(function* () {
             )
           : yield* threads
               .listProjectThreads({ projectId: input.projectId, includeSubagents })
-              .pipe(Effect.mapError(threadManagementFailure));
+              .pipe(
+                Effect.flatMap((entries) =>
+                  entries.length === 0
+                    ? Effect.succeed([])
+                    : threads
+                        .getShellSnapshot({
+                          location: "active",
+                          threadIds: entries.map(({ id }) => id),
+                        })
+                        .pipe(
+                          Effect.map((snapshot) => {
+                            const shellsById = new Map(
+                              snapshot.threads.map((shell) => [shell.id, shell]),
+                            );
+                            return entries.flatMap(({ id }) => shellsById.get(id) ?? []);
+                          }),
+                        ),
+                ),
+                Effect.mapError(threadManagementFailure),
+              );
       const nowMs = yield* Clock.currentTimeMillis;
       return listThreadPage(shells, input, { actor, environmentId, nowMs });
     }),
@@ -271,12 +290,14 @@ const make = Effect.gen(function* () {
           "contextTransfers",
         ])
         .pipe(Effect.mapError(threadManagementFailure));
+      // Only Home's agent tools read through the fleet, so pages run newest first.
       return (yield* readThreadPage(
         { environmentId, client: undefined },
         threads,
         target,
         shell,
         input,
+        true,
       )).result;
     }),
 

@@ -17,7 +17,10 @@ import { vi } from "vite-plus/test";
 import * as SqliteClient from "./nodeSqliteClient.ts";
 
 const workers = vi.hoisted(() => ({
-  started: [] as Array<{ readonly source: unknown; readonly worker: NodeWorkerThreads.Worker }>,
+  started: [] as Array<{
+    readonly workerData: { readonly requireWal?: unknown } | undefined;
+    readonly worker: NodeWorkerThreads.Worker;
+  }>,
   afterPost: undefined as
     | ((worker: NodeWorkerThreads.Worker, message: unknown) => void)
     | undefined,
@@ -28,7 +31,7 @@ vi.mock("node:worker_threads", async (importOriginal) => {
   class RecordedWorker extends actual.Worker {
     constructor(...args: ConstructorParameters<typeof actual.Worker>) {
       super(...args);
-      workers.started.push({ source: args[0], worker: this });
+      workers.started.push({ workerData: args[1]?.workerData, worker: this });
     }
     override postMessage(...args: Parameters<NodeWorkerThreads.Worker["postMessage"]>) {
       super.postMessage(...args);
@@ -38,9 +41,8 @@ vi.mock("node:worker_threads", async (importOriginal) => {
   return { ...actual, Worker: RecordedWorker };
 });
 
-const WRITER_SOURCE_MARKER = "admission: true";
-const latestWorker = (marker: string) =>
-  workers.started.findLast((entry) => String(entry.source).includes(marker))!.worker;
+const latestWriter = () =>
+  workers.started.findLast((entry) => entry.workerData?.requireWal === false)!.worker;
 
 /** The worker's reply to the next statement containing `marker` fails to deserialize. */
 const failReplyTo = (marker: string) => {
@@ -59,15 +61,14 @@ const tempDatabase = Effect.gen(function* () {
   return path.join(directory, "state.sqlite");
 });
 
-const clientLayer = (filename: string, writerWorker = true) =>
-  SqliteClient.layer({ filename, writerWorker, readerWorker: true, checkpointWorker: true });
+const clientLayer = (filename: string) =>
+  SqliteClient.layer({ filename, writerWorker: true, readerWorker: true });
 
 const withClient = <A, E>(
   use: (
     sql: SqlClient.SqlClient,
     filename: string,
   ) => Effect.Effect<A, E, SqlClient.SqlClient | Scope.Scope>,
-  writerWorker = true,
 ) =>
   Effect.gen(function* () {
     const filename = yield* tempDatabase;
@@ -75,7 +76,7 @@ const withClient = <A, E>(
       const sql = yield* SqlClient.SqlClient;
       yield* sql`PRAGMA journal_mode = WAL`;
       return yield* use(sql, filename);
-    }).pipe(Effect.provide(clientLayer(filename, writerWorker)));
+    }).pipe(Effect.provide(clientLayer(filename)));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 const countEntries = (sql: SqlClient.SqlClient) =>
@@ -86,24 +87,6 @@ const countEntries = (sql: SqlClient.SqlClient) =>
 
 // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- a zero-delay macrotask boundary, not a wait for time
 const eventLoopTurn = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
-
-it.effect("runs writer statements without blocking the event loop", () =>
-  withClient((sql) =>
-    Effect.gen(function* () {
-      const count = yield* Effect.forkChild(
-        sql<{ readonly n: number }>`
-          WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000)
-          SELECT COUNT(*) AS n FROM c
-        `,
-        { startImmediately: true },
-      );
-      // On the main thread the statement would finish before this turn could run.
-      yield* eventLoopTurn;
-      assert.isUndefined(count.pollUnsafe());
-      assert.deepEqual(yield* Fiber.join(count), [{ n: 2_000_000 }]);
-    }),
-  ),
-);
 
 it.effect("commits a transaction's statements together and shows them to readers after", () =>
   withClient((sql) =>
@@ -180,33 +163,6 @@ it.effect("keeps each caller's statements in order and each transaction whole", 
   ),
 );
 
-it.effect("reports SQLite failures from the worker as typed errors", () =>
-  withClient((sql, filename) =>
-    Effect.gen(function* () {
-      yield* sql`CREATE TABLE constrained(name TEXT NOT NULL UNIQUE)`;
-      yield* sql`INSERT INTO constrained VALUES ('taken')`;
-
-      const duplicate = yield* sql`INSERT INTO constrained VALUES ('taken')`.pipe(Effect.flip);
-      assert(duplicate.reason._tag === "UniqueViolation");
-      assert.equal(duplicate.reason.constraint, "constrained.name");
-
-      const missing = yield* sql`SELECT name FROM never_created`.pipe(Effect.flip);
-      assert.equal(missing.reason.operation, "prepare");
-
-      yield* sql`PRAGMA busy_timeout = 0`;
-      const other = yield* Effect.acquireRelease(
-        Effect.sync(() => new NodeSqlite.DatabaseSync(filename)),
-        (database) => Effect.sync(() => database.close()),
-      );
-      yield* Effect.sync(() => other.exec("BEGIN IMMEDIATE"));
-      const locked = yield* sql.withTransaction(sql`SELECT 1`).pipe(Effect.flip);
-      assert.equal(locked.reason._tag, "LockTimeoutError");
-      yield* Effect.sync(() => other.exec("COMMIT"));
-      assert.deepEqual(yield* sql`SELECT name FROM constrained`.values, [["taken"]]);
-    }),
-  ),
-);
-
 it.effect("finishes a statement sent before close and fails the ones after", () =>
   Effect.gen(function* () {
     const filename = yield* tempDatabase;
@@ -233,7 +189,7 @@ it.effect("finishes a statement sent before close and fails the ones after", () 
 
     yield* Fiber.join(sent);
     const error = yield* Fiber.join(queued).pipe(Effect.flip);
-    assert.include(String(error.reason.cause), "Database writer is closed");
+    assert.include(String(error.reason.cause), "Database writer exited");
     const reopened = new NodeSqlite.DatabaseSync(filename, { readOnly: true });
     try {
       assert.deepEqual(reopened.prepare("SELECT COUNT(*) AS count FROM entries").get(), {
@@ -245,85 +201,33 @@ it.effect("finishes a statement sent before close and fails the ones after", () 
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-// The checkpoint worker holds writes at this many WAL frames until it can reset the log.
-const CHECKPOINT_BACKPRESSURE_FRAMES = 32_768;
-
-const walFrames = (sql: SqlClient.SqlClient) =>
-  Effect.map(
-    sql<{ readonly log: number }>`PRAGMA wal_checkpoint(NOOP)`,
-    (rows) => rows[0]?.log ?? 0,
-  );
-
-it.effect("runs a write held for checkpoint admission once", () =>
-  withClient((sql, filename) =>
-    Effect.gen(function* () {
-      yield* sql`CREATE TABLE blobs(data BLOB NOT NULL)`;
-      const reader = yield* Effect.acquireRelease(
-        Effect.sync(() => new NodeSqlite.DatabaseSync(filename, { readOnly: true })),
-        (database) => Effect.sync(() => database.close()),
-      );
-      // An open read keeps the checkpoint from passing its snapshot.
-      yield* Effect.sync(() => {
-        reader.exec("BEGIN");
-        reader.prepare("SELECT COUNT(*) AS count FROM blobs").get();
-      });
-      const blob = new Uint8Array(256 * 1024);
-      let inserted = 0;
-      while ((yield* walFrames(sql)) < CHECKPOINT_BACKPRESSURE_FRAMES) {
-        yield* sql`INSERT INTO blobs VALUES (${blob})`;
-        inserted++;
-      }
-
-      const held = yield* Effect.forkChild(sql`INSERT INTO blobs VALUES (${blob})`, {
-        startImmediately: true,
-      });
-      yield* Effect.sync(() => reader.exec("COMMIT"));
-      yield* Fiber.join(held);
-      assert.deepEqual(yield* sql`SELECT COUNT(*) AS count FROM blobs`.values, [[inserted + 1]]);
-    }),
-  ),
-);
-
-it.effect.each([{ writerWorker: false }, { writerWorker: true }])(
-  "keeps checkpointing the WAL (writerWorker=$writerWorker)",
-  ({ writerWorker }) =>
-    withClient(
-      (sql) =>
-        Effect.gen(function* () {
-          assert.deepEqual(yield* sql`PRAGMA wal_autocheckpoint`.values, [[0]]);
-          yield* sql`CREATE TABLE blobs(data BLOB NOT NULL)`;
-          // 64 pages each, about 35,000 frames in all: past the ceiling.
-          const blob = new Uint8Array(256 * 1024);
-          for (let index = 0; index < 540; index++) {
-            yield* sql`INSERT INTO blobs VALUES (${blob})`;
-          }
-          const [frames] = yield* sql<{
-            readonly log: number;
-            readonly checkpointed: number;
-          }>`PRAGMA wal_checkpoint(NOOP)`;
-          assert.isBelow(frames!.log, CHECKPOINT_BACKPRESSURE_FRAMES + 100);
-        }),
-      writerWorker,
-    ),
-);
-
 const slowCount = (sql: SqlClient.SqlClient) =>
   sql<{ readonly n: number }>`
     WITH RECURSIVE slow(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM slow WHERE x < 2000000)
     SELECT COUNT(*) AS n FROM slow
   `;
 
-it.effect("fails a statement whose reply cannot be read, then keeps writing", () =>
-  withClient((sql) =>
-    Effect.gen(function* () {
+it.effect("fails a statement whose reply cannot be read and reports the writer lost", () =>
+  Effect.gen(function* () {
+    const filename = yield* tempDatabase;
+    const lost: Array<string> = [];
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       yield* sql`CREATE TABLE entries(value INTEGER NOT NULL)`;
       failReplyTo("WITH RECURSIVE slow");
       const error = yield* slowCount(sql).pipe(Effect.flip);
       assert.include(String(error.reason.cause), "Database writer reply could not be read");
-      yield* sql`INSERT INTO entries VALUES (1)`;
-      assert.equal(yield* countEntries(sql), 1);
-    }),
-  ),
+      const next = yield* sql`INSERT INTO entries VALUES (1)`.pipe(Effect.flip);
+      assert.include(String(next.reason.cause), "Database writer reply could not be read");
+    }).pipe(
+      Effect.provide(
+        SqliteClient.layer({ filename, writerWorker: true, onWriterLost: (r) => lost.push(r) }),
+      ),
+      Effect.scoped,
+    );
+    assert.equal(lost.length, 1);
+    assert.include(lost[0], "Database writer reply could not be read");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("fails a read whose reply cannot be read, then keeps reading", () =>
@@ -366,7 +270,7 @@ it.effect("reports a writer worker that stops on its own, not one closed at shut
 
     yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* Effect.promise(() => latestWorker(WRITER_SOURCE_MARKER).terminate());
+      yield* Effect.promise(() => latestWriter().terminate());
       assert.include(yield* Effect.promise(() => reported), "Database writer exited");
       const error = yield* sql`INSERT INTO entries VALUES (1)`.pipe(Effect.flip);
       assert.include(String(error.reason.cause), "Database writer exited");

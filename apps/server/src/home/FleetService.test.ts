@@ -72,6 +72,7 @@ const setup = (
   } = {},
 ) => {
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
+  const timelineReads: Array<{ readonly beforePosition?: number }> = [];
   const layer = FleetService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -120,8 +121,21 @@ const setup = (
               ],
               archivedThreads: [],
             }),
+          getTimelinePage: (_threadId, options) => {
+            timelineReads.push(options);
+            return Effect.succeed({
+              items: [],
+              totalItems: 0,
+              hasMore: false,
+              hasEarlier: false,
+            } as never);
+          },
           getThreadRecords: () =>
             Effect.succeed({
+              thread: { ...shell("worker", "a", 1), pullRequests: [] },
+              runs: [],
+              providerTurns: [],
+              contextTransfers: [],
               runtimeRequests: [
                 { id: approvalId, kind: "command", status: "pending" },
                 { id: questionId, kind: "user_input", status: "pending" },
@@ -142,7 +156,7 @@ const setup = (
       ),
     ),
   );
-  return { layer, dispatched };
+  return { layer, dispatched, timelineReads };
 };
 
 it.effect("lists threads from every project, newest first, with snooze state", () => {
@@ -384,5 +398,14 @@ it.effect("returns a ready link for the thread it sends to", () => {
       threadId,
       link: formatThreadLink({ environmentId: EnvironmentId.make("studio"), threadId }, "worker"),
     });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads a thread newest first, as Home's agent tools page it", () => {
+  const { layer, timelineReads } = setup();
+  return Effect.gen(function* () {
+    const fleet = yield* FleetService.FleetService;
+    yield* fleet.execute({ actor, request: { op: "threads.read", input: { threadId } } });
+    expect(timelineReads).toMatchObject([{ beforePosition: Number.POSITIVE_INFINITY }]);
   }).pipe(Effect.provide(layer));
 });

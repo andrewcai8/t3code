@@ -83,6 +83,7 @@ describe("Codex instance home", () => {
         Layer.mergeAll(
           IdAllocator.layer,
           McpProviderSessions.layer,
+          Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => {} }),
           NodeServices.layer,
           NodeCrypto.layer,
         ),

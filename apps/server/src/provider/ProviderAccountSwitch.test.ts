@@ -130,6 +130,7 @@ const claudeDriver = (
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           queryRunner: {
             allocateSessionId: Effect.succeed(nativeSession),
+            subagentModel: () => Effect.succeed(null),
             open: ({ options }) =>
               Effect.gen(function* () {
                 const messages = yield* Queue.unbounded<SDKMessage>();
@@ -143,6 +144,7 @@ const claudeDriver = (
                   setModel: () => Effect.void,
                   applyFlagSettings: () => Effect.void,
                   setPermissionMode: () => Effect.void,
+                  renameSession: () => Effect.void,
                   backgroundTasks: () => Effect.succeed(false),
                   mcpServerStatus: Effect.succeed([]),
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
@@ -379,6 +381,19 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
               after.messages.at(-1)?.text,
               "/poteto-mode Continue where you left off.\n\nYour previous account hit its usage limit, so this chat moved to another account with room. Subagents and new chats are also routed to accounts with room, so keep working and delegating as usual.",
             );
+            const continuedSettled = yield* watch(
+              (event) => event.type === "run.updated" && event.payload.status === "completed",
+            );
+            yield* Queue.offer((yield* latestQuery).messages, result("continued", false));
+            yield* Fiber.join(continuedSettled);
+            yield* worker.drain();
+            // The chat moved on, so a late switch for the limited run must not continue it again.
+            assert.deepEqual(yield* toSecondAccount(failedRun.id), {
+              kind: "switched",
+              continued: false,
+            });
+            yield* worker.drain();
+            assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
             const instance = (yield* settings.getSettings).providerInstances[claudeInstanceId];
             assert.equal(instance?.displayName, "Second account");
             assert.deepEqual(instance?.config, { accountEmail: "second@example.com" });

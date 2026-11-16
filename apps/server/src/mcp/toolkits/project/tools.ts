@@ -1,6 +1,6 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
-  FleetProjectListInput,
+  clampedPositiveInt,
   FleetThreadLaunchResult,
   OrchestratorMcpEnvironmentTarget,
   NonNegativeInt,
@@ -53,7 +53,11 @@ const shared = {
 const ProjectListTool = Tool.make("t3_project_list", {
   ...shared,
   description: "List projects (Home: in any environment). Pages can shift.",
-  parameters: FleetProjectListInput,
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    cursor: Schema.optional(NonNegativeInt),
+    limit: Schema.optional(clampedPositiveInt(100)),
+  }),
   success: Schema.Struct({
     projects: Schema.Array(Project),
     nextCursor: Schema.NullOr(NonNegativeInt),
@@ -101,7 +105,11 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
     projectId: ProjectId,
     force: Schema.optionalKey(Schema.Boolean),
   }),
-  dependencies: [...shared.dependencies, ProjectCloneTracker.ProjectCloneTracker],
+  dependencies: [
+    ...shared.dependencies,
+    ProjectCloneTracker.ProjectCloneTracker,
+    ManagedProjectFolders.ManagedProjectFolders,
+  ],
 }).annotate(Tool.Destructive, true);
 const ProjectCloneTool = Tool.make("t3_project_clone", {
   ...shared,

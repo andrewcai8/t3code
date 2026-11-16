@@ -226,6 +226,7 @@ describe("buildCloudHandoff", () => {
       selectedProvider: selectedProviderEntry?.driverKind ?? claudeAgent,
       selectedInstanceId,
       threadModelSelection: null,
+      threadStarted: false,
       projectModelSelection: null,
       settings: DEFAULT_UNIFIED_SETTINGS,
     });

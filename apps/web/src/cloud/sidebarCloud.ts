@@ -45,6 +45,7 @@ export const EMPTY_SIDEBAR_COMPOSER: ComposerThreadDraftState = {
   reviewComments: [],
   threadContexts: [],
   environmentContexts: [],
+  replyTo: null,
   modelSelectionByProvider: {},
   activeProvider: null,
   runtimeMode: null,

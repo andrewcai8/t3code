@@ -11,7 +11,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as WorktreeForks from "../../../home/WorktreeForks.ts";
@@ -74,7 +74,9 @@ const ForkRunTool = Tool.make("t3_fork_run", {
     "On a self-hosted server with worktree forks set up, any thread can use it: each job runs in a throwaway Modal copy of its worktree (cwd, or by default the calling thread's worktree) with its uncommitted changes, size picks one of the server's machine sizes, and logs and outputs always land on this machine, at each job's logsUri and copiedTo. Otherwise, top-level chats on a cloud sandbox machine only, as follows; size is ignored there, since a copy has its machine's size. Runs each job in its own throwaway copy of this machine as it is now: every file, install and build is there, but the T3 server and agents are stopped, so only the job runs. Use it for parallel or disk- and CPU-heavy work (eval replays, test shards, separate builds) instead of worktrees and installs on this machine. For one command whose output you need here, such as a typecheck or a test suite, run `t3 fork-exec -- <command>` in the shell instead: it waits for its copy and prints the command's output and exit code. Nothing a job changes comes back except its logs and outputs: each job's stdout/stderr tails are returned, its full stdout.log and stderr.log are uploaded under logsUri, and each listed output is uploaded to outputsUri plus its path as given (an absolute path without its leading slash), so outputs:[out/report.json] is read with aws s3 cp <outputsUri>out/report.json. Pass copyBack:true to also copy outputs into this machine, under the folder each job's copiedTo names. It answers at once with a batchId and its jobs' states (all queued for a new batch), then starts it: the jobs run after the answer, so always follow with t3_fork_status (with waitSeconds) until state is finished, and end a job that hangs with t3_fork_cancel. Starting briefly pauses this machine; a call made during the pause waits for it. Retrying the same call while its batch runs returns the same batch. A chat can run up to 4 batches at once, so a short job need not wait for a long batch; all of a chat's batches share its limit on copies running at once.",
   parameters: FleetForkRunInput,
   success: FleetForkBatch,
-}).annotate(Tool.Destructive, false);
+})
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const ForkStatusTool = Tool.make("t3_fork_status", {
   ...forkTool,
@@ -84,7 +86,8 @@ const ForkStatusTool = Tool.make("t3_fork_status", {
   success: FleetForkBatch,
 })
   .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const ForkCancelTool = Tool.make("t3_fork_cancel", {
   ...forkTool,
@@ -92,7 +95,9 @@ const ForkCancelTool = Tool.make("t3_fork_cancel", {
     "Cancels jobs of a t3_fork_run batch, by default every unfinished one; pass jobs to name their indexes. A queued job never starts. A running job's copy is thrown away with nothing uploaded, though cancelling one that is copying back may leave partial files under /home/user/fork-results/<batchId>/job-<index> on this machine. Either becomes cancelled, and the batch finishes once no job runs. Cancelling a finished job or batch changes nothing. Answers with the batch like t3_fork_status.",
   parameters: FleetForkCancelInput,
   success: FleetForkBatch,
-}).annotate(Tool.Destructive, false);
+})
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 export const HomeToolkit = Toolkit.make(
   EnvironmentListTool,
