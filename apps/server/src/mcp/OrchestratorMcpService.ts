@@ -1331,14 +1331,14 @@ export const readThreadPage = Effect.fn("OrchestratorMcp.readThreadPage")(functi
   >,
   shell: OrchestrationV2ThreadShell,
   input: OrchestratorMcpThreadReadInput,
+  agentCaller = scope.thread !== undefined,
 ) {
   const view = input.view ?? "messages";
   const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
   const maxChars = input.maxCharsPerItem ?? DEFAULT_THREAD_ITEM_MAX_CHARS;
   // Client callers (the CLI, older linked environments) page forward from a cursorless read.
   const newestFirst =
-    input.beforePosition !== undefined ||
-    (input.afterPosition === undefined && scope.thread !== undefined);
+    input.beforePosition !== undefined || (input.afterPosition === undefined && agentCaller);
   const timeline = yield* threadManagement
     .getTimelinePage(input.threadId, {
       ...(input.afterPosition === undefined ? {} : { afterPosition: input.afterPosition }),

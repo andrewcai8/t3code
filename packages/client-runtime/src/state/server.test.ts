@@ -1795,6 +1795,9 @@ describe("provider setup commands", () => {
       const runtime = Atom.runtime(
         Layer.merge(
           Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
+            entries: yield* SubscriptionRef.make<
+              ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
+            >(new Map()),
             run: (_environmentId, effect) =>
               Effect.provideService(
                 effect,

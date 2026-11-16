@@ -290,12 +290,14 @@ const make = Effect.gen(function* () {
           "contextTransfers",
         ])
         .pipe(Effect.mapError(threadManagementFailure));
+      // Only Home's agent tools read through the fleet, so pages run newest first.
       return (yield* readThreadPage(
         { environmentId, client: undefined },
         threads,
         target,
         shell,
         input,
+        true,
       )).result;
     }),
 

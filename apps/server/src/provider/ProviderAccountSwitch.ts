@@ -31,6 +31,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
+import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { credentialVariables } from "../environmentControl/ProvisioningProviderProfile.ts";
 import { accountSwitchContinuation } from "../orchestration-v2/accountSwitchContinuation.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
@@ -250,7 +251,12 @@ const make = Effect.gen(function* () {
         }),
       { discard: true },
     ).pipe(Effect.mapError((cause) => new ProviderAccountSwitchError({ stage: "release", cause })));
-    if (input.continueRunId === undefined)
+    const stopped = latestExecutedRun(latest.runs);
+    if (
+      input.continueRunId === undefined ||
+      stopped?.id !== input.continueRunId ||
+      (stopped.status !== "interrupted" && stopped.status !== "failed")
+    )
       return { kind: "switched", continued: false } satisfies GuestAccountSwitchResult;
     // Keyed by the run, so a retried switch continues it once.
     const continuation = `account-switch:${input.continueRunId}`;
