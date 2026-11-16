@@ -12,11 +12,13 @@ import * as Semaphore from "effect/Semaphore";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
 
 import * as GitHubAppSignIn from "./GitHubAppSignIn.ts";
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
+import * as GitHubReadToken from "./GitHubReadToken.ts";
 
 const DEFAULT_TIMEOUT = Duration.seconds(30);
 /** GitHub's secondary limits penalize concurrent bursts. */
@@ -207,6 +209,11 @@ export interface GitHubRequest {
   readonly allowReserve: boolean;
   /** Covers sending and reading the answer. Defaults to 30 seconds. */
   readonly timeout?: Duration.Input | undefined;
+  /**
+   * Every reader that can see what the request names gets the same answer, so the installation
+   * read token may give it in place of the user's own credential, unless one is pinned.
+   */
+  readonly shareable?: boolean | undefined;
 }
 
 /** REST/GraphQL share credentials, slots, quota reserves and host-wide pauses. */
@@ -245,8 +252,27 @@ export interface GitHubHeldCredential {
   readonly fingerprint: string;
 }
 
-interface ChosenCredential extends GitHubHeldCredential {
-  readonly fromApp: boolean;
+/**
+ * A credential a request can go out with. `installation`, the read token, spends its own quota and
+ * pauses, and passes on every outcome but a clean answer, failures included. `app`, the app
+ * sign-in, passes an answer refused to the app on to the user's own credential. `user` settles
+ * every answer.
+ */
+interface Rung {
+  readonly kind: "installation" | "app" | "user";
+  readonly held: GitHubHeldCredential;
+}
+
+/** Whether a rung passes `answer`, or a failure that left none, on to the next rung. */
+function handsOn<A>(kind: Rung["kind"], answer: GitHubAnswer<A> | undefined): boolean {
+  switch (kind) {
+    case "installation":
+      return answer?._tag !== "Ok" || answer.withheld === true;
+    case "app":
+      return answer !== undefined && refusedToApp(answer);
+    case "user":
+      return false;
+  }
 }
 
 /**
@@ -275,15 +301,14 @@ export const make = Effect.gen(function* () {
   const appSignIn = yield* GitHubAppSignIn.GitHubAppSignIn;
   const quota = yield* GitHubQuota.GitHubQuota;
   const limits = yield* SourceControlRateLimit.SourceControlRateLimit;
+  const readToken = yield* GitHubReadToken.GitHubReadToken;
   const slots = yield* Semaphore.make(CONCURRENCY);
 
   const personalCredential = (host: string) =>
     credentials.get(host).pipe(
-      Effect.map((held): ChosenCredential => ({
-        token: held.token,
-        fingerprint: held.fingerprint,
-        source: held.source,
-        fromApp: false,
+      Effect.map(({ token, fingerprint, source }): Rung => ({
+        kind: "user",
+        held: { token, fingerprint, source },
       })),
     );
 
@@ -299,27 +324,28 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const choose = Effect.fn("GitHubRest.credential")(function* (host: string, personal: boolean) {
+  const choose = Effect.fn("GitHubRest.credential")(function* (
+    host: string,
+    personal: boolean,
+  ): Effect.fn.Return<Rung, GitHubApiError> {
     const pinned = yield* PinnedGitHubCredential;
     if (pinned !== null) {
       if (pinned.host !== host) {
         return yield* new GitHubApiAuthenticationError({ host, operation: "credential" });
       }
       return {
-        token: pinned.token,
-        fingerprint: pinned.credentialFingerprint,
-        ...(pinned.source === undefined ? {} : { source: pinned.source }),
-        fromApp: false,
-      } satisfies ChosenCredential;
+        kind: "user",
+        held: {
+          token: pinned.token,
+          fingerprint: pinned.credentialFingerprint,
+          ...(pinned.source === undefined ? {} : { source: pinned.source }),
+        },
+      };
     }
     const saved = yield* credentials.saved(host);
     if (Option.isSome(saved)) {
-      return {
-        token: saved.value.token,
-        fingerprint: saved.value.fingerprint,
-        source: saved.value.source,
-        fromApp: false,
-      };
+      const { token, fingerprint, source } = saved.value;
+      return { kind: "user", held: { token, fingerprint, source } };
     }
     if (personal) return yield* personalCredential(host);
     const app = yield* Effect.result(appCredential(host));
@@ -328,12 +354,12 @@ export const make = Effect.gen(function* () {
       return yield* personalCredential(host).pipe(Effect.mapError(() => app.failure));
     }
     if (Option.isNone(app.success)) return yield* personalCredential(host);
-    return { ...app.success.value, fromApp: true } satisfies ChosenCredential;
+    return { kind: "app", held: app.success.value };
   });
 
   const credential: GitHubRequestPolicy["Service"]["credential"] = (host, options) =>
     choose(normalizeHost(host), options?.personal === true).pipe(
-      Effect.map(({ token, fingerprint, source }) => ({
+      Effect.map(({ held: { token, fingerprint, source } }) => ({
         token,
         fingerprint,
         ...(source === undefined ? {} : { source }),
@@ -359,14 +385,24 @@ export const make = Effect.gen(function* () {
     // records its own backoff under.
     const key = { provider: SourceControlProviderKind.make("github"), host };
 
+    /** Drops a token GitHub refused, so the next request asks its source again. */
+    const drop = (rung: Rung) =>
+      rung.kind === "installation"
+        ? readToken.invalidate(rung.held.token)
+        : // The source may hold a newer token than the one that was refused.
+          appSignIn
+            .invalidate(host, Redacted.value(rung.held.token))
+            .pipe(Effect.andThen(credentials.invalidate(host)));
+
     // Settlement annotates the request span with status and rate-limit attributes.
     const settle = Effect.fnUntraced(function* (
       lease: number,
       answer: GitHubAnswer<A>,
-      held: ChosenCredential,
+      rung: Rung,
     ) {
       yield* quota.observe(host, answer.headers);
       yield* Effect.annotateCurrentSpan({
+        ...(rung.held.source === undefined ? {} : { "github.credential": rung.held.source }),
         ...(answer.status === undefined ? {} : { "http.response.status_code": answer.status }),
         ...rateLimitAttributes(answer.headers),
       });
@@ -387,14 +423,12 @@ export const make = Effect.gen(function* () {
           });
         }
         case "Unauthorized":
-          // The source may hold a newer token than the one that was refused.
-          yield* appSignIn.invalidate(host, Redacted.value(held.token));
-          yield* credentials.invalidate(host);
+          yield* drop(rung);
           return yield* new GitHubApiAuthenticationError(context);
         case "NotFound":
           return yield* new GitHubApiNotFoundError({
             ...context,
-            ...(held.source === undefined ? {} : { credential: held.source }),
+            ...(rung.held.source === undefined ? {} : { credential: rung.held.source }),
           });
         case "Failed":
           return yield* new GitHubApiResponseError({
@@ -405,61 +439,139 @@ export const make = Effect.gen(function* () {
       }
     });
 
-    /** One send under `held`; `Retry` hands an app-refused request to the user's credential. */
-    const attempt = (held: ChosenCredential) =>
+    /** Books what a rung that hands the request on spent, and why it stepped aside. */
+    const passOn = Effect.fnUntraced(function* (
+      rung: Rung,
+      sent: Result.Result<{ readonly lease: number; readonly answer: GitHubAnswer<A> }, unknown>,
+    ) {
+      yield* Effect.annotateCurrentSpan({
+        [`github.${rung.kind}_refused`]: Result.isSuccess(sent)
+          ? sent.success.answer._tag
+          : Predicate.hasProperty(sent.failure, "_tag")
+            ? String(sent.failure._tag)
+            : "Failed",
+      });
+      if (Result.isFailure(sent)) return;
+      const { lease, answer } = sent.success;
+      yield* quota.observe(host, answer.headers);
+      switch (answer._tag) {
+        case "RateLimited":
+          return yield* limits.recordRateLimit({
+            ...key,
+            lease,
+            retryAt: retryAtFrom(answer.headers, yield* Clock.currentTimeMillis),
+          });
+        case "Unauthorized":
+          return yield* drop(rung);
+        default:
+          return yield* limits.recordSuccess({ ...key, lease });
+      }
+    });
+
+    const chosen = yield* choose(host, false);
+    // A pinned credential holds a read to one account's view, which the installation may exceed.
+    const installation =
+      input.shareable === true && (yield* PinnedGitHubCredential) === null
+        ? yield* readToken.get(host)
+        : Option.none();
+
+    /** The rung a request that `rung` hands on goes to, if there is one. */
+    const next = (rung: Rung): Effect.Effect<Option.Option<Rung>> => {
+      switch (rung.kind) {
+        case "installation":
+          return Effect.succeedSome(chosen);
+        case "app":
+          return Effect.option(personalCredential(host));
+        case "user":
+          return Effect.succeedNone;
+      }
+    };
+
+    /** One send under `rung`; `Retry` hands the request on to the next rung. */
+    const attempt = (rung: Rung) =>
       slots
         .withPermit(
           Effect.gen(function* () {
-            const lease = yield* quota
-              .admit(host, input.resource, { allowReserve: input.allowReserve })
-              .pipe(
+            const sent = yield* Effect.result(
+              quota.admit(host, input.resource, { allowReserve: input.allowReserve }).pipe(
                 Effect.andThen(
-                  limits.check(key, input.allowReserve ? { allowPaused: true } : undefined),
+                  // The user's credential stands behind a paused installation, so nothing waits on it.
+                  limits.check(
+                    key,
+                    input.allowReserve && rung.kind !== "installation"
+                      ? { allowPaused: true }
+                      : undefined,
+                  ),
                 ),
                 Effect.tapError((paused) =>
-                  Effect.annotateCurrentSpan({
-                    "github.paused": true,
-                    "github.retry_at": paused.retryAt,
-                  }),
+                  rung.kind === "installation"
+                    ? Effect.void
+                    : Effect.annotateCurrentSpan({
+                        "github.paused": true,
+                        "github.retry_at": paused.retryAt,
+                      }),
                 ),
-              );
-            // One deadline covers the headers and the body: a host that answers headers and then
-            // stalls must not hold a shared slot for undici's own five-minute body timeout.
-            const answer = yield* send(
-              { ...REQUEST_HEADERS, authorization: `Bearer ${Redacted.value(held.token)}` },
-              held.source,
-            ).pipe(
-              Effect.timeoutOrElse({
-                duration: input.timeout ?? DEFAULT_TIMEOUT,
-                orElse: () =>
-                  Effect.fail(
-                    new GitHubApiRequestError({ ...context, cause: new Cause.TimeoutError() }),
+                Effect.flatMap((lease) =>
+                  // One deadline covers the headers and the body: a host that answers headers and
+                  // then stalls must not hold a shared slot for undici's own five-minute body timeout.
+                  send(
+                    {
+                      ...REQUEST_HEADERS,
+                      authorization: `Bearer ${Redacted.value(rung.held.token)}`,
+                    },
+                    rung.held.source,
+                  ).pipe(
+                    Effect.timeoutOrElse({
+                      duration: input.timeout ?? DEFAULT_TIMEOUT,
+                      orElse: () =>
+                        Effect.fail(
+                          new GitHubApiRequestError({
+                            ...context,
+                            cause: new Cause.TimeoutError(),
+                          }),
+                        ),
+                    }),
+                    Effect.map((answer) => ({ lease, answer })),
                   ),
-              }),
+                ),
+              ),
             );
-            if (held.fromApp && refusedToApp(answer)) {
-              const personal = yield* Effect.option(personalCredential(host));
-              if (Option.isSome(personal)) {
-                yield* quota.observe(host, answer.headers);
-                yield* limits.recordSuccess({ ...key, lease });
-                yield* Effect.annotateCurrentSpan({ "github.app_refused": true });
-                return { _tag: "Retry", with: personal.value } as const;
+            if (handsOn(rung.kind, Result.isSuccess(sent) ? sent.success.answer : undefined)) {
+              const following = yield* next(rung);
+              if (Option.isSome(following)) {
+                yield* passOn(rung, sent);
+                return { _tag: "Retry", with: following.value } as const;
               }
             }
-            return { _tag: "Done", value: yield* settle(lease, answer, held) } as const;
+            if (Result.isFailure(sent)) return yield* Effect.fail(sent.failure);
+            const { lease, answer } = sent.success;
+            return { _tag: "Done", value: yield* settle(lease, answer, rung) } as const;
           }),
         )
-        // The rate-limit scope follows the credential, so a pause on one account never blocks another.
+        // The rate-limit scope follows the credential, so a pause on one account never blocks
+        // another. The installation keeps its own scope even where the caller names the user's.
         .pipe(
-          Effect.provideService(SourceControlRateLimit.CredentialScope, scope || held.fingerprint),
+          Effect.provideService(
+            SourceControlRateLimit.CredentialScope,
+            rung.kind === "installation" ? rung.held.fingerprint : scope || rung.held.fingerprint,
+          ),
         );
 
-    // Only an app credential is handed on, so this runs at most twice.
-    let held = yield* choose(host, false);
+    let rung: Rung = Option.isSome(installation)
+      ? {
+          kind: "installation",
+          // One installation's tokens share its quota, so its pauses outlast any one token.
+          held: {
+            source: "installation",
+            token: installation.value,
+            fingerprint: `${host}:installation`,
+          },
+        }
+      : chosen;
     while (true) {
-      const outcome = yield* attempt(held);
+      const outcome = yield* attempt(rung);
       if (outcome._tag === "Done") return outcome.value;
-      held = outcome.with;
+      rung = outcome.with;
     }
   });
 

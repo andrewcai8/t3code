@@ -33,7 +33,14 @@ export const GH_PROCESS_CONCURRENCY = { key: "gh", limit: 4 } as const;
 const TOKEN_TTL = Duration.minutes(5);
 const MISSING_TTL = Duration.seconds(10);
 
-export const GitHubCredentialSource = Schema.Literals(["settings", "app", "env", "gh"]);
+/** `installation` is the read token of `GitHubReadToken`, which answers only reads any reader shares. */
+export const GitHubCredentialSource = Schema.Literals([
+  "settings",
+  "app",
+  "env",
+  "gh",
+  "installation",
+]);
 export type GitHubCredentialSource = typeof GitHubCredentialSource.Type;
 
 export interface GitHubCredential {

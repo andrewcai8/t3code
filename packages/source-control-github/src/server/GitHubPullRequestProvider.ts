@@ -134,7 +134,9 @@ function gitHubProviderFailure(
             : "failed",
       };
     case "GitHubApiNotFoundError":
-      return error.credential === undefined || error.credential === "app"
+      return error.credential === undefined ||
+        error.credential === "app" ||
+        error.credential === "installation"
         ? { reason: "not-found" }
         : { reason: "not-found", accessHint: REPOSITORY_ACCESS_HINTS[error.credential] };
     default:
@@ -142,7 +144,10 @@ function gitHubProviderFailure(
   }
 }
 
-const REPOSITORY_ACCESS_HINTS: Record<Exclude<GitHubCredentialSource, "app">, string> = {
+const REPOSITORY_ACCESS_HINTS: Record<
+  Exclude<GitHubCredentialSource, "app" | "installation">,
+  string
+> = {
   settings:
     "Your saved GitHub token can't see it. Give it access, or change it in Settings → Source Control.",
   env: "The server's environment token can't see it. Give it access, or unset it.",
