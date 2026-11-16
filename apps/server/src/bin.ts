@@ -54,6 +54,11 @@ if (
   const launcherOptions = launcher?.parseServiceLauncherArgs(process.argv.slice(3));
   if (launcher !== undefined && launcherOptions !== undefined) {
     await launcher.runServiceLauncherCli(launcherOptions);
+  } else if (process.argv[2] === "__spawn-host") {
+    // The spawn host is long-lived and plain Node; a single executable embeds the whole CLI as
+    // one module, so dispatching it from binMain would load that module too.
+    const { runSpawnHost } = await import("./process/spawnHostProcess.ts");
+    runSpawnHost();
   } else {
     const { runCliCommand } = await loadCliMain();
     await runCliCommand();
