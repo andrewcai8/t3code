@@ -130,6 +130,7 @@ const claudeDriver = (
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           queryRunner: {
             allocateSessionId: Effect.succeed(nativeSession),
+            subagentModel: () => Effect.succeed(null),
             open: ({ options }) =>
               Effect.gen(function* () {
                 const messages = yield* Queue.unbounded<SDKMessage>();
@@ -143,6 +144,7 @@ const claudeDriver = (
                   setModel: () => Effect.void,
                   applyFlagSettings: () => Effect.void,
                   setPermissionMode: () => Effect.void,
+                  renameSession: () => Effect.void,
                   backgroundTasks: () => Effect.succeed(false),
                   mcpServerStatus: Effect.succeed([]),
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),

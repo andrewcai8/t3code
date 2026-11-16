@@ -3,7 +3,6 @@ import {
   type ProviderInteractionMode,
   type RunId,
   type RuntimeMode,
-  type UnifiedSettings,
 } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -14,7 +13,6 @@ import {
 import { useState } from "react";
 import { newMessageId } from "~/lib/utils";
 import type { ComposerHandleRef } from "../../composerHandleContext";
-import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
@@ -23,8 +21,6 @@ import { draftSendState } from "./chatViewSend";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 
-const selectContinuationPrompt = (settings: UnifiedSettings) => settings.continuationPrompt;
-
 interface ComposerResumeInput {
   readonly environmentId: EnvironmentId;
   readonly routeThreadKey: string;
@@ -32,6 +28,7 @@ interface ComposerResumeInput {
   readonly activeThread: EnvironmentThreadShell | undefined;
   readonly resumableRunId: RunId | null;
   readonly hasHeldQueuedRuns: boolean;
+  readonly canResume: boolean;
   readonly isSendBusy: boolean;
   readonly isRevertingCheckpoint: boolean;
   readonly threadDetailLoading: boolean;
@@ -52,7 +49,7 @@ interface ComposerResumeInput {
 }
 
 /**
- * Resumes an interrupted run with the continuation prompt from Settings and/or releases the turns held
+ * Resumes an interrupted run and/or releases the turns held
  * in its queue. Shares the per-route send lock with the composer's send paths.
  */
 export function useComposerResume(input: ComposerResumeInput) {
@@ -63,6 +60,7 @@ export function useComposerResume(input: ComposerResumeInput) {
     activeThread,
     resumableRunId,
     hasHeldQueuedRuns,
+    canResume,
     isSendBusy,
     isRevertingCheckpoint,
     threadDetailLoading,
@@ -75,7 +73,6 @@ export function useComposerResume(input: ComposerResumeInput) {
     scrollToEnd,
     setThreadError,
   } = input;
-  const continuationPrompt = useEnvironmentSettings(environmentId, selectContinuationPrompt);
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
@@ -91,7 +88,7 @@ export function useComposerResume(input: ComposerResumeInput) {
   const onResume = async () => {
     if (
       !activeThread ||
-      (resumableRunId === null && !hasHeldQueuedRuns) ||
+      !canResume ||
       isSendBusy ||
       isResuming ||
       isRevertingCheckpoint ||
@@ -133,7 +130,7 @@ export function useComposerResume(input: ComposerResumeInput) {
           message: {
             messageId: newMessageId(),
             role: "user",
-            text: continuationPrompt,
+            text: "",
             attachments: [],
           },
           runtimeMode,

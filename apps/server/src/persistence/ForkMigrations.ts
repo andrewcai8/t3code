@@ -43,6 +43,35 @@ const droppedForkMigrations = new Set([
 
 const forkTable = "fork_sql_migrations";
 const forkIds = new Map<string, number>(forkMigrationEntries.map(([id, name]) => [name, id]));
+const latestForkId = Math.max(...forkIds.values());
+const isFork = (name: string) => forkIds.has(name) || droppedForkMigrations.has(name);
+
+const readUpstreamLedger = Effect.fnUntraced(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return [];
+  return yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+    readonly created_at: string;
+  }>`SELECT migration_id, name, created_at FROM effect_sql_migrations`;
+});
+
+/** Whether a full migration would write the fork ledger; checked without the write lock. */
+export const hasPendingForkMigrations = Effect.fn("hasPendingForkMigrations")(function* () {
+  if ((yield* readUpstreamLedger()).some((row) => isFork(row.name))) return true;
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${forkTable}
+  `;
+  if (tables.length === 0) return true;
+  const [row] = yield* sql<{
+    readonly latestId: number | null;
+  }>`SELECT MAX(migration_id) AS latestId FROM ${sql(forkTable)}`;
+  return (row?.latestId ?? 0) < latestForkId;
+});
 
 const runFork = Migrator.make({});
 const forkLoader = Migrator.fromRecord(
@@ -61,18 +90,11 @@ const moveForkLedger = Effect.fn("moveForkLedger")(function* (
   upstreamIds: ReadonlyMap<string, number>,
 ) {
   const sql = yield* SqlClient.SqlClient;
+  // The transaction takes the write lock, which a current ledger must not wait for.
+  if (!(yield* readUpstreamLedger()).some((row) => isFork(row.name))) return;
   yield* sql.withTransaction(
     Effect.gen(function* () {
-      const tables = yield* sql`
-        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
-      `;
-      if (tables.length === 0) return;
-      const rows = yield* sql<{
-        readonly migration_id: number;
-        readonly name: string;
-        readonly created_at: string;
-      }>`SELECT migration_id, name, created_at FROM effect_sql_migrations`;
-      const isFork = (name: string) => forkIds.has(name) || droppedForkMigrations.has(name);
+      const rows = yield* readUpstreamLedger();
       if (!rows.some((row) => isFork(row.name))) return;
 
       yield* sql`
@@ -117,6 +139,7 @@ export const withForkMigrations =
       yield* moveForkLedger(new Map(upstreamManifest.map(([id, name]) => [name, id])));
       const executed = yield* runUpstream;
       if (options?.toMigrationInclusive !== undefined) return executed;
+      if (!(yield* hasPendingForkMigrations())) return executed;
       const forkExecuted = yield* runFork({ loader: forkLoader, table: forkTable });
       if (forkExecuted.length > 0) {
         yield* Effect.log("Fork migrations ran successfully").pipe(

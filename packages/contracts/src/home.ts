@@ -238,6 +238,7 @@ const FleetQuestion = Schema.Struct({
       label: Schema.String,
       description: Schema.String,
       value: Schema.optional(Schema.String),
+      preview: Schema.optional(Schema.String),
     }),
   ),
   multiSelect: Schema.optional(Schema.Boolean),

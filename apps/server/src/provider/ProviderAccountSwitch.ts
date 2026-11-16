@@ -260,7 +260,7 @@ const make = Effect.gen(function* () {
         commandId: CommandId.make(continuation),
         messageId: MessageId.make(continuation),
         threadId: input.threadId,
-        manualContinuationOfRunId: input.continueRunId,
+        // Not a manual continuation: those resume natively and drop the text.
         text: accountSwitchContinuation(input.continuationPrompt ?? after.continuationPrompt),
         attachments: [],
         dispatchMode: { type: "start_immediately" },
@@ -269,8 +269,8 @@ const make = Effect.gen(function* () {
       })
       .pipe(
         Effect.as(true),
-        // The account already moved. A run that can no longer be continued leaves the chat for
-        // its user to resume.
+        // The account already moved. A continuation that fails to send leaves the chat for its
+        // user to resume.
         Effect.catch((cause) =>
           Effect.logWarning("provider account switched without continuing its run", {
             threadId: input.threadId,
