@@ -52,7 +52,8 @@ NodeRuntime.runMain(Effect.gen(function* () {
 function contender(file: string, requestId: string) {
   const child = NodeChildProcess.spawn(
     process.execPath,
-    ["--input-type=module", "-e", contenderSource, file, requestId],
+    // No --input-type flag: workers inherit it, and the SQLite writer worker is CommonJS.
+    ["-e", contenderSource, file, requestId],
     {
       cwd: NodeURL.fileURLToPath(new URL("../../", import.meta.url)),
       stdio: ["pipe", "pipe", "pipe"],
