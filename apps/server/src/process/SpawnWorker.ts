@@ -9,6 +9,8 @@ import * as Layer from "effect/Layer";
 import { supportsEnvChdir } from "@t3tools/shared/envTrampoline";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import * as SpawnHost from "./SpawnHost.ts";
+
 // Windows runs CreateProcess synchronously on the calling thread, and antivirus or a busy disk can
 // hold it for seconds; Linux's spawn waits for chdir and the PATH search, which a hung mount
 // stalls. Workers own the children, so only the worker waits.
@@ -558,12 +560,15 @@ export const layer = Layer.unwrap(
   }),
 );
 
-/** Workers on Windows, and on Linux where `NonBlockingSpawner` has no GNU `env -C` to use. */
+/**
+ * Workers on Windows, and on Linux where `NonBlockingSpawner` has no GNU `env -C` to use.
+ * Elsewhere `SpawnHost`, which keeps Linux's fork() off the server and is Node's spawner otherwise.
+ */
 export const layerServer = Layer.unwrap(
   Effect.gen(function* () {
     const platform = yield* HostProcess.Platform;
     if (platform === "win32") return layer;
     if (platform === "linux" && !(yield* Effect.promise(supportsEnvChdir))) return layer;
-    return NodeChildProcessSpawner.layer;
+    return SpawnHost.layer;
   }),
 );
