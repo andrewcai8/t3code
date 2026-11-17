@@ -84,7 +84,7 @@ const report = (event: ForkExecEvent): number => {
     case "started":
       process.stderr.write(
         event.live
-          ? `[t3] Running in a throwaway copy of this worktree on Modal (job ${event.batchId}); its output follows as it runs.\n`
+          ? `[t3] Running in a throwaway copy of this worktree (job ${event.batchId}); its output follows as it runs.\n`
           : `[t3] Running in a throwaway copy of this machine (batch ${event.batchId}); its output follows when it finishes.\n`,
       );
       return -1;
