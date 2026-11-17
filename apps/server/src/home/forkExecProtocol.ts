@@ -35,6 +35,11 @@ export const ForkExecRequest = Schema.Struct({
   inputs: Schema.optional(HostPaths),
   /** Host paths the copy brings back to the same place once the command exits. */
   outputs: Schema.optional(HostPaths),
+  /**
+   * A worktree-forks platform this host configures, else its default. A copy of a cloud machine
+   * runs on the machine's own provider whatever this says.
+   */
+  platform: Schema.optional(Schema.Literals(["modal", "e2b"])),
 });
 export type ForkExecRequest = typeof ForkExecRequest.Type;
 
@@ -83,6 +88,8 @@ export const ForkExecEvent = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("unavailable"), message: Schema.String }),
   /** A copy started and was lost, so the command may have run partly. */
   Schema.Struct({ kind: Schema.Literal("failed"), message: Schema.String }),
+  /** The request cannot be met on this host, and the caller must not run it here instead. */
+  Schema.Struct({ kind: Schema.Literal("refused"), message: Schema.String }),
 ]);
 export type ForkExecEvent = typeof ForkExecEvent.Type;
 

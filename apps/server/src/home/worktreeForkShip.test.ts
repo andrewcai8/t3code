@@ -51,7 +51,6 @@ const repository = (ship: ReadonlyArray<string>, workDir: string): ForkRepositor
   prepare: [],
   services: [],
   ship,
-  key: "k",
 });
 
 /**
@@ -297,5 +296,6 @@ it("gives the copy the caller's environment without the host's session, home or 
     USER: "root",
     LOGNAME: "root",
     IS_SANDBOX: "1",
+    T3_FORK_COPY: "1",
   });
 });

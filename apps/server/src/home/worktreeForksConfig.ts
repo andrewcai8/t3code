@@ -53,7 +53,7 @@ const WorktreeForksFile = Schema.Struct({
       templateId: TrimmedNonEmptyString,
     }),
   ),
-  /** Picks the backend when both are configured; with one, that one is used. */
+  /** The default backend when both are configured; with one, that one. A job may name the other. */
   platform: Schema.optional(Schema.Literals(["modal", "e2b"])),
   defaultSize: Schema.optional(TrimmedNonEmptyString),
   /** Merged over the built-in sizes. */
@@ -122,8 +122,6 @@ export interface ForkRepository {
   readonly prepare: ReadonlyArray<string>;
   readonly services: ReadonlyArray<string>;
   readonly ship: ReadonlyArray<string>;
-  /** Changes whenever what a base holds would: the platform and its template image, prepare commands or ship paths. */
-  readonly key: string;
 }
 
 export interface ModalPlatform {
@@ -147,8 +145,7 @@ export type ForkPlatform = ModalPlatform | E2bPlatform;
 export const platformImage = (platform: ForkPlatform) =>
   platform.kind === "modal" ? platform.imageId : platform.templateId;
 
-export const platformLabel = (platform: ForkPlatform) =>
-  platform.kind === "modal" ? "Modal" : "E2B";
+export const platformLabel = (kind: ForkPlatform["kind"]) => (kind === "modal" ? "Modal" : "E2B");
 
 /** Names the account the platform's images live in, so another account's are never mounted. */
 export const platformScope = (platform: ForkPlatform) =>
@@ -156,9 +153,25 @@ export const platformScope = (platform: ForkPlatform) =>
     ? [platform.tokenId, platform.app, platform.environment ?? ""].join("\0")
     : ["e2b", platform.apiKey].join("\0");
 
+/**
+ * Changes whenever what a repository's base on `platform` holds would: the platform and its template
+ * image, prepare commands or ship paths.
+ */
+export const baseKey = (platform: ForkPlatform, repository: ForkRepository) =>
+  NodeCrypto.createHash("sha256")
+    .update(
+      JSON.stringify(
+        platform.kind === "modal"
+          ? [platform.imageId, repository.prepare, repository.ship]
+          : ["e2b", platform.templateId, repository.prepare, repository.ship],
+      ),
+    )
+    .digest("hex");
+
 /** worktree-forks.json with defaults applied: the only shape the rest of the backend reads. */
 export interface WorktreeForksHost {
-  readonly platform: ForkPlatform;
+  /** Every configured platform, the default first. */
+  readonly platforms: readonly [ForkPlatform, ...Array<ForkPlatform>];
   /** Always holds `defaultSize`. */
   readonly sizes: ReadonlyMap<string, SandboxSize>;
   readonly defaultSize: string;
@@ -257,7 +270,6 @@ export class WorktreeForksConfigError extends Schema.TaggedError<WorktreeForksCo
 const decodeFile = Schema.decodeUnknownSync(Schema.fromJsonString(WorktreeForksFile));
 
 const repositoryOf = (
-  platform: ForkPlatform,
   entry: (typeof WorktreeForksFile.Type)["repositories"][number],
 ): ForkRepository => {
   const repository = canonicalRepository(entry.repository);
@@ -274,41 +286,43 @@ const repositoryOf = (
       typeof command !== "string" && isBackground(command) ? [command.command] : [],
     ),
     ship,
-    key: NodeCrypto.createHash("sha256")
-      .update(
-        JSON.stringify(
-          platform.kind === "modal"
-            ? [platform.imageId, prepare, ship]
-            : ["e2b", platform.templateId, prepare, ship],
-        ),
-      )
-      .digest("hex"),
   };
 };
 
-const platformOf = (file: typeof WorktreeForksFile.Type): ForkPlatform => {
+const platformsOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost["platforms"] => {
   const { modal, e2b } = file;
-  const kind = file.platform ?? (modal === undefined ? "e2b" : e2b === undefined ? "modal" : null);
-  if (modal === undefined && e2b === undefined) throw new Error("Configure modal or e2b");
-  if (kind === null) throw new Error("Both modal and e2b are configured; platform picks one");
-  if (kind === "modal") {
-    if (modal === undefined) throw new Error("platform is modal but modal is not configured");
-    return {
-      kind,
-      tokenId: modal.tokenId,
-      tokenSecret: modal.tokenSecret,
-      imageId: modal.imageId,
-      app: modal.app ?? "t3-worktree-forks",
-      environment: modal.environment,
-    };
+  const configured = [
+    ...(modal === undefined
+      ? []
+      : [
+          {
+            kind: "modal" as const,
+            tokenId: modal.tokenId,
+            tokenSecret: modal.tokenSecret,
+            imageId: modal.imageId,
+            app: modal.app ?? "t3-worktree-forks",
+            environment: modal.environment,
+          },
+        ]),
+    ...(e2b === undefined
+      ? []
+      : [{ kind: "e2b" as const, apiKey: e2b.apiKey, templateId: e2b.templateId }]),
+  ];
+  const [only, other] = configured;
+  if (only === undefined) throw new Error("Configure modal or e2b");
+  if (other === undefined) {
+    if (file.platform !== undefined && file.platform !== only.kind)
+      throw new Error(`platform is ${file.platform} but ${file.platform} is not configured`);
+    return [only];
   }
-  if (e2b === undefined) throw new Error("platform is e2b but e2b is not configured");
-  return { kind, apiKey: e2b.apiKey, templateId: e2b.templateId };
+  if (file.platform === undefined)
+    throw new Error("Both modal and e2b are configured; platform picks the default");
+  return only.kind === file.platform ? [only, other] : [other, only];
 };
 
 /** Applies defaults and the rules a schema cannot state; throws on a file that breaks one. */
 const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
-  const platform = platformOf(file);
+  const platforms = platformsOf(file);
   const sizes = new Map<string, SandboxSize>(
     Object.entries({ ...BUILT_IN_SIZES, ...file.sizes }).map(([name, size]) => [
       name,
@@ -319,13 +333,13 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
   if (!sizes.has(defaultSize)) throw new Error(`defaultSize names no size: ${defaultSize}`);
   const repositories = new Map(
     file.repositories.map((entry) => {
-      const repository = repositoryOf(platform, entry);
+      const repository = repositoryOf(entry);
       return [repository.repository, repository] as const;
     }),
   );
   if (repositories.size !== file.repositories.length) throw new Error("Duplicate repository");
   return {
-    platform,
+    platforms,
     sizes,
     defaultSize,
     maxConcurrent: file.maxConcurrent ?? 8,

@@ -7,7 +7,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import { copySpec } from "./modalForkSandboxes.ts";
-import { type ModalPlatform, readWorktreeForksConfig } from "./worktreeForksConfig.ts";
+import { baseKey, type ModalPlatform, readWorktreeForksConfig } from "./worktreeForksConfig.ts";
 
 const stateDirWith = (config: unknown) => {
   const stateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-config-"));
@@ -48,7 +48,7 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       }),
     );
     expect(host).toMatchObject({
-      platform: { kind: "modal", ...modal, app: "t3-worktree-forks" },
+      platforms: [{ kind: "modal", ...modal, app: "t3-worktree-forks" }],
       defaultSize: "default",
       maxConcurrent: 8,
       maxJobMs: 120 * 60_000,
@@ -71,6 +71,9 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
   }),
 );
 
+const megptKey = (host: Effect.Success<ReturnType<typeof readWorktreeForksConfig>>) =>
+  baseKey(host!.platforms[0], host!.repositories.get("andrewcai8/megpt-mono")!);
+
 it.effect(
   "a base is rebuilt when its image, prepare commands or ship paths change, not its services",
   () =>
@@ -81,12 +84,16 @@ it.effect(
             modal: { ...modal, ...(overrides.imageId ? { imageId: overrides.imageId } : {}) },
             repositories: [{ ...megpt, ...overrides.repository }],
           }),
-        ).pipe(Effect.map((host) => host!.repositories.get("andrewcai8/megpt-mono")!.key));
+        ).pipe(Effect.map(megptKey));
       const key = yield* keyOf({});
       const e2bKey = (templateId: string) =>
         readWorktreeForksConfig(
           stateDirWith({ e2b: { ...e2b, templateId }, repositories: [megpt] }),
-        ).pipe(Effect.map((host) => host!.repositories.get("andrewcai8/megpt-mono")!.key));
+        ).pipe(Effect.map(megptKey));
+      // What an E2B record written before platforms had their own holds, so it is still used.
+      expect(yield* e2bKey("tpl-template")).toBe(
+        "e8ec7117731ffe8acd069ff65cfc7f2237101f343bb304fce36b07a30e4f4503",
+      );
       expect(yield* e2bKey("im-template")).not.toBe(key);
       expect(yield* e2bKey("tpl-other")).not.toBe(yield* e2bKey("im-template"));
       expect(yield* keyOf({ imageId: "im-other" })).not.toBe(key);
@@ -105,17 +112,21 @@ it.effect(
     }),
 );
 
-it.effect("the platform is the only one configured, or the one `platform` picks", () =>
+it.effect("the platforms are those configured, the one `platform` picks first", () =>
   Effect.gen(function* () {
-    const platformOf = (config: object) =>
+    const platformsOf = (config: object) =>
       readWorktreeForksConfig(stateDirWith({ repositories: [], ...config })).pipe(
-        Effect.map((host) => host!.platform),
+        Effect.map((host) => host!.platforms),
       );
-    expect(yield* platformOf({ modal })).toMatchObject({ kind: "modal", imageId: "im-template" });
-    expect(yield* platformOf({ e2b })).toEqual({ kind: "e2b", ...e2b });
-    expect(yield* platformOf({ modal, e2b, platform: "e2b" })).toMatchObject({ kind: "e2b" });
-    expect(yield* platformOf({ modal, e2b, platform: "modal" })).toMatchObject({ kind: "modal" });
-    expect(yield* platformOf({ e2b, platform: "e2b" })).toMatchObject({ kind: "e2b" });
+    const kinds = (config: object) =>
+      platformsOf(config).pipe(Effect.map((platforms) => platforms.map(({ kind }) => kind)));
+    expect(yield* platformsOf({ modal })).toMatchObject([
+      { kind: "modal", imageId: "im-template" },
+    ]);
+    expect(yield* platformsOf({ e2b })).toEqual([{ kind: "e2b", ...e2b }]);
+    expect(yield* kinds({ modal, e2b, platform: "e2b" })).toEqual(["e2b", "modal"]);
+    expect(yield* kinds({ modal, e2b, platform: "modal" })).toEqual(["modal", "e2b"]);
+    expect(yield* kinds({ e2b, platform: "e2b" })).toEqual(["e2b"]);
     for (const config of [
       {},
       { modal, e2b },
@@ -171,7 +182,7 @@ it.effect("bunShim false turns the shim off, and minTestFiles sets its size floo
 it.effect("a copy reserves its size's requests and may burst to its limits", () =>
   Effect.gen(function* () {
     const host = yield* readWorktreeForksConfig(stateDirWith({ modal, repositories: [megpt] }));
-    const spec = copySpec(host!.platform as ModalPlatform, {
+    const spec = copySpec(host!.platforms[0] as ModalPlatform, {
       imageId: "im-base",
       size: host!.sizes.get("default")!,
       lifetimeMs: 60_000,

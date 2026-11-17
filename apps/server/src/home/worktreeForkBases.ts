@@ -20,7 +20,9 @@ import { ServerConfig } from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { portableEnvironment } from "./forkExecProtocol.ts";
 import {
+  baseKey,
   COPY_PURPOSE,
+  type ForkPlatform,
   type ForkRepository,
   type ForkSandboxes,
   platformImage,
@@ -185,13 +187,14 @@ export interface Bases {
 }
 
 /**
- * `live` holds the sweep's job tags; a build adds its own while its sandbox exists. Builds run in
- * the scope this is made in, so a caller that stops waiting never cancels one. Every later copy
- * boots from a base, so it prepares with this server's environment, as the host prepares its own
- * worktrees, and never with that of the caller whose run happened to start the build.
+ * One platform's bases, whose records and deletes never touch another platform's. `live` holds the
+ * sweep's job tags, a build's own among them while its sandbox exists. Builds run in this scope, so
+ * a caller that stops waiting never cancels one, and prepare with this server's environment, never
+ * that of the caller whose run happened to start the build.
  */
 export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   host: WorktreeForksHost,
+  platform: ForkPlatform,
   sandboxes: ForkSandboxes,
   hostTag: string,
   live: Set<string>,
@@ -202,13 +205,29 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   const serverEnvironment = portableEnvironment(yield* HostProcess.Environment);
   const scope = yield* Effect.scope;
   const builds = new Map<string, Deferred.Deferred<ForkBase, BaseUnavailable>>();
-  const recordPath = (repository: ForkRepository) =>
-    NodePath.join(stateDir, "worktree-forks", `${repository.repository.replace("/", "__")}.json`);
-
+  const keyOf = (repository: ForkRepository) => baseKey(platform, repository);
+  const recordPath = (repository: ForkRepository, kind: string | null = platform.kind) =>
+    NodePath.join(
+      stateDir,
+      "worktree-forks",
+      `${repository.repository.replace("/", "__")}${kind === null ? "" : `.${kind}`}.json`,
+    );
+  /**
+   * This platform's record. Before each platform had its own, a host's one record had no suffix;
+   * it is this platform's only when it holds this platform's key, so no platform reads another's.
+   */
+  const loadRecord = (repository: ForkRepository) => {
+    const own = recordPath(repository);
+    if (NodeFS.existsSync(own)) return decodeRecord(NodeFS.readFileSync(own, "utf8"));
+    const unsuffixed = recordPath(repository, null);
+    if (!NodeFS.existsSync(unsuffixed)) return null;
+    const record = decodeRecord(NodeFS.readFileSync(unsuffixed, "utf8"));
+    return record.key === keyOf(repository) ? record : null;
+  };
   const readRecord = (repository: ForkRepository) =>
     Effect.sync(() => {
       try {
-        return decodeRecord(NodeFS.readFileSync(recordPath(repository), "utf8"));
+        return loadRecord(repository);
       } catch {
         return null;
       }
@@ -275,7 +294,7 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   const build = Effect.fn("WorktreeForks.buildBase")(function* (checkout: Checkout) {
     const { repository, root } = checkout;
     const record = yield* readRecord(repository);
-    const from = pickBase(record, repository.key, yield* Clock.currentTimeMillis);
+    const from = pickBase(record, keyOf(repository), yield* Clock.currentTimeMillis);
     const originHead = yield* runner
       .run({
         command: "git",
@@ -347,13 +366,13 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
     ]);
     yield* onHost("pack", dir, "tar", ["-cf", "state.tar", ...parts]);
 
-    const job = `base-${repository.repository.replace("/", "__")}`;
+    const job = `base-${platform.kind}-${repository.repository.replace("/", "__")}`;
     const sandboxId = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: () => {
           live.add(job);
           return sandboxes.createCopy({
-            imageId: from?.imageId ?? platformImage(host.platform),
+            imageId: from?.imageId ?? platformImage(platform),
             size: host.sizes.get(host.defaultSize)!,
             lifetimeMs: BUILD_LIFETIME_MS,
             tags: { purpose: COPY_PURPOSE, host: hostTag, job },
@@ -393,12 +412,13 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
     const next = afterBuild(
       yield* readRecord(repository),
       repository.repository,
-      repository.key,
+      keyOf(repository),
       built,
     );
     yield* writeRecord(repository, next.record);
     yield* Effect.logInfo("worktree fork base built", {
       repository: repository.repository,
+      platform: platform.kind,
       imageId,
       sha: tip,
     });
@@ -419,17 +439,19 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
       Effect.tapError((error) =>
         Effect.gen(function* () {
           const { repository } = checkout;
+          const key = keyOf(repository);
           yield* Effect.logWarning("worktree fork base build failed", {
             repository: repository.repository,
+            platform: platform.kind,
             step: error.step,
             cause: error.cause,
           });
           const at = yield* Clock.currentTimeMillis;
           const record = yield* readRecord(repository);
           yield* writeRecord(repository, {
-            ...(record ?? { repository: repository.repository, key: repository.key, bases: [] }),
+            ...(record ?? { repository: repository.repository, key, bases: [] }),
             checkedAt: at,
-            failure: { key: repository.key, at, message: error.message },
+            failure: { key, at, message: error.message },
           }).pipe(Effect.ignore);
         }),
       ),
@@ -454,7 +476,7 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
 
   const current: Bases["current"] = Effect.fn("WorktreeForks.currentBase")(
     function* (checkout, waitForFirst) {
-      const { key } = checkout.repository;
+      const key = keyOf(checkout.repository);
       const record = yield* readRecord(checkout.repository);
       const now = yield* Clock.currentTimeMillis;
       const base = pickBase(record, key, now);
@@ -479,12 +501,8 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
   const kept = Effect.try({
     try: () => {
       const images = new Set<string>();
-      for (const repository of host.repositories.values()) {
-        const path = recordPath(repository);
-        if (!NodeFS.existsSync(path)) continue;
-        for (const base of decodeRecord(NodeFS.readFileSync(path, "utf8")).bases)
-          images.add(base.imageId);
-      }
+      for (const repository of host.repositories.values())
+        for (const base of loadRecord(repository)?.bases ?? []) images.add(base.imageId);
       return images as ReadonlySet<string>;
     },
     catch: (cause) => new BaseDeleteFailed({ cause }),

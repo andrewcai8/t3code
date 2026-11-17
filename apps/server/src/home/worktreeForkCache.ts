@@ -17,11 +17,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { fileDigest } from "../environmentControl/ProvisionPreparation.ts";
-import {
-  type ForkSandboxes,
-  platformScope,
-  type WorktreeForksHost,
-} from "./worktreeForksConfig.ts";
+import { type ForkPlatform, type ForkSandboxes, platformScope } from "./worktreeForksConfig.ts";
 import type { CheckoutRefused } from "./worktreeForkShip.ts";
 
 const DAY = 24 * 3_600_000;
@@ -89,21 +85,23 @@ const decodeIndex = Schema.decodeUnknownSync(Schema.fromJsonString(Index));
 const encodeIndex = Schema.encodeSync(Schema.fromJsonString(Index));
 
 export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(function* (
-  host: WorktreeForksHost,
+  platform: ForkPlatform,
   sandboxes: ForkSandboxes,
   stateDir: string,
 ) {
-  const path = NodePath.join(stateDir, "worktree-forks", "upload-cache.json");
-  const workspace = NodeCrypto.createHash("sha256")
-    .update(platformScope(host.platform))
-    .digest("hex");
+  const path = NodePath.join(stateDir, "worktree-forks", `upload-cache.${platform.kind}.json`);
+  // Before each platform had its own index, a host's one index had no suffix; the scope check
+  // below keeps another platform's out.
+  const unsuffixed = NodePath.join(stateDir, "worktree-forks", "upload-cache.json");
+  const workspace = NodeCrypto.createHash("sha256").update(platformScope(platform)).digest("hex");
   const index = new Map<string, Entry>();
   const scope = yield* Effect.scope;
   const packRoot = NodePath.join(stateDir, "worktree-forks", "tmp", "packs");
   yield* Effect.try({
     try: () => {
-      if (!NodeFS.existsSync(path)) return;
-      const saved = decodeIndex(NodeFS.readFileSync(path, "utf8"));
+      const from = NodeFS.existsSync(path) ? path : unsuffixed;
+      if (!NodeFS.existsSync(from)) return;
+      const saved = decodeIndex(NodeFS.readFileSync(from, "utf8"));
       // Another workspace's images are not this one's to mount; Modal expires them.
       if (saved.scope === workspace)
         for (const [key, entry] of Object.entries(saved.entries)) index.set(key, entry);
