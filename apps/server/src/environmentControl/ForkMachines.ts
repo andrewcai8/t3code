@@ -434,7 +434,12 @@ const decodeDiskCapture = Schema.decodeUnknownSync(
  * impossible to place. E2B offers this per team (`memory: false`, not in its SDK yet); answers null
  * where the team lacks it, and the caller takes a full snapshot.
  */
-async function captureDisk(apiKey: string, sandboxId: string, name: string, signal: AbortSignal) {
+export async function captureDisk(
+  apiKey: string,
+  sandboxId: string,
+  name: string,
+  signal: AbortSignal,
+) {
   const response = await fetch(
     `${new ConnectionConfig({ apiKey }).apiUrl}/sandboxes/${encodeURIComponent(sandboxId)}/snapshots`,
     {
