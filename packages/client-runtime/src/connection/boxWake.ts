@@ -7,6 +7,7 @@ import {
   type ConnectionBlockedError,
   ConnectionTransientError,
   type NetworkStatus,
+  NO_REFUSED_ROUTES,
   type SupervisorConnectionState,
 } from "./model.ts";
 
@@ -85,6 +86,7 @@ export function makeBoxWaker(
       generation,
       lastFailure,
       retryAt: null,
+      refusedRouteIds: NO_REFUSED_ROUTES,
     });
     // However a wake ends, the loop goes on: a wake that fails instead of answering is treated as
     // one the host never heard, so the box cannot be left waking with nothing running.

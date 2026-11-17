@@ -296,6 +296,7 @@ const make = Effect.gen(function* () {
         threads,
         target,
         shell,
+        target.runs.length,
         input,
         true,
       )).result;
