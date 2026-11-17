@@ -9,6 +9,7 @@ import type * as NodeStreamWeb from "node:stream/web";
 import { CommandExitError, E2B, SandboxNotFoundError, type Sandbox } from "e2b";
 
 import { uploadFile } from "../environmentControl/E2bProvisionRuntime.ts";
+import { captureDisk } from "../environmentControl/ForkMachines.ts";
 import { shellQuote } from "./forkExecProtocol.ts";
 import type { E2bPlatform, ForkSandboxes } from "./worktreeForksConfig.ts";
 
@@ -19,17 +20,13 @@ const GUEST_PATH =
 const REQUEST_SLACK_MS = 60_000;
 const TRANSFER_TIMEOUT_MS = 600_000;
 const STEP_TIMEOUT_MS = 120_000;
-const WARM_TIMEOUT_MS = 15 * 60_000;
 /** A snapshot this process took is not pruned while its build may still be recording it. */
 const FRESH_MS = 15 * 60_000;
 /** Distinct from ForkMachines' capture prefix, whose sweep deletes what it matches. */
 const SNAPSHOT_PREFIX = "t3-fork-base-";
 
-/** A snapshot restored from E2B came up with swap off; the template's swapfile is still there. */
+/** A copy booted from a disk snapshot comes up with swap off; the template's swapfile is still there. */
 const SWAP_SCRIPT = `grep -q '^/swapfile ' /proc/swaps || /sbin/swapon /swapfile`;
-
-/** Pages in what a copy reads first, so the snapshot's memory holds it instead of a cold disk. */
-const WARM_SCRIPT = `for d in /work /home/user/.bun/install/cache /root/.bun/install/cache; do [ -d "$d" ] && find "$d" -type f -exec cat {} + > /dev/null 2>&1; done; true`;
 
 /** `team/name:tag` and `name:tag` and a bare id compare as the same snapshot. */
 const bare = (id: string) =>
@@ -106,9 +103,11 @@ export const makeE2bForkSandboxes = (platform: E2bPlatform, hostTag: string): Fo
   const ensureSwap = (sandbox: Sandbox) =>
     run(sandbox, ["sh", "-c", SWAP_SCRIPT], { timeoutMs: STEP_TIMEOUT_MS }).catch(() => undefined);
 
-  /** Whether a snapshot keeps memory is E2B's default and a benchmark may change it. */
-  const takeSnapshot = (sandboxId: string, name: string, timeoutMs: number) =>
-    e2b.Sandbox.createSnapshot(sandboxId, { name, requestTimeoutMs: timeoutMs });
+  // Disk only: each E2B host must fetch a whole memory image before its first copy boots, which
+  // put setup at 1-4 minutes under the mini PC's load. A cold page cache costs a heavy job far less.
+  const takeSnapshot = async (sandboxId: string, name: string, timeoutMs: number) =>
+    (await captureDisk(platform.apiKey, sandboxId, name, AbortSignal.timeout(timeoutMs))) ??
+    (await e2b.Sandbox.createSnapshot(sandboxId, { name, requestTimeoutMs: timeoutMs })).snapshotId;
 
   return {
     createCopy: async ({ imageId, lifetimeMs, tags }) => {
@@ -158,15 +157,10 @@ export const makeE2bForkSandboxes = (platform: E2bPlatform, hostTag: string): Fo
       );
     },
     saveDisk: async (sandboxId, _ttlMs, timeoutMs = 300_000) => {
-      const sandbox = await box(sandboxId);
-      await run(sandbox, ["sh", "-c", WARM_SCRIPT], { timeoutMs: WARM_TIMEOUT_MS }).catch(
-        () => undefined,
-      );
-      await ensureSwap(sandbox);
       const name = `${prefix}${NodeCrypto.randomUUID().slice(0, 12)}`;
       // Marked before the call too: the sweep may list a snapshot E2B is still taking.
       fresh.set(name, Date.now());
-      const { snapshotId } = await takeSnapshot(sandboxId, name, timeoutMs);
+      const snapshotId = await takeSnapshot(sandboxId, name, timeoutMs);
       fresh.set(bare(snapshotId), Date.now());
       return snapshotId;
     },
