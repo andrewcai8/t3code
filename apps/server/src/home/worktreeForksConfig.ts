@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - a small private file read once at startup.
 /**
- * `<stateDir>/worktree-forks.json`: a self-hosted server's own Modal backend for fork-exec and
- * t3_fork_run. It holds a Modal token, so it lives beside settings.json rather than in settings,
- * which are sent to clients, and is the operator's to keep private.
+ * `<stateDir>/worktree-forks.json`: a self-hosted server's own Modal or E2B backend for fork-exec and
+ * t3_fork_run. It holds a Modal token or an E2B key, so it lives beside settings.json rather than
+ * in settings, which are sent to clients, and is the operator's to keep private.
  *
  * @module worktreeForksConfig
  */
@@ -20,7 +20,6 @@ import {
   PrepareCommand,
   RelativeFilePath,
 } from "../environmentControl/config.ts";
-import type { ModalBoxes, ModalCopySpec } from "../environmentControl/ModalRuntime.ts";
 import type { BunShimSettings } from "./bunShim.ts";
 
 const Bounded = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum }));
@@ -37,14 +36,25 @@ const ForkSize = Schema.Struct({
 });
 
 const WorktreeForksFile = Schema.Struct({
-  modal: Schema.Struct({
-    tokenId: TrimmedNonEmptyString,
-    tokenSecret: TrimmedNonEmptyString,
-    /** The image a repository's first base is built from: git, bash, tar, gzip and its toolchain. */
-    imageId: TrimmedNonEmptyString,
-    app: Schema.optional(TrimmedNonEmptyString),
-    environment: Schema.optional(TrimmedNonEmptyString),
-  }),
+  modal: Schema.optional(
+    Schema.Struct({
+      tokenId: TrimmedNonEmptyString,
+      tokenSecret: TrimmedNonEmptyString,
+      /** The image a repository's first base is built from: git, bash, tar, gzip and its toolchain. */
+      imageId: TrimmedNonEmptyString,
+      app: Schema.optional(TrimmedNonEmptyString),
+      environment: Schema.optional(TrimmedNonEmptyString),
+    }),
+  ),
+  e2b: Schema.optional(
+    Schema.Struct({
+      apiKey: TrimmedNonEmptyString,
+      /** What a repository's first base is built from, as `imageId` is on Modal. */
+      templateId: TrimmedNonEmptyString,
+    }),
+  ),
+  /** Picks the backend when both are configured; with one, that one is used. */
+  platform: Schema.optional(Schema.Literals(["modal", "e2b"])),
   defaultSize: Schema.optional(TrimmedNonEmptyString),
   /** Merged over the built-in sizes. */
   sizes: Schema.optional(Schema.Record(TrimmedNonEmptyString, ForkSize)),
@@ -112,19 +122,43 @@ export interface ForkRepository {
   readonly prepare: ReadonlyArray<string>;
   readonly services: ReadonlyArray<string>;
   readonly ship: ReadonlyArray<string>;
-  /** Changes whenever what a base holds would: the template image, prepare commands or ship paths. */
+  /** Changes whenever what a base holds would: the platform and its template image, prepare commands or ship paths. */
   readonly key: string;
 }
 
+export interface ModalPlatform {
+  readonly kind: "modal";
+  readonly tokenId: string;
+  readonly tokenSecret: string;
+  readonly imageId: string;
+  readonly app: string;
+  readonly environment: string | undefined;
+}
+
+export interface E2bPlatform {
+  readonly kind: "e2b";
+  readonly apiKey: string;
+  readonly templateId: string;
+}
+
+export type ForkPlatform = ModalPlatform | E2bPlatform;
+
+/** What a repository's first base boots from. */
+export const platformImage = (platform: ForkPlatform) =>
+  platform.kind === "modal" ? platform.imageId : platform.templateId;
+
+export const platformLabel = (platform: ForkPlatform) =>
+  platform.kind === "modal" ? "Modal" : "E2B";
+
+/** Names the account the platform's images live in, so another account's are never mounted. */
+export const platformScope = (platform: ForkPlatform) =>
+  platform.kind === "modal"
+    ? [platform.tokenId, platform.app, platform.environment ?? ""].join("\0")
+    : ["e2b", platform.apiKey].join("\0");
+
 /** worktree-forks.json with defaults applied: the only shape the rest of the backend reads. */
 export interface WorktreeForksHost {
-  readonly modal: {
-    readonly tokenId: string;
-    readonly tokenSecret: string;
-    readonly imageId: string;
-    readonly app: string;
-    readonly environment: string | undefined;
-  };
+  readonly platform: ForkPlatform;
   /** Always holds `defaultSize`. */
   readonly sizes: ReadonlyMap<string, SandboxSize>;
   readonly defaultSize: string;
@@ -137,52 +171,75 @@ export interface WorktreeForksHost {
   readonly bunShim: BunShimSettings | null;
 }
 
-/** What the backend asks of Modal. Tests fake exactly these members. */
-export type ForkSandboxes = Pick<
-  ModalBoxes,
-  | "createCopy"
-  | "exec"
-  | "execStream"
-  | "upload"
-  | "download"
-  | "saveDisk"
-  | "deleteImage"
-  | "saveDirectory"
-  | "mountImage"
-  | "terminate"
-  | "list"
->;
+export interface ForkExecOptions {
+  readonly timeoutMs: number;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly workdir?: string;
+}
 
-/** Every sandbox of this backend carries it, with the host and job, for the sweep. */
-export const COPY_PURPOSE = "t3-worktree-fork";
+export interface ForkExecResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
 
 /**
- * A sandbox booted from `imageId`, on the vm runtime, which ran a megpt-mono test shard in half
- * the time gVisor took. Egress stays open, like the host it stands in for.
+ * What the backend asks of a sandbox platform, which each platform's adapter implements and tests
+ * fake. Sandboxes and images are the platform's ids.
  */
-export const copySpec = (
-  host: WorktreeForksHost,
-  input: {
+export interface ForkSandboxes {
+  /** A throwaway sandbox booted from `imageId`. A platform with fixed sizes accepts any `size`. */
+  readonly createCopy: (input: {
     readonly imageId: string;
     readonly size: SandboxSize;
     readonly lifetimeMs: number;
     readonly tags: Readonly<Record<string, string>>;
-  },
-): ModalCopySpec => ({
-  app: host.modal.app,
-  ...(host.modal.environment === undefined ? {} : { environment: host.modal.environment }),
-  imageId: input.imageId,
-  runtime: "vm",
-  timeoutMs: input.lifetimeMs,
-  sizing: {
-    cpu: input.size.cpuRequest,
-    cpuLimit: input.size.cpu,
-    memoryMiB: input.size.memoryRequestMiB,
-    memoryLimitMiB: input.size.memoryMiB,
-  },
-  tags: input.tags,
-  egress: { domains: [], cidrs: [] },
-});
+  }) => Promise<string>;
+  /** Runs `argv` as root; a non-zero exit is a result, not a failure. */
+  readonly exec: (
+    sandboxId: string,
+    argv: ReadonlyArray<string>,
+    options: ForkExecOptions & { readonly stdin?: string },
+  ) => Promise<ForkExecResult>;
+  /** Runs `argv`, handing each chunk of its output to `onOutput` as it arrives; answers its exit code. */
+  readonly execStream: (
+    sandboxId: string,
+    argv: ReadonlyArray<string>,
+    options: ForkExecOptions & {
+      readonly onOutput: (stream: "stdout" | "stderr", text: string) => void;
+    },
+  ) => Promise<number>;
+  readonly upload: (sandboxId: string, localPath: string, remotePath: string) => Promise<void>;
+  readonly download: (sandboxId: string, remotePath: string, localPath: string) => Promise<void>;
+  /** An image of a running sandbox's disk, kept `ttlMs` where the platform expires images, else until deleted. */
+  readonly saveDisk: (
+    sandboxId: string,
+    ttlMs: number | null,
+    timeoutMs?: number,
+  ) => Promise<string>;
+  /** Deletes an image; one that is gone is deleted. */
+  readonly deleteImage: (imageId: string) => Promise<void>;
+  /**
+   * Deletes this host's images other than `keep`, which a delete that failed or a restart left
+   * behind. For a platform that expires its own images it does nothing.
+   */
+  readonly pruneImages: (keep: ReadonlySet<string>) => Promise<void>;
+  readonly terminate: (sandboxId: string) => Promise<void>;
+  /** This backend's running sandboxes that carry every one of `tags`. */
+  readonly list: (
+    tags: Readonly<Record<string, string>>,
+  ) => Promise<
+    ReadonlyArray<{ readonly sandboxId: string; readonly tags: Readonly<Record<string, string>> }>
+  >;
+  /** Images of one directory, shown in other sandboxes; null where the platform has none. */
+  readonly directoryImages: {
+    readonly save: (sandboxId: string, path: string, ttlMs: number) => Promise<string>;
+    readonly mount: (sandboxId: string, path: string, imageId: string) => Promise<void>;
+  } | null;
+}
+
+/** Every sandbox of this backend carries it, with the host and job, for the sweep. */
+export const COPY_PURPOSE = "t3-worktree-fork";
 
 export class WorktreeForksConfigError extends Schema.TaggedError<WorktreeForksConfigError>()(
   "WorktreeForksConfigError",
@@ -200,7 +257,7 @@ export class WorktreeForksConfigError extends Schema.TaggedError<WorktreeForksCo
 const decodeFile = Schema.decodeUnknownSync(Schema.fromJsonString(WorktreeForksFile));
 
 const repositoryOf = (
-  imageId: string,
+  platform: ForkPlatform,
   entry: (typeof WorktreeForksFile.Type)["repositories"][number],
 ): ForkRepository => {
   const repository = canonicalRepository(entry.repository);
@@ -218,13 +275,40 @@ const repositoryOf = (
     ),
     ship,
     key: NodeCrypto.createHash("sha256")
-      .update(JSON.stringify([imageId, prepare, ship]))
+      .update(
+        JSON.stringify(
+          platform.kind === "modal"
+            ? [platform.imageId, prepare, ship]
+            : ["e2b", platform.templateId, prepare, ship],
+        ),
+      )
       .digest("hex"),
   };
 };
 
+const platformOf = (file: typeof WorktreeForksFile.Type): ForkPlatform => {
+  const { modal, e2b } = file;
+  const kind = file.platform ?? (modal === undefined ? "e2b" : e2b === undefined ? "modal" : null);
+  if (modal === undefined && e2b === undefined) throw new Error("Configure modal or e2b");
+  if (kind === null) throw new Error("Both modal and e2b are configured; platform picks one");
+  if (kind === "modal") {
+    if (modal === undefined) throw new Error("platform is modal but modal is not configured");
+    return {
+      kind,
+      tokenId: modal.tokenId,
+      tokenSecret: modal.tokenSecret,
+      imageId: modal.imageId,
+      app: modal.app ?? "t3-worktree-forks",
+      environment: modal.environment,
+    };
+  }
+  if (e2b === undefined) throw new Error("platform is e2b but e2b is not configured");
+  return { kind, apiKey: e2b.apiKey, templateId: e2b.templateId };
+};
+
 /** Applies defaults and the rules a schema cannot state; throws on a file that breaks one. */
 const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
+  const platform = platformOf(file);
   const sizes = new Map<string, SandboxSize>(
     Object.entries({ ...BUILT_IN_SIZES, ...file.sizes }).map(([name, size]) => [
       name,
@@ -235,19 +319,13 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
   if (!sizes.has(defaultSize)) throw new Error(`defaultSize names no size: ${defaultSize}`);
   const repositories = new Map(
     file.repositories.map((entry) => {
-      const repository = repositoryOf(file.modal.imageId, entry);
+      const repository = repositoryOf(platform, entry);
       return [repository.repository, repository] as const;
     }),
   );
   if (repositories.size !== file.repositories.length) throw new Error("Duplicate repository");
   return {
-    modal: {
-      tokenId: file.modal.tokenId,
-      tokenSecret: file.modal.tokenSecret,
-      imageId: file.modal.imageId,
-      app: file.modal.app ?? "t3-worktree-forks",
-      environment: file.modal.environment,
-    },
+    platform,
     sizes,
     defaultSize,
     maxConcurrent: file.maxConcurrent ?? 8,
@@ -277,7 +355,7 @@ export const readWorktreeForksConfig = Effect.fn("WorktreeForks.readConfig")(fun
   if (text === null) return null;
   if ((NodeFS.statSync(path).mode & 0o077) !== 0)
     yield* Effect.logWarning(
-      "worktree-forks.json holds a Modal token and others can read it; chmod 600 it",
+      "worktree-forks.json holds a Modal token or E2B key and others can read it; chmod 600 it",
       { path },
     );
   return yield* Effect.try({

@@ -6,7 +6,8 @@ import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
-import { copySpec, readWorktreeForksConfig } from "./worktreeForksConfig.ts";
+import { copySpec } from "./modalForkSandboxes.ts";
+import { type ModalPlatform, readWorktreeForksConfig } from "./worktreeForksConfig.ts";
 
 const stateDirWith = (config: unknown) => {
   const stateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-config-"));
@@ -18,6 +19,7 @@ const stateDirWith = (config: unknown) => {
 };
 
 const modal = { tokenId: "ak-1", tokenSecret: "as-1", imageId: "im-template" };
+const e2b = { apiKey: "e2b_key", templateId: "tpl-template" };
 const megpt = {
   repository: "https://github.com/AndrewCai8/megpt-mono.git",
   prepareCommands: [
@@ -46,7 +48,7 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       }),
     );
     expect(host).toMatchObject({
-      modal: { ...modal, app: "t3-worktree-forks" },
+      platform: { kind: "modal", ...modal, app: "t3-worktree-forks" },
       defaultSize: "default",
       maxConcurrent: 8,
       maxJobMs: 120 * 60_000,
@@ -81,6 +83,12 @@ it.effect(
           }),
         ).pipe(Effect.map((host) => host!.repositories.get("andrewcai8/megpt-mono")!.key));
       const key = yield* keyOf({});
+      const e2bKey = (templateId: string) =>
+        readWorktreeForksConfig(
+          stateDirWith({ e2b: { ...e2b, templateId }, repositories: [megpt] }),
+        ).pipe(Effect.map((host) => host!.repositories.get("andrewcai8/megpt-mono")!.key));
+      expect(yield* e2bKey("im-template")).not.toBe(key);
+      expect(yield* e2bKey("tpl-other")).not.toBe(yield* e2bKey("im-template"));
       expect(yield* keyOf({ imageId: "im-other" })).not.toBe(key);
       expect(yield* keyOf({ repository: { prepareCommands: ["make"] } })).not.toBe(key);
       expect(yield* keyOf({ repository: { ship: [] } })).not.toBe(key);
@@ -95,6 +103,31 @@ it.effect(
         }),
       ).toBe(key);
     }),
+);
+
+it.effect("the platform is the only one configured, or the one `platform` picks", () =>
+  Effect.gen(function* () {
+    const platformOf = (config: object) =>
+      readWorktreeForksConfig(stateDirWith({ repositories: [], ...config })).pipe(
+        Effect.map((host) => host!.platform),
+      );
+    expect(yield* platformOf({ modal })).toMatchObject({ kind: "modal", imageId: "im-template" });
+    expect(yield* platformOf({ e2b })).toEqual({ kind: "e2b", ...e2b });
+    expect(yield* platformOf({ modal, e2b, platform: "e2b" })).toMatchObject({ kind: "e2b" });
+    expect(yield* platformOf({ modal, e2b, platform: "modal" })).toMatchObject({ kind: "modal" });
+    expect(yield* platformOf({ e2b, platform: "e2b" })).toMatchObject({ kind: "e2b" });
+    for (const config of [
+      {},
+      { modal, e2b },
+      { e2b, platform: "modal" },
+      { modal, platform: "e2b" },
+    ])
+      expect(
+        (yield* readWorktreeForksConfig(stateDirWith({ repositories: [], ...config })).pipe(
+          Effect.flip,
+        )).operation,
+      ).toBe("decode");
+  }),
 );
 
 it.effect(
@@ -138,7 +171,7 @@ it.effect("bunShim false turns the shim off, and minTestFiles sets its size floo
 it.effect("a copy reserves its size's requests and may burst to its limits", () =>
   Effect.gen(function* () {
     const host = yield* readWorktreeForksConfig(stateDirWith({ modal, repositories: [megpt] }));
-    const spec = copySpec(host!, {
+    const spec = copySpec(host!.platform as ModalPlatform, {
       imageId: "im-base",
       size: host!.sizes.get("default")!,
       lifetimeMs: 60_000,

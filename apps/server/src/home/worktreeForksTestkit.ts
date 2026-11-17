@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - downloads land in real files, as Modal's do.
 /**
- * An in-memory stand-in for the Modal members WorktreeForks uses. Sandboxes are ids with tags;
+ * An in-memory stand-in for the sandbox platform port WorktreeForks uses. Sandboxes are ids with tags;
  * execs answer from scripted rules, so tests can hold a step open or fail it. A launched command
  * answers whoever follows it, as a copy's files do, so a second service can adopt it.
  *
@@ -49,8 +49,10 @@ export const gate = <A>() => {
   return { value, open, reached, reach };
 };
 
-export const makeFakeSandboxes = () => {
+/** `directoryImages: false` is a platform with none, as E2B is. */
+export const makeFakeSandboxes = (options: { readonly directoryImages?: boolean } = {}) => {
   const calls: Array<FakeCall> = [];
+  const prunes: Array<(kept: ReadonlyArray<string>) => void> = [];
   const sandboxes = new Map<string, { readonly tags: Readonly<Record<string, string>> }>();
   const images = new Set<string>();
   /** Each directory image's files, by their path under it. */
@@ -113,7 +115,7 @@ export const makeFakeSandboxes = () => {
 
   const port: ForkSandboxes = {
     createCopy: async (spec) => {
-      record({ op: "create", imageId: spec.imageId, cpu: spec.sizing.cpuLimit, tags: spec.tags });
+      record({ op: "create", imageId: spec.imageId, cpu: spec.size.cpu, tags: spec.tags });
       await step("create");
       const sandboxId = `sb-${++next}`;
       sandboxes.set(sandboxId, { tags: spec.tags });
@@ -188,37 +190,44 @@ export const makeFakeSandboxes = () => {
       images.delete(imageId);
       directories.delete(imageId);
     },
-    saveDirectory: async (sandboxId, path) => {
-      record({ op: "saveDirectory", sandboxId, argv: [path] });
-      await step("saveDirectory");
-      const imageId = `im-dir-${++next}`;
-      directories.set(
-        imageId,
-        new Map(
-          [...uploads]
-            .filter(([remote]) => remote.startsWith(`${path}/`))
-            .map(([remote, local]) => [remote.slice(path.length), local]),
-        ),
-      );
-      return imageId;
-    },
-    mountImage: async (sandboxId, path, imageId) => {
-      record({ op: "mount", sandboxId, argv: [path], imageId });
-      await step("mount");
-      const files = directories.get(imageId);
-      if (files === undefined) throw new Error(`Could not find image with ID ${imageId}`);
-      for (const [name, local] of files) uploads.set(`${path}${name}`, local);
-    },
+    pruneImages: async (keep) =>
+      void prunes.splice(0).forEach((resolve) => resolve([...keep].sort())),
     terminate: async (sandboxId) => {
       record({ op: "terminate", sandboxId });
       sandboxes.delete(sandboxId);
     },
-    list: async (_app, _environment, tags) =>
+    list: async (tags) =>
       [...sandboxes]
         .filter(([, sandbox]) =>
           Object.entries(tags).every(([name, value]) => sandbox.tags[name] === value),
         )
         .map(([sandboxId, sandbox]) => ({ sandboxId, tags: { ...sandbox.tags } })),
+    directoryImages:
+      options.directoryImages === false
+        ? null
+        : {
+            save: async (sandboxId, path) => {
+              record({ op: "saveDirectory", sandboxId, argv: [path] });
+              await step("saveDirectory");
+              const imageId = `im-dir-${++next}`;
+              directories.set(
+                imageId,
+                new Map(
+                  [...uploads]
+                    .filter(([remote]) => remote.startsWith(`${path}/`))
+                    .map(([remote, local]) => [remote.slice(path.length), local]),
+                ),
+              );
+              return imageId;
+            },
+            mount: async (sandboxId, path, imageId) => {
+              record({ op: "mount", sandboxId, argv: [path], imageId });
+              await step("mount");
+              const files = directories.get(imageId);
+              if (files === undefined) throw new Error(`Could not find image with ID ${imageId}`);
+              for (const [name, local] of files) uploads.set(`${path}${name}`, local);
+            },
+          },
   };
 
   return {
@@ -262,6 +271,8 @@ export const makeFakeSandboxes = () => {
         },
       };
     },
+    /** Settles with the images kept by the next prune. */
+    nextPrune: () => new Promise<ReadonlyArray<string>>((resolve) => void prunes.push(resolve)),
     /** Settles at the next call of `op`. */
     next: (op: string) => new Promise<FakeCall>((resolve) => void waiters.push({ op, resolve })),
     /** A sandbox an earlier run left behind, with the command it launched, if any. */
