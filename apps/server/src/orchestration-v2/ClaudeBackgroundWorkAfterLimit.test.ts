@@ -9,6 +9,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   type OrchestrationV2DomainEvent,
   type ServerProvider,
@@ -276,10 +277,34 @@ const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
     return Fiber.join(seen).pipe(Effect.timeout("10 seconds"), TestClock.withLive);
   });
 
+/**
+ * A shell ending as a limited live CLI reports it: an empty roster level, the task's notification,
+ * then the wake turn it ends without calling the model, as `limitedWakeTurn` recorded.
+ */
+const shellEnded = (taskId: string) => [
+  backgroundTasks([]),
+  {
+    type: "system",
+    subtype: "task_notification",
+    task_id: taskId,
+    status: "completed",
+    output_file: `/tmp/claude-background-after-limit/${taskId}.output`,
+    summary: "Background command completed",
+    uuid: `notification-${taskId}`,
+    session_id: nativeSession,
+  } as unknown as SDKMessage,
+  ...limitedWakeTurn.slice(-2),
+];
+
 const rosterCleared = (event: OrchestrationV2DomainEvent) =>
   event.type === "provider-thread.updated" && event.payload.pendingBackgroundTasks?.length === 0;
 
 const devServer = { taskId: "bash-1", kind: "command", description: "bun run dev" } as const;
+/** The thread lists the shell with the run that started it, the chat's first. */
+const listedDevServer = {
+  ...devServer,
+  runId: RunId.make("run:thread:thread%3Abackground-after-limit:ordinal:1"),
+};
 
 /**
  * Runs a chat whose turn starts background work (a dev server unless `background` says
@@ -349,7 +374,7 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
           const { closed } = yield* limitedChat(cli, cwd);
 
           const limited = yield* orchestrator.getThreadShell(threadId);
-          assert.deepEqual(limited?.pendingBackgroundTasks, [devServer]);
+          assert.deepEqual(limited?.pendingBackgroundTasks, [listedDevServer]);
 
           // Stop, as the background-work banner sends it.
           const cleared = yield* watch(rosterCleared);
@@ -383,11 +408,11 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const { messages, closed } = yield* limitedChat(cli, cwd);
           assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks, [
-            devServer,
+            listedDevServer,
           ]);
 
           const cleared = yield* watch(rosterCleared);
-          yield* Queue.offer(messages, backgroundTasks([]));
+          yield* Queue.offerAll(messages, shellEnded(devServer.taskId));
           yield* cleared;
 
           assert.isFalse(yield* Ref.get(closed));
@@ -395,7 +420,7 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
             (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks,
             [],
           );
-        }).pipe(Effect.provide(runtime(cli, cwd)));
+        }).pipe(Effect.provide(runtime(cli, cwd, { runContinuationWorker: true })));
       }),
     ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
@@ -411,9 +436,18 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
           const sink = yield* EventSink.EventSinkV2;
           const idAllocator = yield* IdAllocator.IdAllocatorV2;
           const { messages } = yield* limitedChat(cli, cwd);
+          const limitedRun = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
           const ended = yield* watch(rosterCleared);
-          yield* Queue.offer(messages, backgroundTasks([]));
+          const wakeEnded = yield* watch(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id !== limitedRun.id &&
+              event.payload.status === "completed",
+          );
+          yield* Queue.offerAll(messages, shellEnded(devServer.taskId));
           yield* ended;
+          yield* wakeEnded;
+          yield* worker.drain();
 
           // The run stopped reading just before the shell's end reached the
           // thread, so the thread still lists the shell the CLI no longer runs.
@@ -450,7 +484,7 @@ it.layer(NodeServices.layer)("Claude background work after a usage limit", (it) 
             (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks,
             [],
           );
-        }).pipe(Effect.provide(runtime(cli, cwd)));
+        }).pipe(Effect.provide(runtime(cli, cwd, { runContinuationWorker: true })));
       }),
     ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
