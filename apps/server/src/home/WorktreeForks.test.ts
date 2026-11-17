@@ -38,7 +38,14 @@ import {
   writeBatch,
   writeJob,
 } from "./worktreeForkJobs.ts";
-import type { ForkRepository, WorktreeForksHost } from "./worktreeForksConfig.ts";
+import {
+  baseKey,
+  type E2bPlatform,
+  type ForkPlatform,
+  type ForkRepository,
+  type ModalPlatform,
+  type WorktreeForksHost,
+} from "./worktreeForksConfig.ts";
 import { gate, isCommand, isStep, makeFakeSandboxes } from "./worktreeForksTestkit.ts";
 
 const owner = ThreadId.make("thread-owner");
@@ -61,12 +68,27 @@ const git = (cwd: string, ...args: Array<string>) =>
 const tempDir = (label: string) =>
   NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), `t3wf-${label}-`)));
 
+const modal: ModalPlatform = {
+  kind: "modal",
+  tokenId: "ak",
+  tokenSecret: "as",
+  imageId: "im-template",
+  app: "app",
+  environment: undefined,
+};
+const e2b: E2bPlatform = { kind: "e2b", apiKey: "e2b-key", templateId: "tpl" };
+
 /**
  * A worktree of acme/widgets on this host whose repository already has a base at its first
- * commit, the service over a fake Modal, and what it needs from the server.
+ * commit, the service over a fake Modal (the default) and, with `e2b`, a fake E2B with a base of
+ * its own, and what it needs from the server.
  */
 const setup = (
-  options: { readonly maxConcurrent?: number; readonly services?: ReadonlyArray<string> } = {},
+  options: {
+    readonly maxConcurrent?: number;
+    readonly services?: ReadonlyArray<string>;
+    readonly e2b?: true;
+  } = {},
 ) => {
   const home = tempDir("t3home");
   const upstream = tempDir("upstream");
@@ -87,17 +109,9 @@ const setup = (
     prepare: [],
     services: options.services ?? [],
     ship: [],
-    key: "key-1",
   };
   const host: WorktreeForksHost = {
-    platform: {
-      kind: "modal",
-      tokenId: "ak",
-      tokenSecret: "as",
-      imageId: "im-template",
-      app: "app",
-      environment: undefined,
-    },
+    platforms: options.e2b ? [modal, e2b] : [modal],
     sizes: new Map([
       ["default", { cpu: 8, memoryMiB: 16384, cpuRequest: 2, memoryRequestMiB: 8192 }],
       ["large", { cpu: 16, memoryMiB: 32768, cpuRequest: 4, memoryRequestMiB: 16384 }],
@@ -111,17 +125,22 @@ const setup = (
   };
   const stateDir = NodePath.join(home, "userdata");
   NodeFS.mkdirSync(NodePath.join(stateDir, "worktree-forks"), { recursive: true });
-  NodeFS.writeFileSync(
-    NodePath.join(stateDir, "worktree-forks", "acme__widgets.json"),
-    JSON.stringify({
-      repository: "acme/widgets",
-      key: "key-1",
-      bases: [{ imageId: "im-base", sha: baseSha, builtAt: 0 }],
-      checkedAt: 0,
-      failure: null,
-    }),
-  );
+  for (const [platform, imageId] of [
+    [modal, "im-base"],
+    [e2b, "e2b-base"],
+  ] as const)
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "worktree-forks", `acme__widgets.${platform.kind}.json`),
+      JSON.stringify({
+        repository: "acme/widgets",
+        key: baseKey(platform, repository),
+        bases: [{ imageId, sha: baseSha, builtAt: 0 }],
+        checkedAt: 0,
+        failure: null,
+      }),
+    );
   const fake = makeFakeSandboxes();
+  const e2bFake = makeFakeSandboxes({ directoryImages: false });
   const layer = Layer.mergeAll(
     ProcessRunner.layer,
     ServerConfig.layerTest(process.cwd(), home),
@@ -143,8 +162,10 @@ const setup = (
       Layer.succeed(HostProcess.Environment, { PATH: "/usr/bin", SERVER_ONLY: "yes" }),
     ),
   );
-  const start = WorktreeForks.make(host, fake.port);
-  return { root, stateDir, fake, layer, start };
+  const start = WorktreeForks.make(host, (platform: ForkPlatform) =>
+    platform.kind === "modal" ? fake.port : e2bFake.port,
+  );
+  return { root, stateDir, fake, e2bFake, layer, start };
 };
 
 const request = (root: string, overrides: Partial<ForkExecRequest> = {}): ForkExecRequest => ({
@@ -296,7 +317,7 @@ it.effect(
 
 it.effect("a repository's first run stays local while its base is built", () => {
   const { root, stateDir, fake, layer, start } = setup();
-  NodeFS.rmSync(NodePath.join(stateDir, "worktree-forks", "acme__widgets.json"));
+  NodeFS.rmSync(NodePath.join(stateDir, "worktree-forks", "acme__widgets.modal.json"));
   return Effect.gen(function* () {
     const held = fake.hold("create");
     const forks = yield* start;
@@ -309,7 +330,7 @@ it.effect("a repository's first run stays local while its base is built", () => 
     expect(fake.calls.at(-1)).toMatchObject({
       op: "create",
       imageId: "im-template",
-      tags: { job: "base-acme__widgets" },
+      tags: { job: "base-modal-acme__widgets" },
     });
     held.open();
   }).pipe(Effect.scoped, Effect.provide(layer));
@@ -516,6 +537,7 @@ it.effect("each finished copy logs its caller, command, size, exit code and phas
         {
           job: jobId,
           caller: "bun-shim",
+          platform: "modal",
           command: `API_TOKEN=… bun test ${"packages/api ".repeat(20)}`.slice(0, 159) + "…",
           repository: "acme/widgets",
           cpu: 8,
@@ -754,6 +776,44 @@ it.effect("the sweep ends this host's sandboxes no job owns, and nothing else", 
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
+it.effect(
+  "with two platforms a job runs on the one it names, else the default, each copy says it is one, and each platform prunes only its own bases",
+  () => {
+    const { root, fake, e2bFake, layer, start } = setup({ e2b: true });
+    return Effect.gen(function* () {
+      const forks = yield* start;
+      const run = (platform?: "modal" | "e2b") =>
+        forks.exec(request(root, platform === undefined ? {} : { platform }), watcher().observer);
+      expect(yield* run()).toMatchObject({ _tag: "Exited", exitCode: 0 });
+      expect(yield* run("e2b")).toMatchObject({ _tag: "Exited", exitCode: 0 });
+      expect(yield* run("modal")).toMatchObject({ _tag: "Exited", exitCode: 0 });
+      const creates = (on: typeof fake) =>
+        on.calls.filter((call) => call.op === "create").map((call) => call.imageId);
+      expect([creates(fake), creates(e2bFake)]).toEqual([["im-base", "im-base"], ["e2b-base"]]);
+      for (const on of [fake, e2bFake])
+        expect(on.calls.find((call) => call.argv?.[3] === "t3-launch")?.env).toMatchObject({
+          T3_FORK_COPY: "1",
+        });
+      const pruned = [fake.nextPrune(), e2bFake.nextPrune()];
+      yield* TestClock.adjust("10 minutes");
+      expect(yield* Effect.promise(() => Promise.all(pruned))).toEqual([["im-base"], ["e2b-base"]]);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  },
+);
+
+it.effect("a job naming a platform this host lacks is refused before any copy exists", () => {
+  const { root, fake, layer, start } = setup();
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    const outcome = yield* forks.exec(request(root, { platform: "e2b" }), watcher().observer);
+    expect(outcome).toEqual({
+      _tag: "Refused",
+      message: "This host has no e2b platform for fork jobs; it has modal.",
+    });
+    expect(fake.calls).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
 it.effect("a host without worktree-forks.json, or a cloud box, has no backend", () =>
   Effect.gen(function* () {
     const { root, stateDir, layer } = setup();
@@ -985,6 +1045,24 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(layer));
   },
 );
+
+it.effect("a job in flight across a restart is followed on the platform it ran on", () => {
+  const { stateDir, fake, e2bFake, layer, start } = setup({ e2b: true });
+  return Effect.gen(function* () {
+    const sandboxId = e2bFake.plant(
+      { purpose: "t3-worktree-fork", host: "env-host", job: "job-e2b" },
+      { exitCode: 4, chunks: [["stdout", "on e2b\n"]] },
+    );
+    leftRecord(stateDir, { id: "job-e2b", sandboxId, platform: "e2b" });
+    const forks = yield* start;
+    const { sent, output } = rejoiner();
+    const outcome = yield* forks.attach("job-e2b", { stdout: 0, stderr: 0 }, output);
+    expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 4 });
+    expect(sent.stdout).toBe("on e2b\n");
+    expect(fake.calls.some((call) => call.op === "stream")).toBe(false);
+    expect(e2bFake.running().size).toBe(0);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
 
 it.effect(
   "a batch in flight across a restart answers status and copies its outputs back once",

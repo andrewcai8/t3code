@@ -89,13 +89,13 @@ async function runInCopy(
 it("starts the repository's services in the checkout, then runs the job beside them", async () => {
   const { exit, root, checkout } = await runInCopy(({ checkout }) => ({
     services: ["sleep 300 > /dev/null 2>&1 & echo $! > service.pid"],
-    command: `kill -0 "$(cat ${checkout}/service.pid)" && echo service is up`,
+    command: `kill -0 "$(cat ${checkout}/service.pid)" && echo service is up in copy $T3_FORK_COPY`,
   }));
   try {
     expect(exit).toEqual({
       exitCode: 0,
       timedOut: false,
-      stdoutTail: "service is up\n",
+      stdoutTail: "service is up in copy 1\n",
       stderrTail:
         "[t3] Starting this machine's services: sleep 300 > /dev/null 2>&1 & echo $! > service.pid\n",
     });

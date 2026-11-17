@@ -9,7 +9,7 @@ import * as Logger from "effect/Logger";
 import * as TestClock from "effect/testing/TestClock";
 
 import { makeUploadCache, type Upload } from "./worktreeForkCache.ts";
-import type { ForkPlatform, WorktreeForksHost } from "./worktreeForksConfig.ts";
+import type { ModalPlatform } from "./worktreeForksConfig.ts";
 import { makeFakeSandboxes } from "./worktreeForksTestkit.ts";
 
 const HOUR = 3_600_000;
@@ -22,18 +22,16 @@ const setup = (directoryImages = true) => {
     key: "a".repeat(64),
     pack: () => Effect.succeed({ archive, bytes: 13, key: "a".repeat(64) }),
   };
-  const host = {
-    platform: {
-      kind: "modal",
-      tokenId: "ak",
-      tokenSecret: "as",
-      imageId: "im",
-      app: "app",
-      environment: undefined,
-    },
-  } as unknown as WorktreeForksHost;
+  const platform: ModalPlatform = {
+    kind: "modal",
+    tokenId: "ak",
+    tokenSecret: "as",
+    imageId: "im",
+    app: "app",
+    environment: undefined,
+  };
   const fake = makeFakeSandboxes({ directoryImages });
-  return { stateDir, item, host, fake, start: makeUploadCache(host, fake.port, stateDir) };
+  return { stateDir, item, platform, fake, start: makeUploadCache(platform, fake.port, stateDir) };
 };
 
 const copy = (fake: ReturnType<typeof makeFakeSandboxes>) =>
@@ -50,7 +48,7 @@ const uploads = (fake: ReturnType<typeof makeFakeSandboxes>) =>
   fake.calls.filter((call) => call.op === "upload").length;
 
 it.effect("the sweep deletes an image unused for a day, and one too old to mount", () => {
-  const { item, fake, start, stateDir, host } = setup();
+  const { item, fake, start, stateDir, platform } = setup();
   return Effect.gen(function* () {
     const cache = yield* start;
     yield* cache.place(yield* copy(fake), item, "/tmp/input.tgz");
@@ -88,13 +86,19 @@ it.effect("the sweep deletes an image unused for a day, and one too old to mount
     expect(fake.directories.size).toBe(1);
 
     // The index outlives a restart, and another Modal workspace's is not used.
-    const kept = yield* makeUploadCache(host, fake.port, stateDir);
+    const kept = yield* makeUploadCache(platform, fake.port, stateDir);
     expect((yield* kept.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(0);
-    const other = yield* makeUploadCache(
-      { ...host, platform: { ...host.platform, tokenId: "ak-other" } as ForkPlatform },
-      fake.port,
-      stateDir,
+    // Each platform has its own index; one from before they did is still read.
+    const indexes = NodePath.join(stateDir, "worktree-forks");
+    NodeFS.renameSync(
+      NodePath.join(indexes, "upload-cache.modal.json"),
+      NodePath.join(indexes, "upload-cache.json"),
     );
+    const unsuffixed = yield* makeUploadCache(platform, fake.port, stateDir);
+    expect((yield* unsuffixed.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(
+      0,
+    );
+    const other = yield* makeUploadCache({ ...platform, tokenId: "ak-other" }, fake.port, stateDir);
     expect((yield* other.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(13);
   }).pipe(Effect.scoped);
 });

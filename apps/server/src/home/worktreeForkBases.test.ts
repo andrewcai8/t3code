@@ -23,7 +23,12 @@ import {
   rebuildDue,
   refreshDue,
 } from "./worktreeForkBases.ts";
-import type { ForkRepository, WorktreeForksHost } from "./worktreeForksConfig.ts";
+import {
+  baseKey,
+  type E2bPlatform,
+  type ForkRepository,
+  type WorktreeForksHost,
+} from "./worktreeForksConfig.ts";
 import { isCommand, isStep, makeFakeSandboxes } from "./worktreeForksTestkit.ts";
 import type { Checkout } from "./worktreeForkShip.ts";
 
@@ -87,17 +92,18 @@ const setup = () => {
     prepare: ["make prepare"],
     services: [],
     ship: [".env"],
-    key: "key-1",
   };
   const host: WorktreeForksHost = {
-    platform: {
-      kind: "modal",
-      tokenId: "ak",
-      tokenSecret: "as",
-      imageId: "im-template",
-      app: "t3-worktree-forks",
-      environment: undefined,
-    },
+    platforms: [
+      {
+        kind: "modal",
+        tokenId: "ak",
+        tokenSecret: "as",
+        imageId: "im-template",
+        app: "t3-worktree-forks",
+        environment: undefined,
+      },
+    ],
     sizes: new Map([
       ["default", { cpu: 8, memoryMiB: 16384, cpuRequest: 2, memoryRequestMiB: 8192 }],
     ]),
@@ -209,7 +215,7 @@ it.effect(
         },
       });
       const held = fake.hold("saveDisk");
-      const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+      const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
 
       expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("building");
       expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("building");
@@ -223,7 +229,7 @@ it.effect(
         expect.objectContaining({
           imageId: "im-template",
           cpu: 8,
-          tags: { purpose: "t3-worktree-fork", host: "host-1", job: "base-acme__widgets" },
+          tags: { purpose: "t3-worktree-fork", host: "host-1", job: "base-modal-acme__widgets" },
         }),
       ]);
       expect(git(workDir, "rev-parse", "HEAD")).toBe(base.sha);
@@ -285,7 +291,7 @@ it.effect("a build from a linked worktree ships the ignored files only the main 
     const { host, workDir, fake } = fixture;
     const seen: Array<string | null> = [];
     shippedEnvDuringPrepare(fake, workDir, seen);
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
 
     yield* bases.current(linkedWorktree(fixture), true);
 
@@ -301,7 +307,7 @@ it.effect("a linked worktree's own copy of a ship file wins over the main checko
     NodeFS.writeFileSync(NodePath.join(linked.root, ".env"), "TOKEN=linked\n");
     const seen: Array<string | null> = [];
     shippedEnvDuringPrepare(fake, workDir, seen);
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
 
     yield* bases.current(linked, true);
 
@@ -313,7 +319,7 @@ it.effect("a caller that stops waiting leaves the build running", () =>
   Effect.gen(function* () {
     const { host, checkout, fake } = setup();
     const held = fake.hold("saveDisk");
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
     const waiter = yield* bases.current(checkout, true).pipe(Effect.forkChild);
     yield* Effect.promise(() => held.reached);
     yield* Fiber.interrupt(waiter);
@@ -326,7 +332,7 @@ it.effect("a caller that stops waiting leaves the build running", () =>
 it.effect("refreshes in the background once origin moves, on top of the previous base", () =>
   Effect.gen(function* () {
     const { upstream, workDir, host, checkout, fake } = setup();
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
     const first = yield* bases.current(checkout, true);
 
     const moved = commit(upstream, "b.txt", "two\n");
@@ -350,7 +356,7 @@ it.effect("refreshes in the background once origin moves, on top of the previous
 it.effect("with origin unchanged it only checks again, until the base is a week old", () =>
   Effect.gen(function* () {
     const { host, checkout, fake } = setup();
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
     const first = yield* bases.current(checkout, true);
     yield* TestClock.adjust("1 hour");
     yield* bases.current(checkout, false);
@@ -371,7 +377,7 @@ it.effect("a failed build is not tried again for an hour", () =>
   Effect.gen(function* () {
     const { host, checkout, fake } = setup();
     fake.onExec(isCommand("make prepare"), { exitCode: 1, stdout: "prepare broke" });
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
     expect((yield* bases.current(checkout, true).pipe(Effect.flip)).reason).toBe("failed");
     expect(fake.running().size).toBe(0);
     expect((yield* bases.current(checkout, false).pipe(Effect.flip)).reason).toBe("failed");
@@ -386,7 +392,7 @@ it.effect("a failed build is not tried again for an hour", () =>
 it.effect("a failed refresh keeps the previous base in use and is tried again an hour later", () =>
   Effect.gen(function* () {
     const { upstream, host, checkout, fake } = setup();
-    const bases = yield* makeBases(host, fake.port, "host-1", new Set());
+    const bases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
     const first = yield* bases.current(checkout, true);
 
     commit(upstream, "b.txt", "two\n");
@@ -403,4 +409,44 @@ it.effect("a failed refresh keeps the previous base in use and is tried again an
     yield* bases.idle;
     expect(creates(fake)).toHaveLength(3);
   }).pipe(Effect.scoped, Effect.provide(layer())),
+);
+
+it.effect(
+  "two platforms keep their own bases: a build on one never drops the other's, and a record from before platforms had their own is the platform's whose key it holds",
+  () =>
+    Effect.gen(function* () {
+      const { first, host, checkout, fake } = setup();
+      const e2b: E2bPlatform = { kind: "e2b", apiKey: "e2b-key", templateId: "tpl" };
+      const { stateDir } = yield* ServerConfig;
+      const records = NodePath.join(stateDir, "worktree-forks");
+      NodeFS.mkdirSync(records, { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(records, "acme__widgets.json"),
+        JSON.stringify({
+          repository: "acme/widgets",
+          key: baseKey(e2b, checkout.repository),
+          bases: [{ imageId: "e2b-old", sha: first, builtAt: 0 }],
+          checkedAt: 0,
+          failure: null,
+        }),
+      );
+      const e2bFake = makeFakeSandboxes({ directoryImages: false });
+      const modalBases = yield* makeBases(host, host.platforms[0], fake.port, "host-1", new Set());
+      const e2bBases = yield* makeBases(host, e2b, e2bFake.port, "host-1", new Set());
+
+      expect((yield* e2bBases.current(checkout, false)).imageId).toBe("e2b-old");
+      const built = yield* modalBases.current(checkout, true);
+
+      expect(yield* modalBases.kept).toEqual(new Set([built.imageId]));
+      expect(yield* e2bBases.kept).toEqual(new Set(["e2b-old"]));
+      expect(creates(e2bFake)).toEqual([]);
+      expect([...fake.calls, ...e2bFake.calls].filter((call) => call.op === "deleteImage")).toEqual(
+        [],
+      );
+      expect(
+        NodeFS.readdirSync(records)
+          .filter((name) => name.endsWith(".json"))
+          .sort(),
+      ).toEqual(["acme__widgets.json", "acme__widgets.modal.json"]);
+    }).pipe(Effect.scoped, Effect.provide(layer())),
 );

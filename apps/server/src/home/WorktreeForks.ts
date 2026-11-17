@@ -42,9 +42,10 @@ import * as ProjectService from "../project/ProjectService.ts";
 import { type ForkExecRequest, portableEnvironment } from "./forkExecProtocol.ts";
 import { makeE2bForkSandboxes } from "./e2bForkSandboxes.ts";
 import { makeModalForkSandboxes } from "./modalForkSandboxes.ts";
-import { type ForkBase, makeBases } from "./worktreeForkBases.ts";
+import { type Bases, type ForkBase, makeBases } from "./worktreeForkBases.ts";
 import {
   COPY_PURPOSE,
+  type ForkPlatform,
   type ForkSandboxes,
   platformLabel,
   readWorktreeForksConfig,
@@ -118,6 +119,8 @@ export type ExecOutcome =
     }
   /** Nothing of the command ran: the caller may run it itself. */
   | { readonly _tag: "NotStarted"; readonly message: string }
+  /** Nothing of the command ran, and the caller must not run it itself. */
+  | { readonly _tag: "Refused"; readonly message: string }
   /** The command started and its copy was lost: it may have run partly. */
   | { readonly _tag: "Lost"; readonly message: string };
 
@@ -220,8 +223,17 @@ const commandSummary = (command: string) => {
   return summary.length <= 160 ? summary : `${summary.slice(0, 159)}…`;
 };
 
+/** One configured platform's port, and the bases and uploads kept on it. */
+interface Lane {
+  readonly kind: ForkPlatform["kind"];
+  readonly sandboxes: ForkSandboxes;
+  readonly bases: Bases;
+  readonly cache: Effect.Success<ReturnType<typeof makeUploadCache>>;
+}
+
 interface CopyJob {
   readonly id: string;
+  readonly lane: Lane;
   readonly caller: ForkCaller;
   readonly command: string;
   readonly cwd: string;
@@ -450,10 +462,10 @@ const disabled = WorktreeForks.of({
   }),
 });
 
-/** The service over `host`'s configuration and a sandbox platform's port. */
+/** The service over `host`'s configuration and each configured platform's port. */
 export const make = Effect.fn("WorktreeForks.make")(function* (
   host: WorktreeForksHost,
-  sandboxes: ForkSandboxes,
+  sandboxesOf: (platform: ForkPlatform) => ForkSandboxes,
 ) {
   const { stateDir, baseDir: t3Home } = yield* ServerConfig;
   const hostTag = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor).environmentId;
@@ -477,8 +489,19 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   /** Jobs with a record on disk, which a shutdown leaves running for the next run. */
   const recorded = new Set<string>();
   const adopted = new Map<string, Adopted>();
-  const bases = yield* makeBases(host, sandboxes, hostTag, live);
-  const cache = yield* makeUploadCache(host, sandboxes, stateDir);
+  const lanes = new Map<ForkPlatform["kind"], Lane>();
+  for (const platform of host.platforms) {
+    const sandboxes = sandboxesOf(platform);
+    lanes.set(platform.kind, {
+      kind: platform.kind,
+      sandboxes,
+      bases: yield* makeBases(host, platform, sandboxes, hostTag, live),
+      cache: yield* makeUploadCache(platform, sandboxes, stateDir),
+    });
+  }
+  const defaultLane = lanes.get(host.platforms[0].kind)!;
+  /** A record from before records named their platform ran on the host's only one. */
+  const kindOf = (record: JobRecord) => record.platform ?? defaultLane.kind;
   const batches = new Map<string, Batch>();
   const scratchRoot = NodePath.join(stateDir, "worktree-forks", "tmp");
   const resultsRoot = NodePath.join(stateDir, "fork-results");
@@ -487,10 +510,15 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   /** A job cut short by this server shutting down, which the next run adopts. */
   const paused = (exit: Exit.Exit<unknown, unknown>) => closing && Exit.hasInterrupts(exit);
-  const endSandbox = (jobId: string, sandboxId: string, exit: Exit.Exit<unknown, unknown>) =>
+  const endSandbox = (
+    lane: Lane,
+    jobId: string,
+    sandboxId: string,
+    exit: Exit.Exit<unknown, unknown>,
+  ) =>
     paused(exit) && recorded.has(jobId)
       ? Effect.void
-      : Effect.promise(() => sandboxes.terminate(sandboxId).catch(() => undefined)).pipe(
+      : Effect.promise(() => lane.sandboxes.terminate(sandboxId).catch(() => undefined)).pipe(
           Effect.ensuring(Effect.sync(() => live.delete(jobId))),
         );
   /** Ends a job's record once the job has ended, so no later run adopts it. */
@@ -516,6 +544,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   // Steps of one job, inside its prepare or outputs span.
   const step = Effect.fnUntraced(function* (
+    lane: Lane,
     sandboxId: string,
     argv: ReadonlyArray<string>,
     what: string,
@@ -526,18 +555,22 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     } = {},
   ) {
     return yield* Effect.tryPromise({
-      try: () => sandboxes.exec(sandboxId, argv, { timeoutMs: STEP_TIMEOUT_MS, ...options }),
+      try: () => lane.sandboxes.exec(sandboxId, argv, { timeoutMs: STEP_TIMEOUT_MS, ...options }),
       catch: couldNot(what),
     });
   });
-  const stepSucceeds: typeof step = Effect.fnUntraced(function* (sandboxId, argv, what, options) {
-    const result = yield* step(sandboxId, argv, what, options);
-    if (result.exitCode !== 0)
-      return yield* couldNot(what)(
-        new Error(`exited ${result.exitCode}: ${`${result.stdout}${result.stderr}`.slice(-2000)}`),
-      );
-    return result;
-  });
+  const stepSucceeds: typeof step = Effect.fnUntraced(
+    function* (lane, sandboxId, argv, what, options) {
+      const result = yield* step(lane, sandboxId, argv, what, options);
+      if (result.exitCode !== 0)
+        return yield* couldNot(what)(
+          new Error(
+            `exited ${result.exitCode}: ${`${result.stdout}${result.stderr}`.slice(-2000)}`,
+          ),
+        );
+      return result;
+    },
+  );
 
   const inspect = (cwd: string) =>
     inspectCheckout(cwd, host.repositories).pipe(
@@ -548,9 +581,9 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
    * The checkout's state as the job is sent, packed now unless the cache holds it, for as long as
    * the scope lasts.
    */
-  const ship = (checkout: Checkout, base: ForkBase) =>
+  const ship = (lane: Lane, checkout: Checkout, base: ForkBase) =>
     shipState(checkout, base.sha).pipe(
-      Effect.tap((shipment) => cache.prepack(shipment.state)),
+      Effect.tap((shipment) => lane.cache.prepack(shipment.state)),
       Effect.mapError(notStarted),
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
     );
@@ -562,11 +595,12 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     imageId: string,
   ) {
     const { checkout } = shipment;
+    const { lane } = job;
     const sandboxId = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: () => {
           live.add(job.id);
-          return sandboxes.createCopy({
+          return lane.sandboxes.createCopy({
             imageId,
             size: job.size,
             lifetimeMs: job.timeoutMs + SETUP_MS,
@@ -575,25 +609,30 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         },
         catch: (cause) =>
           new NotStarted({
-            reason: `${platformLabel(host.platform)} could not start a copy.`,
+            reason: `${platformLabel(lane.kind)} could not start a copy.`,
             cause,
           }),
       }),
-      (id, exit) => endSandbox(job.id, id, exit),
+      (id, exit) => endSandbox(lane, job.id, id, exit),
     ).pipe(Effect.onError(() => Effect.sync(() => live.delete(job.id))));
-    const state = yield* cache
+    const state = yield* lane.cache
       .place(sandboxId, shipment.state, ARCHIVE)
       .pipe(placeFailure("receive this worktree's state"));
-    yield* stepSucceeds(sandboxId, applyArgv(shipment, state.path), "apply this worktree's state", {
-      env: job.environment,
-    });
     yield* stepSucceeds(
+      lane,
+      sandboxId,
+      applyArgv(shipment, state.path),
+      "apply this worktree's state",
+      { env: job.environment },
+    );
+    yield* stepSucceeds(
+      lane,
       sandboxId,
       ["sh", "-c", PLACE_SCRIPT, "t3-place", checkout.root, checkout.repository.workDir],
       "move its checkout to this worktree's path",
     );
     const inputs = yield* Effect.forEach(job.inputs, (input, index) =>
-      cache
+      lane.cache
         .place(sandboxId, input, inputArchive(index))
         .pipe(placeFailure("receive the command's inputs")),
     );
@@ -601,6 +640,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       const tooLarge = inputsTooLarge(inputs.map((input) => input.bytes));
       if (tooLarge !== null) return yield* notStarted(tooLarge);
       yield* stepSucceeds(
+        lane,
         sandboxId,
         ["sh", "-c", INPUTS_SCRIPT, "t3-inputs", ...inputs.map((input) => input.path)],
         "unpack the command's inputs",
@@ -608,6 +648,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     }
     if (checkout.repository.services.length > 0) {
       const services = yield* step(
+        lane,
         sandboxId,
         ["sh", "-c", SERVICES_SCRIPT, "t3-services", ...checkout.repository.services],
         "start this repository's services",
@@ -629,11 +670,13 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   /** Brings listed outputs back under `into`. Never fails: a problem is reported instead. */
   const collectOutputs = Effect.fn("WorktreeForks.collectOutputs")(function* (
+    lane: Lane,
     jobId: string,
     sandboxId: string,
     outputs: NonNullable<CopyJob["outputs"]>,
   ) {
     const packed = yield* step(
+      lane,
       sandboxId,
       [
         "sh",
@@ -655,7 +698,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     if (exitCode !== 0) return { outputsProblem: "Packing the outputs failed." };
     const local = outputs.archive;
     const download = yield* Effect.tryPromise({
-      try: () => sandboxes.download(sandboxId, OUTPUTS, local),
+      try: () => lane.sandboxes.download(sandboxId, OUTPUTS, local),
       catch: (cause) => new ForkHostCallError({ operation: "copy outputs back", cause }),
     }).pipe(Effect.option);
     if (Option.isNone(download)) {
@@ -704,6 +747,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     repository: string,
   ) {
     yield* stepSucceeds(
+      job.lane,
       sandboxId,
       ["python3", "-c", LAUNCH_SCRIPT, "t3-launch", "bash", "-lc", job.command],
       "start the command",
@@ -712,6 +756,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const record: JobRecord = {
       id: job.id,
       sandboxId,
+      platform: job.lane.kind,
       caller: job.caller,
       command: job.command,
       cwd: job.cwd,
@@ -741,6 +786,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
    * its end and brings its outputs back, never twice. Any failure here means it may have partly run.
    */
   const finish = Effect.fn("WorktreeForks.finish")(function* (
+    lane: Lane,
     record: JobRecord,
     output: OutputSink,
   ) {
@@ -752,7 +798,12 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     // the server was down, or while its output replays to a run that adopted it.
     const deadline = Effect.sleep(Duration.millis(left)).pipe(
       Effect.andThen(
-        step(record.sandboxId, ["sh", "-c", EXITED_SCRIPT, "t3-exited"], "check its command").pipe(
+        step(
+          lane,
+          record.sandboxId,
+          ["sh", "-c", EXITED_SCRIPT, "t3-exited"],
+          "check its command",
+        ).pipe(
           Effect.map((result) => result.exitCode === 0),
           Effect.orElseSucceed(() => false),
         ),
@@ -763,11 +814,12 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const exitCode = yield* Effect.raceFirst(
       Effect.tryPromise({
         try: () =>
-          sandboxes.execStream(record.sandboxId, ["python3", "-c", FOLLOW_SCRIPT, "t3-follow"], {
-            timeoutMs: left + 60_000,
-            onOutput: output,
-          }),
-        catch: (cause) => new Lost({ provider: platformLabel(host.platform), cause }),
+          lane.sandboxes.execStream(
+            record.sandboxId,
+            ["python3", "-c", FOLLOW_SCRIPT, "t3-follow"],
+            { timeoutMs: left + 60_000, onOutput: output },
+          ),
+        catch: (cause) => new Lost({ provider: platformLabel(lane.kind), cause }),
       }).pipe(Effect.asSome),
       deadline,
     );
@@ -777,7 +829,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const outputs =
       record.outputs === null
         ? {}
-        : yield* collectOutputs(record.id, record.sandboxId, record.outputs);
+        : yield* collectOutputs(lane, record.id, record.sandboxId, record.outputs);
     return { exitCode: exitCode.value, timedOut: false, durationMs, ...outputs } satisfies Exited;
   });
 
@@ -801,13 +853,14 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           );
           yield* observer.started(job.id);
           const commandAt = yield* Clock.currentTimeMillis;
-          const exited = yield* finish(record, observer.output);
+          const exited = yield* finish(job.lane, record, observer.output);
           // Before the copy and record end, so a restart from here on cannot lose the result.
           if (observer.exited) yield* observer.exited(exited);
           // One line per finished copy, so this host's offload use can be read from its log.
           yield* Effect.logInfo("worktree fork job finished", {
             job: job.id,
             caller: job.caller,
+            platform: job.lane.kind,
             command: commandSummary(job.command),
             repository: shipment.checkout.repository.repository,
             cpu: job.size.cpu,
@@ -866,6 +919,12 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   const exec: WorktreeForks["Service"]["exec"] = Effect.fn("WorktreeForks.exec")(
     function* (request, observer) {
+      const lane = lanes.get(request.platform ?? defaultLane.kind);
+      if (lane === undefined) {
+        const message = `This host has no ${request.platform} platform for fork jobs; it has ${[...lanes.keys()].join(", ")}.`;
+        yield* Effect.logWarning("worktree fork job refused", { cwd: request.cwd, message });
+        return { _tag: "Refused", message } satisfies ExecOutcome;
+      }
       const size = sizeOf(request.size);
       if (size === undefined) return yield* new NotStarted({ reason: unknownSize(request.size) });
       const checkout = yield* inspect(request.cwd);
@@ -879,10 +938,10 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       ].find((reason) => reason !== null);
       if (refused !== undefined) return yield* new NotStarted({ reason: refused });
       // The first base takes minutes; this run goes back to the caller rather than wait for it.
-      const base = yield* bases.current(checkout, false).pipe(Effect.mapError(notStarted));
-      const shipment = yield* ship(checkout, base);
+      const base = yield* lane.bases.current(checkout, false).pipe(Effect.mapError(notStarted));
+      const shipment = yield* ship(lane, checkout, base);
       const inputs = yield* inputUploads(request.inputs ?? []).pipe(
-        Effect.tap(Effect.forEach((input) => cache.prepack(input), { discard: true })),
+        Effect.tap(Effect.forEach((input) => lane.cache.prepack(input), { discard: true })),
         Effect.mapError(notStarted),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
       );
@@ -890,6 +949,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       const exited: Exited = yield* runJob(
         {
           id,
+          lane,
           caller: callerOf(request),
           command: request.command,
           cwd: checkout.cwd,
@@ -976,6 +1036,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       yield* runJob(
         {
           id: `${batch.id}-${index}`,
+          lane: defaultLane,
           caller: "fork-run",
           command: job.command,
           cwd: target.cwd,
@@ -1051,8 +1112,10 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         const target = Deferred.makeUnsafe<Target, NotStarted>();
         byRoot.set(checkout.root, target);
         yield* Effect.gen(function* () {
-          const base = yield* bases.current(checkout, true).pipe(Effect.mapError(notStarted));
-          const shipment = yield* ship(checkout, base);
+          const base = yield* defaultLane.bases
+            .current(checkout, true)
+            .pipe(Effect.mapError(notStarted));
+          const shipment = yield* ship(defaultLane, checkout, base);
           return { shipment, base };
         }).pipe(
           Effect.exit,
@@ -1180,6 +1243,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
    * on, and it ends as one that never restarted would. Its output starts over from the beginning.
    */
   const adopt = Effect.fn("WorktreeForks.adopt")(function* (
+    lane: Lane,
     record: JobRecord,
     observer: Omit<JobObserver, "started">,
   ) {
@@ -1188,13 +1252,14 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     return yield* slots.withSlot(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* Effect.addFinalizer((exit) => endSandbox(record.id, record.sandboxId, exit));
+          yield* Effect.addFinalizer((exit) => endSandbox(lane, record.id, record.sandboxId, exit));
           yield* Effect.addFinalizer((exit) => endRecord(record.id, exit));
-          const exited = yield* finish(record, observer.output);
+          const exited = yield* finish(lane, record, observer.output);
           if (observer.exited) yield* observer.exited(exited);
           yield* Effect.logInfo("worktree fork job finished", {
             job: record.id,
             caller: record.caller,
+            platform: lane.kind,
             command: commandSummary(record.command),
             repository: record.repository,
             cpu: record.size.cpu,
@@ -1210,7 +1275,8 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     );
   });
 
-  const goneMessage = `Its ${platformLabel(host.platform)} sandbox ended while T3 Code restarted.`;
+  const goneMessage = (kind: ForkPlatform["kind"]) =>
+    `Its ${platformLabel(kind)} sandbox ended while T3 Code restarted.`;
 
   /**
    * Adopts a `t3 fork-exec` job and keeps it for its caller to re-attach. A caller that does not
@@ -1218,7 +1284,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
    */
   const adoptExec = Effect.fn("WorktreeForks.adoptExec")(function* (
     record: JobRecord,
-    running: boolean,
+    running: Lane | null,
   ) {
     const entry: Adopted = {
       logs: record.logs,
@@ -1229,16 +1295,16 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     };
     adopted.set(record.id, entry);
     const follow = Effect.gen(function* () {
-      if (!running) {
+      if (running === null) {
         yield* endRecord(record.id);
-        return { _tag: "Lost", message: goneMessage } satisfies ExecOutcome;
+        return { _tag: "Lost", message: goneMessage(kindOf(record)) } satisfies ExecOutcome;
       }
       const files = yield* openLogs(record.logs, "w");
       const output: OutputSink = (stream, text) => {
         NodeFS.writeSync(files[stream], text);
         for (const listener of entry.listeners) listener(stream, text);
       };
-      return yield* adopt(record, { output }).pipe(
+      return yield* adopt(running, record, { output }).pipe(
         Effect.map((exited) => execOutcome(exited, record.outputs !== null, output)),
         Effect.catchTags({
           Lost: (error) => Effect.succeed<ExecOutcome>({ _tag: "Lost", message: error.message }),
@@ -1309,9 +1375,9 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   /** A batch job a previous run launched, adopted into its restored batch. */
   const adoptBatchJob = Effect.fn("WorktreeForks.adoptBatchJob")(
-    function* (batch: Batch, index: number, record: JobRecord) {
+    function* (batch: Batch, index: number, lane: Lane, record: JobRecord) {
       const files = yield* openLogs(record.logs, "w");
-      yield* adopt(record, {
+      yield* adopt(lane, record, {
         output: (stream, text) => void NodeFS.writeSync(files[stream], text),
         exited: (exited) => setJob(batch, exitedJob(index, exited, record.logs)),
       });
@@ -1332,17 +1398,24 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const { records, unreadable } = readJobs(jobsDir);
     for (const path of unreadable)
       yield* Effect.logWarning("worktree fork job record could not be read", { path });
-    const running =
-      records.length === 0
-        ? new Set<string>()
-        : yield* Effect.tryPromise({
-            try: () => sandboxes.list({ purpose: COPY_PURPOSE, host: hostTag }),
-            catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
-          }).pipe(
-            Effect.map((found) => new Set(found.map((sandbox) => sandbox.sandboxId))),
-            // Unable to tell, it adopts them all; one whose sandbox is gone is lost as it follows.
-            Effect.orElseSucceed(() => new Set(records.map((record) => record.sandboxId))),
-          );
+    const listed = new Set<string>();
+    for (const lane of records.length === 0 ? [] : lanes.values())
+      for (const sandboxId of yield* Effect.tryPromise({
+        try: () => lane.sandboxes.list({ purpose: COPY_PURPOSE, host: hostTag }),
+        catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
+      }).pipe(
+        Effect.map((found) => found.map((sandbox) => sandbox.sandboxId)),
+        // Unable to tell, it adopts them all; one whose sandbox is gone is lost as it follows.
+        Effect.orElseSucceed(() =>
+          records.filter((record) => kindOf(record) === lane.kind).map((r) => r.sandboxId),
+        ),
+      ))
+        listed.add(sandboxId);
+    /** The lane a record's sandbox still runs on, or null; one on a platform no longer configured is gone. */
+    const running = (record: JobRecord) => {
+      const lane = lanes.get(kindOf(record));
+      return lane !== undefined && listed.has(record.sandboxId) ? lane : null;
+    };
     const byId = new Map(records.map((record) => [record.id, record]));
     for (const id of NodeFS.existsSync(resultsRoot) ? NodeFS.readdirSync(resultsRoot) : []) {
       const resultsDir = NodePath.join(resultsRoot, id);
@@ -1362,12 +1435,13 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
         yield* Deferred.succeed(batch.done, undefined);
         continue;
       }
-      const adopting: Array<readonly [number, JobRecord]> = [];
+      const adopting: Array<readonly [number, Lane, JobRecord]> = [];
       for (const job of saved.jobs.filter(unfinished)) {
         const record = byId.get(`${id}-${job.index}`);
         byId.delete(`${id}-${job.index}`);
-        if (job.state === "running" && record !== undefined && running.has(record.sandboxId)) {
-          adopting.push([job.index, record]);
+        const lane = record === undefined ? null : running(record);
+        if (job.state === "running" && record !== undefined && lane !== null) {
+          adopting.push([job.index, lane, record]);
           continue;
         }
         if (record !== undefined) yield* endRecord(record.id);
@@ -1377,15 +1451,15 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           message:
             job.state === "queued"
               ? "T3 Code restarted before this job's copy started."
-              : goneMessage,
+              : goneMessage(record === undefined ? defaultLane.kind : kindOf(record)),
         };
       }
       yield* saveBatch(batch);
       yield* Effect.forEach(
         adopting,
-        ([index, record]) =>
+        ([index, lane, record]) =>
           Effect.raceFirst(
-            adoptBatchJob(batch, index, record),
+            adoptBatchJob(batch, index, lane, record),
             Deferred.await(batch.cancels[index]!),
           ),
         { concurrency: "unbounded", discard: true },
@@ -1394,7 +1468,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     for (const record of byId.values()) {
       // A batch job whose batch kept no record has no one to report to.
       if (record.batch !== null) yield* endRecord(record.id);
-      else yield* adoptExec(record, running.has(record.sandboxId));
+      else yield* adoptExec(record, running(record));
     }
   }).pipe(
     Effect.catchCause((cause) =>
@@ -1403,31 +1477,49 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   );
   yield* restore;
 
-  /** Ends this host's sandboxes that no running job or build owns, old results and unused uploads. */
+  /**
+   * Ends a platform's sandboxes of this host that no running job or build owns, its bases no record
+   * holds and its unused uploads. Each platform prunes only against its own records.
+   */
+  const sweepLane = Effect.fn("WorktreeForks.sweepLane")(
+    function* (lane: Lane) {
+      yield* lane.cache.evict();
+      const found = yield* Effect.tryPromise({
+        try: () => lane.sandboxes.list({ purpose: COPY_PURPOSE, host: hostTag }),
+        catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
+      });
+      for (const sandbox of found)
+        if (!live.has(sandbox.tags.job ?? ""))
+          yield* Effect.tryPromise({
+            try: () => lane.sandboxes.terminate(sandbox.sandboxId),
+            catch: (cause) => new ForkHostCallError({ operation: "end sandbox", cause }),
+          }).pipe(Effect.ignore);
+      // After the sandboxes end, since a platform may refuse to delete an image one still runs from.
+      yield* lane.bases.kept.pipe(
+        Effect.flatMap((keep) =>
+          Effect.tryPromise({
+            try: () => lane.sandboxes.pruneImages(keep),
+            catch: (cause) => new ForkHostCallError({ operation: "prune images", cause }),
+          }),
+        ),
+        Effect.catch((cause) =>
+          Effect.logWarning("old worktree fork bases could not be pruned", {
+            platform: lane.kind,
+            cause,
+          }),
+        ),
+      );
+    },
+    (effect, lane) =>
+      effect.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("worktree forks could not be swept", { platform: lane.kind, cause }),
+        ),
+      ),
+  );
+  /** Sweeps every platform, then old results. */
   const sweep = Effect.gen(function* () {
-    yield* cache.evict();
-    const found = yield* Effect.tryPromise({
-      try: () => sandboxes.list({ purpose: COPY_PURPOSE, host: hostTag }),
-      catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
-    });
-    for (const sandbox of found)
-      if (!live.has(sandbox.tags.job ?? ""))
-        yield* Effect.tryPromise({
-          try: () => sandboxes.terminate(sandbox.sandboxId),
-          catch: (cause) => new ForkHostCallError({ operation: "end sandbox", cause }),
-        }).pipe(Effect.ignore);
-    // After the sandboxes end, since a platform may refuse to delete an image one still runs from.
-    yield* bases.kept.pipe(
-      Effect.flatMap((keep) =>
-        Effect.tryPromise({
-          try: () => sandboxes.pruneImages(keep),
-          catch: (cause) => new ForkHostCallError({ operation: "prune images", cause }),
-        }),
-      ),
-      Effect.catch((cause) =>
-        Effect.logWarning("old worktree fork bases could not be pruned", { cause }),
-      ),
-    );
+    yield* Effect.forEach(lanes.values(), sweepLane, { discard: true });
     const now = yield* Clock.currentTimeMillis;
     yield* Effect.sync(() => {
       for (const entry of NodeFS.existsSync(resultsRoot) ? NodeFS.readdirSync(resultsRoot) : []) {
@@ -1436,9 +1528,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           NodeFS.rmSync(path, { recursive: true, force: true });
       }
     });
-  }).pipe(
-    Effect.catch((cause) => Effect.logWarning("worktree forks could not be swept", { cause })),
-  );
+  });
   yield* sweep.pipe(Effect.repeat(Schedule.spaced("10 minutes")), Effect.forkIn(scope));
 
   return WorktreeForks.of({
@@ -1473,10 +1563,12 @@ export const layer = Layer.effect(
       }),
     );
     if (host === null) return disabled;
-    const { platform } = host;
-    if (platform.kind === "modal") return yield* make(host, makeModalForkSandboxes(platform));
     const hostTag = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor)
       .environmentId;
-    return yield* make(host, makeE2bForkSandboxes(platform, hostTag));
+    return yield* make(host, (platform) =>
+      platform.kind === "modal"
+        ? makeModalForkSandboxes(platform)
+        : makeE2bForkSandboxes(platform, hostTag),
+    );
   }),
 );

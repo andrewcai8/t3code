@@ -1,9 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - a fast-path CLI that loads nothing heavy.
 /**
- * `t3 fork-exec [--timeout <s>] [--size <name>] [--input <path>]... [--output <path>]... -- <command>`
- * runs a command in a throwaway copy of this machine or worktree (see home/ForkExec.ts).
- * Exit codes: the command's own, 124 timed out, 70 copy lost, 75 no copy could start (run it here).
- * If the socket closes under a running copy it rejoins the job for up to ten minutes.
+ * `t3 fork-exec [flags] -- <command>` (USAGE) runs a command in a throwaway copy of this machine or
+ * worktree (see home/ForkExec.ts). Exits: the command's own, 124 timed out, 70 copy lost, 75 none
+ * started (run it here), 78 refused (do not run it here). A socket closing under a running copy
+ * rejoins the job for up to ten minutes.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";
@@ -23,6 +23,8 @@ import {
 
 const FORK_UNAVAILABLE_EXIT = 75;
 const FORK_LOST_EXIT = 70;
+/** sysexits' EX_CONFIG: unlike 75, the caller must not run the command itself. */
+const FORK_REFUSED_EXIT = 78;
 const TIMED_OUT_EXIT = 124;
 /** How long a caller whose socket closed keeps trying to rejoin its job, as T3 Code restarts. */
 const REJOIN_WINDOW_MS = 10 * 60_000;
@@ -33,7 +35,11 @@ const TAIL_CHARS = 3_900;
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(ForkExecEventSchema));
 
 const USAGE =
-  "Usage: t3 fork-exec [--timeout <seconds>] [--size <name>] [--input <path>]... [--output <path>]... -- <command>\n";
+  "Usage: t3 fork-exec [--timeout <seconds>] [--size <name>] [--platform <modal|e2b>] [--input <path>]... [--output <path>]... -- <command>\n";
+
+const PLATFORMS = ["modal", "e2b"] as const;
+const isPlatform = (value: string | undefined): value is (typeof PLATFORMS)[number] =>
+  PLATFORMS.some((platform) => platform === value);
 
 /**
  * Flags come in any order before `--`; `--input` and `--output` repeat, and their paths resolve
@@ -44,11 +50,13 @@ export function parseForkExecArgs(args: ReadonlyArray<string>, cwd = process.cwd
   let rest = [...args];
   let timeoutSeconds: number | undefined;
   let size: string | undefined;
+  let platform: string | undefined;
   const inputs: Array<string> = [];
   const outputs: Array<string> = [];
   for (;;) {
     if (rest[0] === "--timeout") timeoutSeconds = Number(rest[1]);
     else if (rest[0] === "--size") size = rest[1];
+    else if (rest[0] === "--platform") platform = rest[1];
     else if (rest[0] === "--input" || rest[0] === "--output") {
       if (!rest[1]) return null;
       (rest[0] === "--input" ? inputs : outputs).push(NodePath.resolve(cwd, rest[1]));
@@ -59,13 +67,15 @@ export function parseForkExecArgs(args: ReadonlyArray<string>, cwd = process.cwd
   if (
     rest.length === 0 ||
     (timeoutSeconds !== undefined && !Number.isInteger(timeoutSeconds)) ||
-    size === ""
+    size === "" ||
+    (platform !== undefined && !isPlatform(platform))
   )
     return null;
   return {
     command: rest.length === 1 ? rest[0]! : rest.map(shellQuote).join(" "),
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
     ...(size === undefined ? {} : { size }),
+    ...(isPlatform(platform) ? { platform } : {}),
     ...(inputs.length === 0 ? {} : { inputs }),
     ...(outputs.length === 0 ? {} : { outputs }),
   };
@@ -110,6 +120,9 @@ const report = (event: ForkExecEvent): number => {
     case "failed":
       process.stderr.write(`[t3] The copy running the command was lost: ${event.message}\n`);
       return FORK_LOST_EXIT;
+    case "refused":
+      process.stderr.write(`[t3] ${event.message}\n`);
+      return FORK_REFUSED_EXIT;
   }
 };
 
@@ -126,6 +139,10 @@ export async function runForkExec(
   args: ReadonlyArray<string>,
   options: { readonly rejoinWindowMs?: number } = {},
 ): Promise<number> {
+  if (args[0] === "--help" || args[0] === "-h") {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   const parsed = parseForkExecArgs(args);
   if (parsed === null) {
     process.stderr.write(USAGE);

@@ -14,6 +14,8 @@ import * as Schema from "effect/Schema";
 export const JobRecord = Schema.Struct({
   id: Schema.String,
   sandboxId: Schema.String,
+  /** Absent in a record from before a host could have two platforms: it ran on the default one. */
+  platform: Schema.optional(Schema.Literals(["modal", "e2b"])),
   caller: Schema.Literals(["bun-shim", "fork-exec", "fork-run"]),
   command: Schema.String,
   cwd: Schema.String,

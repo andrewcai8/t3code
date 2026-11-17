@@ -286,6 +286,7 @@ export const forkRunScript = (state: string) => String.raw`
 import json, os, subprocess, sys, time
 spec = json.loads(sys.argv[1])
 env = json.load(open('${state}/env.json'))
+env['T3_FORK_COPY'] = '1'
 out = '${state}/out/'
 deadline = time.monotonic() + spec['timeoutMs'] / 1000
 def run(command, cwd, seconds):

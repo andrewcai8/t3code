@@ -414,9 +414,13 @@ const HOST_ONLY = new Set([
 const HOST_ONLY_PREFIXES = ["XDG_", "DBUS_", "T3CODE_", "TERM_PROGRAM"];
 const GUEST_PATH =
   "/home/user/.bun/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-const GUEST_IDENTITY = Object.fromEntries(
-  MODAL_GUEST_ENV.slice(1).map((entry) => entry.split("=") as [string, string]),
-);
+/** T3_FORK_COPY tells a command it runs in a throwaway copy, never the host, on any platform. */
+const GUEST_IDENTITY = {
+  ...Object.fromEntries(
+    MODAL_GUEST_ENV.slice(1).map((entry) => entry.split("=") as [string, string]),
+  ),
+  T3_FORK_COPY: "1",
+};
 
 /**
  * The caller's environment as a copy should see it. Host session variables go, as does any path

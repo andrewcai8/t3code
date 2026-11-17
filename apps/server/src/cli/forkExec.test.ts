@@ -33,7 +33,7 @@ it("hands the copy's shell a command and its arguments exactly as given", () => 
   expect(parseForkExecArgs(["--"])).toBeNull();
 });
 
-it("takes a size and a timeout in either order before the command", () => {
+it("takes a size, a platform and a timeout in any order before the command", () => {
   expect(parseForkExecArgs(["--size", "large", "--timeout", "60", "--", "bun", "test"])).toEqual({
     command: "bun test",
     timeoutSeconds: 60,
@@ -44,7 +44,13 @@ it("takes a size and a timeout in either order before the command", () => {
     timeoutSeconds: 60,
     size: "xlarge",
   });
+  expect(parseForkExecArgs(["--platform", "modal", "--size", "xlarge", "--", "make"])).toEqual({
+    command: "make",
+    size: "xlarge",
+    platform: "modal",
+  });
   expect(parseForkExecArgs(["--size", "", "--", "make"])).toBeNull();
+  expect(parseForkExecArgs(["--platform", "gcp", "--", "make"])).toBeNull();
 });
 
 it("takes repeated inputs and outputs as absolute paths from the caller's directory", () => {
@@ -229,4 +235,25 @@ it("exits 70 when its job cannot be rejoined: an older server, or none in time",
     );
     vi.restoreAllMocks();
   }
+});
+
+it("lists --platform in its help, and exits 78, never 75, when the host refuses the platform", async () => {
+  const cli = cliHarness();
+  try {
+    expect(await runForkExec(["--help"])).toBe(0);
+    expect(cli.stdout.join("")).toContain("--platform <modal|e2b>");
+    await cli.listen((socket) => {
+      cli.send(socket, [
+        { kind: "refused", message: "This host has no modal platform for fork jobs; it has e2b." },
+      ]);
+      socket.end();
+    });
+    expect(await runForkExec(["--platform", "modal", "--", "make"])).toBe(78);
+  } finally {
+    cli.close();
+  }
+  expect(cli.requests).toEqual([expect.objectContaining({ command: "make", platform: "modal" })]);
+  expect(cli.stderr.join("")).toBe(
+    "[t3] This host has no modal platform for fork jobs; it has e2b.\n",
+  );
 });
