@@ -5,6 +5,7 @@ import {
   BearerConnectionTarget,
   ConnectionBlockedError,
   ConnectionTransientError,
+  NO_REFUSED_ROUTES,
   type SupervisorConnectionState,
 } from "./model.ts";
 import {
@@ -33,6 +34,7 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
     generation: 0,
     lastFailure: null,
     retryAt: null,
+    refusedRouteIds: NO_REFUSED_ROUTES,
     ...overrides,
   };
 }
