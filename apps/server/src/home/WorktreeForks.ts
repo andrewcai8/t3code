@@ -34,18 +34,19 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import { ServerConfig } from "../config.ts";
-import { makeModalBoxes } from "../environmentControl/ModalRuntime.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { makeSlots } from "../environmentControl/forkSlots.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { type ForkExecRequest, portableEnvironment } from "./forkExecProtocol.ts";
+import { makeE2bForkSandboxes } from "./e2bForkSandboxes.ts";
+import { makeModalForkSandboxes } from "./modalForkSandboxes.ts";
 import { type ForkBase, makeBases } from "./worktreeForkBases.ts";
 import {
   COPY_PURPOSE,
-  copySpec,
   type ForkSandboxes,
+  platformLabel,
   readWorktreeForksConfig,
   type SandboxSize,
   type WorktreeForksHost,
@@ -176,15 +177,24 @@ class NotStarted extends Schema.TaggedError<NotStarted>()("NotStarted", {
 }
 
 /** The command started and its copy stopped answering. */
-class Lost extends Schema.TaggedError<Lost>()("Lost", { cause: Schema.Defect() }) {
+class Lost extends Schema.TaggedError<Lost>()("Lost", {
+  provider: Schema.String,
+  cause: Schema.Defect(),
+}) {
   override get message(): string {
-    return "Its Modal sandbox stopped answering.";
+    return `Its ${this.provider} sandbox stopped answering.`;
   }
 }
 
-/** A call to this host's own disk or Modal that is logged or swallowed, never matched on. */
+/** A call to this host's own disk or sandbox platform that is logged or swallowed, never matched on. */
 class ForkHostCallError extends Schema.TaggedError<ForkHostCallError>()("ForkHostCallError", {
-  operation: Schema.Literals(["save batch", "copy outputs back", "list sandboxes", "end sandbox"]),
+  operation: Schema.Literals([
+    "save batch",
+    "copy outputs back",
+    "list sandboxes",
+    "end sandbox",
+    "prune images",
+  ]),
   cause: Schema.Defect(),
 }) {
   override get message(): string {
@@ -440,7 +450,7 @@ const disabled = WorktreeForks.of({
   }),
 });
 
-/** The service over `host`'s configuration and a Modal port. */
+/** The service over `host`'s configuration and a sandbox platform's port. */
 export const make = Effect.fn("WorktreeForks.make")(function* (
   host: WorktreeForksHost,
   sandboxes: ForkSandboxes,
@@ -556,16 +566,18 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       Effect.tryPromise({
         try: () => {
           live.add(job.id);
-          return sandboxes.createCopy(
-            copySpec(host, {
-              imageId,
-              size: job.size,
-              lifetimeMs: job.timeoutMs + SETUP_MS,
-              tags: { purpose: COPY_PURPOSE, host: hostTag, job: job.id },
-            }),
-          );
+          return sandboxes.createCopy({
+            imageId,
+            size: job.size,
+            lifetimeMs: job.timeoutMs + SETUP_MS,
+            tags: { purpose: COPY_PURPOSE, host: hostTag, job: job.id },
+          });
         },
-        catch: (cause) => new NotStarted({ reason: "Modal could not start a copy.", cause }),
+        catch: (cause) =>
+          new NotStarted({
+            reason: `${platformLabel(host.platform)} could not start a copy.`,
+            cause,
+          }),
       }),
       (id, exit) => endSandbox(job.id, id, exit),
     ).pipe(Effect.onError(() => Effect.sync(() => live.delete(job.id))));
@@ -755,7 +767,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
             timeoutMs: left + 60_000,
             onOutput: output,
           }),
-        catch: (cause) => new Lost({ cause }),
+        catch: (cause) => new Lost({ provider: platformLabel(host.platform), cause }),
       }).pipe(Effect.asSome),
       deadline,
     );
@@ -1198,7 +1210,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     );
   });
 
-  const goneMessage = "Its Modal sandbox ended while T3 Code restarted.";
+  const goneMessage = `Its ${platformLabel(host.platform)} sandbox ended while T3 Code restarted.`;
 
   /**
    * Adopts a `t3 fork-exec` job and keeps it for its caller to re-attach. A caller that does not
@@ -1324,11 +1336,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       records.length === 0
         ? new Set<string>()
         : yield* Effect.tryPromise({
-            try: () =>
-              sandboxes.list(host.modal.app, host.modal.environment, {
-                purpose: COPY_PURPOSE,
-                host: hostTag,
-              }),
+            try: () => sandboxes.list({ purpose: COPY_PURPOSE, host: hostTag }),
             catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
           }).pipe(
             Effect.map((found) => new Set(found.map((sandbox) => sandbox.sandboxId))),
@@ -1399,11 +1407,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   const sweep = Effect.gen(function* () {
     yield* cache.evict();
     const found = yield* Effect.tryPromise({
-      try: () =>
-        sandboxes.list(host.modal.app, host.modal.environment, {
-          purpose: COPY_PURPOSE,
-          host: hostTag,
-        }),
+      try: () => sandboxes.list({ purpose: COPY_PURPOSE, host: hostTag }),
       catch: (cause) => new ForkHostCallError({ operation: "list sandboxes", cause }),
     });
     for (const sandbox of found)
@@ -1412,6 +1416,18 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           try: () => sandboxes.terminate(sandbox.sandboxId),
           catch: (cause) => new ForkHostCallError({ operation: "end sandbox", cause }),
         }).pipe(Effect.ignore);
+    // After the sandboxes end, since a platform may refuse to delete an image one still runs from.
+    yield* bases.kept.pipe(
+      Effect.flatMap((keep) =>
+        Effect.tryPromise({
+          try: () => sandboxes.pruneImages(keep),
+          catch: (cause) => new ForkHostCallError({ operation: "prune images", cause }),
+        }),
+      ),
+      Effect.catch((cause) =>
+        Effect.logWarning("old worktree fork bases could not be pruned", { cause }),
+      ),
+    );
     const now = yield* Clock.currentTimeMillis;
     yield* Effect.sync(() => {
       for (const entry of NodeFS.existsSync(resultsRoot) ? NodeFS.readdirSync(resultsRoot) : []) {
@@ -1457,6 +1473,10 @@ export const layer = Layer.effect(
       }),
     );
     if (host === null) return disabled;
-    return yield* make(host, makeModalBoxes(host.modal));
+    const { platform } = host;
+    if (platform.kind === "modal") return yield* make(host, makeModalForkSandboxes(platform));
+    const hostTag = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor)
+      .environmentId;
+    return yield* make(host, makeE2bForkSandboxes(platform, hostTag));
   }),
 );

@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - hashes this host's files and keeps a small index beside the base records.
 /**
- * Archives a copy takes from this host, kept in Modal by the sha256 of what they hold, so jobs that
- * send the same content cost one upload. An archive's id enters the index only after its digest
- * is checked in the copy and its key matches the job's, so a torn archive is never served.
+ * Archives a copy takes from this host, kept as the platform's directory images by the sha256 of
+ * what they hold, so jobs that send the same content cost one upload. A torn archive is never
+ * served; a platform with no directory images sends every job's own.
  *
  * @module worktreeForkCache
  */
@@ -17,7 +17,11 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { fileDigest } from "../environmentControl/ProvisionPreparation.ts";
-import type { ForkSandboxes, WorktreeForksHost } from "./worktreeForksConfig.ts";
+import {
+  type ForkSandboxes,
+  platformScope,
+  type WorktreeForksHost,
+} from "./worktreeForksConfig.ts";
 import type { CheckoutRefused } from "./worktreeForkShip.ts";
 
 const DAY = 24 * 3_600_000;
@@ -77,7 +81,7 @@ const Entry = Schema.Struct({
 });
 type Entry = typeof Entry.Type;
 const Index = Schema.Struct({
-  /** The Modal workspace, app and environment the images live in. */
+  /** The platform account the images live in. */
   scope: Schema.String,
   entries: Schema.Record(Schema.String, Entry),
 });
@@ -91,7 +95,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
 ) {
   const path = NodePath.join(stateDir, "worktree-forks", "upload-cache.json");
   const workspace = NodeCrypto.createHash("sha256")
-    .update([host.modal.tokenId, host.modal.app, host.modal.environment ?? ""].join("\0"))
+    .update(platformScope(host.platform))
     .digest("hex");
   const index = new Map<string, Entry>();
   const scope = yield* Effect.scope;
@@ -218,6 +222,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
     item: Upload,
     fallbackPath: string,
     done: Deferred.Deferred<Entry | null>,
+    images: NonNullable<ForkSandboxes["directoryImages"]>,
   ) {
     let committed: Entry | null = null;
     return yield* Effect.gen(function* () {
@@ -257,7 +262,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
         return placed;
       }
       const saved = yield* Effect.tryPromise({
-        try: () => sandboxes.saveDirectory(sandboxId, stage, IMAGE_TTL_MS),
+        try: () => images.save(sandboxId, stage, IMAGE_TTL_MS),
         catch: (cause) => new UploadCacheError({ operation: "cache", cause }),
       }).pipe(Effect.result);
       if (saved._tag === "Failure") {
@@ -295,6 +300,8 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
     item: Upload,
     fallbackPath: string,
   ) {
+    const images = sandboxes.directoryImages;
+    if (images === null) return yield* direct(sandboxId, item, fallbackPath);
     const now = yield* Clock.currentTimeMillis;
     // One step, so two jobs never both lead the same key.
     const claim = yield* Effect.sync(() => {
@@ -307,12 +314,13 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
       uploading.set(item.key, done);
       return { _tag: "leading", done } as const;
     });
-    if (claim._tag === "leading") return yield* lead(sandboxId, item, fallbackPath, claim.done);
+    if (claim._tag === "leading")
+      return yield* lead(sandboxId, item, fallbackPath, claim.done, images);
     const entry = claim._tag === "cached" ? claim.entry : yield* Deferred.await(claim.pending);
     if (entry === null) return yield* direct(sandboxId, item, fallbackPath);
     const mountPath = `${MOUNTS}/${item.key}`;
     const mounted = yield* Effect.tryPromise({
-      try: () => sandboxes.mountImage(sandboxId, mountPath, entry.imageId),
+      try: () => images.mount(sandboxId, mountPath, entry.imageId),
       catch: (cause) => new UploadCacheError({ operation: "mount", cause }),
     }).pipe(Effect.result);
     if (mounted._tag === "Failure") {

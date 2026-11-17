@@ -90,7 +90,8 @@ const setup = (
     key: "key-1",
   };
   const host: WorktreeForksHost = {
-    modal: {
+    platform: {
+      kind: "modal",
       tokenId: "ak",
       tokenSecret: "as",
       imageId: "im-template",
@@ -744,9 +745,12 @@ it.effect("the sweep ends this host's sandboxes no job owns, and nothing else", 
     const elsewhere = fake.plant({ purpose: "t3-worktree-fork", host: "env-other", job: "x" });
     const orphan = fake.plant({ purpose: "t3-worktree-fork", host: "env-host", job: "gone" });
     const swept = fake.next("terminate");
+    const pruned = fake.nextPrune();
     yield* TestClock.adjust("10 minutes");
     expect((yield* Effect.promise(() => swept)).sandboxId).toBe(orphan);
     expect(fake.running()).toEqual(new Set([running, elsewhere]));
+    // Images that no record holds are the platform's to delete; the base the record holds is kept.
+    expect(yield* Effect.promise(() => pruned)).toEqual(["im-base"]);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 

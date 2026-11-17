@@ -90,7 +90,8 @@ const setup = () => {
     key: "key-1",
   };
   const host: WorktreeForksHost = {
-    modal: {
+    platform: {
+      kind: "modal",
       tokenId: "ak",
       tokenSecret: "as",
       imageId: "im-template",

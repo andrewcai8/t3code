@@ -9,12 +9,12 @@ import * as Logger from "effect/Logger";
 import * as TestClock from "effect/testing/TestClock";
 
 import { makeUploadCache, type Upload } from "./worktreeForkCache.ts";
-import type { WorktreeForksHost } from "./worktreeForksConfig.ts";
+import type { ForkPlatform, WorktreeForksHost } from "./worktreeForksConfig.ts";
 import { makeFakeSandboxes } from "./worktreeForksTestkit.ts";
 
 const HOUR = 3_600_000;
 
-const setup = () => {
+const setup = (directoryImages = true) => {
   const stateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-cache-"));
   const archive = NodePath.join(stateDir, "input.tgz");
   NodeFS.writeFileSync(archive, "archive bytes");
@@ -23,21 +23,26 @@ const setup = () => {
     pack: () => Effect.succeed({ archive, bytes: 13, key: "a".repeat(64) }),
   };
   const host = {
-    modal: { tokenId: "ak", tokenSecret: "as", imageId: "im", app: "app", environment: undefined },
+    platform: {
+      kind: "modal",
+      tokenId: "ak",
+      tokenSecret: "as",
+      imageId: "im",
+      app: "app",
+      environment: undefined,
+    },
   } as unknown as WorktreeForksHost;
-  const fake = makeFakeSandboxes();
+  const fake = makeFakeSandboxes({ directoryImages });
   return { stateDir, item, host, fake, start: makeUploadCache(host, fake.port, stateDir) };
 };
 
 const copy = (fake: ReturnType<typeof makeFakeSandboxes>) =>
   Effect.promise(() =>
     fake.port.createCopy({
-      app: "app",
       imageId: "im",
-      timeoutMs: 60_000,
-      sizing: { cpu: 1, cpuLimit: 1, memoryMiB: 1, memoryLimitMiB: 1 },
+      size: { cpu: 1, memoryMiB: 1, cpuRequest: 1, memoryRequestMiB: 1 },
+      lifetimeMs: 60_000,
       tags: {},
-      egress: { domains: [], cidrs: [] },
     }),
   );
 
@@ -86,7 +91,7 @@ it.effect("the sweep deletes an image unused for a day, and one too old to mount
     const kept = yield* makeUploadCache(host, fake.port, stateDir);
     expect((yield* kept.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(0);
     const other = yield* makeUploadCache(
-      { ...host, modal: { ...host.modal, tokenId: "ak-other" } },
+      { ...host, platform: { ...host.platform, tokenId: "ak-other" } as ForkPlatform },
       fake.port,
       stateDir,
     );
@@ -143,5 +148,18 @@ it.effect("content that changed while it was packed is used once and never cache
     expect((yield* cache.place(yield* copy(fake), moved, "/tmp/input.tgz")).uploadedBytes).toBe(13);
     expect(fake.calls.filter((call) => call.op === "saveDirectory")).toEqual([]);
     expect((yield* cache.place(yield* copy(fake), item, "/tmp/input.tgz")).uploadedBytes).toBe(13);
+  }).pipe(Effect.scoped);
+});
+
+it.effect("a platform with no directory images sends every archive directly", () => {
+  const { item, fake, start } = setup(false);
+  return Effect.gen(function* () {
+    const cache = yield* start;
+    for (let job = 0; job < 2; job++) {
+      const placed = yield* cache.place(yield* copy(fake), item, "/tmp/input.tgz");
+      expect(placed).toEqual({ path: "/tmp/input.tgz", bytes: 13, uploadedBytes: 13 });
+    }
+    expect(uploads(fake)).toBe(2);
+    expect(fake.calls.filter((call) => call.op === "exec")).toEqual([]);
   }).pipe(Effect.scoped);
 });

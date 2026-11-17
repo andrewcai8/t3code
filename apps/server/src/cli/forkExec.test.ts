@@ -124,7 +124,7 @@ it("sends its environment and size, prints live output as it comes, and exits wi
   expect(written.filter(([, text]) => text !== "")).toEqual([
     [
       "stderr",
-      "[t3] Running in a throwaway copy of this worktree on Modal (job job-1); its output follows as it runs.\n",
+      "[t3] Running in a throwaway copy of this worktree (job job-1); its output follows as it runs.\n",
     ],
     ["stdout", "pass 1\n"],
     ["stderr", "warn\n"],

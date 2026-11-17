@@ -21,16 +21,16 @@ import * as ProcessRunner from "../processRunner.ts";
 import { portableEnvironment } from "./forkExecProtocol.ts";
 import {
   COPY_PURPOSE,
-  copySpec,
   type ForkRepository,
   type ForkSandboxes,
+  platformImage,
   type WorktreeForksHost,
 } from "./worktreeForksConfig.ts";
 import { type Checkout, sandboxEnvironment } from "./worktreeForkShip.ts";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
-/** Modal deletes a base this long after it was taken, whatever becomes of this host. */
+/** Modal deletes a base this long after it was taken, whatever becomes of this host; E2B ignores it. */
 const IMAGE_TTL_MS = 14 * DAY;
 /** A copy never boots from an image that might expire while it starts. */
 const USABLE_MS = 13 * DAY;
@@ -180,6 +180,8 @@ export interface Bases {
   ) => Effect.Effect<ForkBase, BaseUnavailable>;
   /** Waits for every build and refresh in flight now to end, however it ends. */
   readonly idle: Effect.Effect<void>;
+  /** The images the records hold. Fails when a record cannot be read, so nothing is pruned on a guess. */
+  readonly kept: Effect.Effect<ReadonlySet<string>, BaseDeleteFailed>;
 }
 
 /**
@@ -350,14 +352,12 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
       Effect.tryPromise({
         try: () => {
           live.add(job);
-          return sandboxes.createCopy(
-            copySpec(host, {
-              imageId: from?.imageId ?? host.modal.imageId,
-              size: host.sizes.get(host.defaultSize)!,
-              lifetimeMs: BUILD_LIFETIME_MS,
-              tags: { purpose: COPY_PURPOSE, host: hostTag, job },
-            }),
-          );
+          return sandboxes.createCopy({
+            imageId: from?.imageId ?? platformImage(host.platform),
+            size: host.sizes.get(host.defaultSize)!,
+            lifetimeMs: BUILD_LIFETIME_MS,
+            tags: { purpose: COPY_PURPOSE, host: hostTag, job },
+          });
         },
         catch: (cause) => new BaseBuildFailed({ step: "create", cause }),
       }),
@@ -476,5 +476,19 @@ export const makeBases = Effect.fn("WorktreeForks.makeBases")(function* (
     }),
   );
 
-  return { current, idle } satisfies Bases;
+  const kept = Effect.try({
+    try: () => {
+      const images = new Set<string>();
+      for (const repository of host.repositories.values()) {
+        const path = recordPath(repository);
+        if (!NodeFS.existsSync(path)) continue;
+        for (const base of decodeRecord(NodeFS.readFileSync(path, "utf8")).bases)
+          images.add(base.imageId);
+      }
+      return images as ReadonlySet<string>;
+    },
+    catch: (cause) => new BaseDeleteFailed({ cause }),
+  });
+
+  return { current, idle, kept } satisfies Bases;
 });
