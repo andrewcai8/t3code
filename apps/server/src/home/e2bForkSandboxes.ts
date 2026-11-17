@@ -163,11 +163,10 @@ export const makeE2bForkSandboxes = (platform: E2bPlatform, hostTag: string): Fo
         () => undefined,
       );
       await ensureSwap(sandbox);
-      const { snapshotId } = await takeSnapshot(
-        sandboxId,
-        `${prefix}${NodeCrypto.randomUUID().slice(0, 12)}`,
-        timeoutMs,
-      );
+      const name = `${prefix}${NodeCrypto.randomUUID().slice(0, 12)}`;
+      // Marked before the call too: the sweep may list a snapshot E2B is still taking.
+      fresh.set(name, Date.now());
+      const { snapshotId } = await takeSnapshot(sandboxId, name, timeoutMs);
       fresh.set(bare(snapshotId), Date.now());
       return snapshotId;
     },
