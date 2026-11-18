@@ -590,11 +590,19 @@ describe("connection onboarding", () => {
     { name: "a host that renews, with a device key", renews: true, signer: true, dpop: true },
     { name: "a host that renews, without a device key", renews: true, signer: false, dpop: false },
     { name: "an older host, with a device key", renews: false, signer: true, dpop: false },
-  ])("pairs with $name as DPoP: $dpop", ({ renews, signer, dpop }) =>
+    {
+      name: "a cloud box that renews, with a device key",
+      renews: true,
+      signer: true,
+      box: true,
+      dpop: false,
+    },
+  ])("pairs with $name as DPoP: $dpop", ({ renews, signer, box, dpop }) =>
     Effect.gen(function* () {
       const registration = yield* preparePairingRegistration({
         host: "remote.example.test",
         pairingCode: "pairing-token",
+        ...(box ? { box: { managerId: EnvironmentId.make("host") } } : {}),
       });
       expect(registration.credential).toMatchObject(
         dpop

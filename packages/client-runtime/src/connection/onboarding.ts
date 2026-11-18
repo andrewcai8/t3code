@@ -173,8 +173,11 @@ export const preparePairingRegistration = Effect.fn(
   // A key-bound session renews itself, but only on a host that can renew it. The proof is made
   // before the one-time code is sent, so a device that cannot sign keeps the code for bearer.
   const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
+  // Box pairings stay bearer: the Namespace gateway strips the DPoP header before the box sees it.
   const dpopProof =
-    descriptor.capabilities.accessTokenRenewal === true && Option.isSome(signer)
+    input.box === undefined &&
+    descriptor.capabilities.accessTokenRenewal === true &&
+    Option.isSome(signer)
       ? yield* signer.value
           .createProof({
             method: "POST",
