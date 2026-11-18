@@ -77,6 +77,19 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("lets readers see and report sponsored lines but only settings writers connect a device", () => {
+    for (const method of [
+      WS_METHODS.sidequestGetConnection,
+      WS_METHODS.sidequestFetchAd,
+      WS_METHODS.sidequestReportImpression,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+    for (const method of [WS_METHODS.sidequestConnect, WS_METHODS.sidequestDisconnect]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
+    }
+  });
+
   it("still lets readers load settings the way installed Swift clients ask", () => {
     expect(requiredScopeForRpcMethod("server.getSettings")).toBe(AuthOrchestrationReadScope);
   });
