@@ -559,6 +559,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["beta link another machine vps peer agents work there delegate"],
   },
   {
+    id: "sidequest-sponsored",
+    title: "Sponsored line under replies",
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: ["sidequest ad sponsored advertisement connect account device"],
+  },
+  {
     id: "prompt-suggestions-beta",
     title: "Suggest next prompt",
     to: "/settings/labs",

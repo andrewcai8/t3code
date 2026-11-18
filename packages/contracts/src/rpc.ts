@@ -392,6 +392,12 @@ import {
   ProviderConsumeResetCreditInput,
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
+import {
+  SidequestAd,
+  SidequestConnection,
+  SidequestFetchAdInput,
+  SidequestReportImpressionInput,
+} from "./sidequest.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
 import {
   StorageCleanupReport,
@@ -589,6 +595,11 @@ export const WS_METHODS = {
   serverGetResourceTelemetryHistory: "server.getResourceTelemetryHistory",
   serverRetryResourceTelemetry: "server.retryResourceTelemetry",
   serverCheckOtlpEndpoint: "server.checkOtlpEndpoint",
+  sidequestGetConnection: "sidequest.getConnection",
+  sidequestConnect: "sidequest.connect",
+  sidequestDisconnect: "sidequest.disconnect",
+  sidequestFetchAd: "sidequest.fetchAd",
+  sidequestReportImpression: "sidequest.reportImpression",
   serverListTextGeneratorModels: "server.listTextGeneratorModels",
   serverPrepareTriage: "server.prepareTriage",
   serverSignalProcess: "server.signalProcess",
@@ -1067,6 +1078,36 @@ const WsServerRetryResourceTelemetryRpc = Rpc.make(WS_METHODS.serverRetryResourc
 const WsServerCheckOtlpEndpointRpc = Rpc.make(WS_METHODS.serverCheckOtlpEndpoint, {
   payload: OtlpEndpointCheckInput,
   success: OtlpEndpointCheckResult,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsSidequestGetConnectionRpc = Rpc.make(WS_METHODS.sidequestGetConnection, {
+  payload: Schema.Struct({}),
+  success: SidequestConnection,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsSidequestConnectRpc = Rpc.make(WS_METHODS.sidequestConnect, {
+  payload: Schema.Struct({}),
+  success: SidequestConnection,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsSidequestDisconnectRpc = Rpc.make(WS_METHODS.sidequestDisconnect, {
+  payload: Schema.Struct({}),
+  success: SidequestConnection,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsSidequestFetchAdRpc = Rpc.make(WS_METHODS.sidequestFetchAd, {
+  payload: SidequestFetchAdInput,
+  success: Schema.NullOr(SidequestAd),
+  error: EnvironmentAuthorizationError,
+});
+
+const WsSidequestReportImpressionRpc = Rpc.make(WS_METHODS.sidequestReportImpression, {
+  payload: SidequestReportImpressionInput,
+  success: Schema.Void,
   error: EnvironmentAuthorizationError,
 });
 
@@ -2377,6 +2418,11 @@ export const CoreWsRpcGroup = RpcGroup.make(
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
   WsServerCheckOtlpEndpointRpc,
+  WsSidequestGetConnectionRpc,
+  WsSidequestConnectRpc,
+  WsSidequestDisconnectRpc,
+  WsSidequestFetchAdRpc,
+  WsSidequestReportImpressionRpc,
   WsServerListTextGeneratorModelsRpc,
   WsServerPrepareTriageRpc,
   WsServerGetUsageSummaryRpc,

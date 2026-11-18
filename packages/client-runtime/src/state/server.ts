@@ -1825,6 +1825,27 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:check-otlp-endpoint",
       tag: WS_METHODS.serverCheckOtlpEndpoint,
     }),
+    sidequestGetConnection: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:sidequest-get-connection",
+      tag: WS_METHODS.sidequestGetConnection,
+    }),
+    sidequestConnect: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:sidequest-connect",
+      tag: WS_METHODS.sidequestConnect,
+    }),
+    sidequestDisconnect: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:sidequest-disconnect",
+      tag: WS_METHODS.sidequestDisconnect,
+    }),
+    sidequestAd: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:sidequest-ad",
+      tag: WS_METHODS.sidequestFetchAd,
+      staleTimeMs: 24 * 60 * 60_000,
+    }),
+    sidequestReportImpression: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:sidequest-report-impression",
+      tag: WS_METHODS.sidequestReportImpression,
+    }),
     checkSecretSource: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:check-secret-source",
       tag: WS_METHODS.serverCheckSecretSource,
