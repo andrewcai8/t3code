@@ -515,8 +515,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SidequestService
             yield* sidequest.connect;
             yield* sidequest.fetchAd({ threadId, runId });
             world.routes.set(`POST /api/impression/${impressionId}`, () => ({ status: 500 }));
-            const failing = yield* Effect.forkChild(sidequest.reportImpression({ impressionId }));
-            yield* TestClock.adjust("1 minute");
+            const failing = yield* Effect.forkChild(sidequest.reportImpression({ impressionId }), {
+              startImmediately: true,
+            });
+            yield* TestClock.adjust("10 seconds");
+            yield* TestClock.adjust("10 seconds");
+            yield* TestClock.adjust("10 seconds");
             yield* Fiber.join(failing);
             expect(impressionRequests(world)).toHaveLength(4);
 
