@@ -21,7 +21,8 @@ const STATUS_TEXT = {
 } as const;
 
 export function SidequestRow() {
-  const { scope, environment } = useSettingsScope();
+  const { targets } = useSettingsScope();
+  const hosts = [...new Map(targets.map((target) => [target.environmentId, target])).values()];
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   return (
@@ -39,21 +40,24 @@ export function SidequestRow() {
         />
       }
     >
-      {scope.kind === "environment" && environment ? (
+      {hosts.map((host) => (
         <SidequestConnectionControls
-          key={environment.environmentId}
-          environmentId={environment.environmentId}
+          key={host.environmentId}
+          environmentId={host.environmentId}
+          label={hosts.length > 1 ? host.label : null}
         />
-      ) : (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Choose one environment to connect its Sidequest account.
-        </p>
-      )}
+      ))}
     </SettingsRow>
   );
 }
 
-function SidequestConnectionControls({ environmentId }: { readonly environmentId: EnvironmentId }) {
+function SidequestConnectionControls({
+  environmentId,
+  label,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly label: string | null;
+}) {
   const canManage = useAtomValue(serverEnvironment.sidequestConnect.permissionAtom(environmentId));
   const getConnection = useAtomCommand(serverEnvironment.sidequestGetConnection, {
     reportFailure: false,
@@ -86,6 +90,7 @@ function SidequestConnectionControls({ environmentId }: { readonly environmentId
 
   return (
     <div className="mt-2 grid gap-2 text-xs text-muted-foreground">
+      {label === null ? null : <p className="font-medium text-foreground">{label}</p>}
       {connection === null ? null : connection.status === "connected" ? (
         <p>Connected as {connection.email}.</p>
       ) : connection.status === "pending" ? (
