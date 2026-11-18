@@ -5,6 +5,7 @@ import type {
   RepositoryIdentity,
   VcsRef,
 } from "@t3tools/contracts";
+import { useGT } from "gt-react";
 import { ChevronDownIcon, CloudIcon, GitBranchIcon } from "lucide-react";
 import { type Ref, useDeferredValue, useImperativeHandle, useState } from "react";
 
@@ -89,17 +90,24 @@ export function cloudRunOnItems(
   return cloudRunOn?.providers.map(option) ?? [];
 }
 
-function entryLabel(cloudRunOn: CloudRunOn, provider: ProvisionProvider): string {
+function entryLabel(
+  cloudRunOn: CloudRunOn,
+  provider: ProvisionProvider,
+  gt: ReturnType<typeof useGT>,
+): string {
   const label = cloudEnvironmentLabel(provider);
-  return cloudRunOn.creating && cloudRunOn.pending === provider ? `Preparing ${label}…` : label;
+  return cloudRunOn.creating && cloudRunOn.pending === provider
+    ? gt("Preparing {label}…", { label })
+    : label;
 }
 
 export function CloudRunOnSelectItems({ cloudRunOn }: { cloudRunOn: CloudRunOn | undefined }) {
+  const gt = useGT();
   return cloudRunOn?.providers.map((provider) => (
     <SelectItem key={provider} value={VALUES[provider]} disabled={cloudRunOn.creating}>
       <span className="inline-flex items-center gap-1.5">
         <CloudIcon className="size-3" aria-hidden="true" />
-        {entryLabel(cloudRunOn, provider)}
+        {entryLabel(cloudRunOn, provider, gt)}
       </span>
     </SelectItem>
   ));
@@ -112,6 +120,7 @@ export function CloudRunOnMenuItems({
   cloudRunOn: CloudRunOn | undefined;
   envLocked: boolean;
 }) {
+  const gt = useGT();
   return cloudRunOn?.providers.map((provider) => (
     <MenuRadioItem
       key={provider}
@@ -120,7 +129,7 @@ export function CloudRunOnMenuItems({
     >
       <span className="flex min-w-0 items-center gap-1.5">
         <CloudIcon className="size-3" aria-hidden="true" />
-        <span className="min-w-0 truncate">{entryLabel(cloudRunOn, provider)}</span>
+        <span className="min-w-0 truncate">{entryLabel(cloudRunOn, provider, gt)}</span>
       </span>
     </MenuRadioItem>
   ));
@@ -167,6 +176,7 @@ export function CloudBaseBranchSelector({
   base: CloudBaseBranch;
   onComposerFocusRequest?: (() => void) | undefined;
 }) {
+  const gt = useGT();
   const composerFloatingLayerProps = useComposerMenuProps();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -229,7 +239,7 @@ export function CloudBaseBranchSelector({
       hasNextPage={false}
       isFetchingNextPage={false}
       onLoadNext={() => undefined}
-      statusText={loading ? "Loading refs..." : null}
+      statusText={loading ? gt("Loading refs...") : null}
       renderItem={(name, index) => {
         const ref = refByName.get(name);
         // Every row is a remote branch named as the remote names it, so only the default badge
@@ -259,7 +269,7 @@ export function CloudBaseBranchSelector({
         >
           <GitBranchIcon className="size-3 shrink-0 opacity-70" />
           <ComposerContextLabel>
-            <MiddleTruncate value={value ?? "Default branch"} className="w-full" />
+            <MiddleTruncate value={value ?? gt("Default branch")} className="w-full" />
           </ComposerContextLabel>
           <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
         </ComboboxTrigger>

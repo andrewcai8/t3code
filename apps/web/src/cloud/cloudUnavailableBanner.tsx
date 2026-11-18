@@ -11,12 +11,14 @@ import {
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { Atom } from "effect/reactivity";
+import { msg, T, useGT, useMessages } from "gt-react";
 
 import type { ComposerBannerStackItem } from "../components/chat/ComposerBannerStack";
 import { Button } from "../components/ui/button";
 import { toastManager } from "../components/ui/toast";
 import { environmentCatalog } from "../connection/catalog";
 import { useNowMinute } from "../hooks/useNowMinute";
+import { m, type MessageResolver } from "../i18n/messages";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -29,7 +31,7 @@ function OpenConnectionsButton() {
       variant="ghost"
       onClick={() => void navigate({ to: "/settings/connections" })}
     >
-      Connections
+      <T>Connections</T>
     </Button>
   );
 }
@@ -40,7 +42,8 @@ function useRestorableBox(managerId: EnvironmentId, environmentId: EnvironmentId
   // The minute clock is UTC without its zone.
   const now = Date.parse(`${useNowMinute()}Z`);
   const box = boxes.find((candidate) => candidate.environmentId === environmentId);
-  const text = describeRestorable(box?.restorableUntil, now);
+  const messages = useMessages();
+  const text = describeRestorable(box?.restorableUntil, now, messages);
   return box && text !== null ? { leaseId: box.leaseId, text } : null;
 }
 
@@ -48,10 +51,11 @@ function RemovedMachineDescription(props: {
   readonly managerId: EnvironmentId;
   readonly environmentId: EnvironmentId;
 }) {
+  const gt = useGT();
   const restorable = useRestorableBox(props.managerId, props.environmentId);
   return restorable
-    ? `This chat's cloud machine was removed. ${restorable.text}.`
-    : "This chat's cloud machine was removed. Its saved history stays readable here.";
+    ? gt("This chat's cloud machine was removed. {text}.", { text: restorable.text })
+    : gt("This chat's cloud machine was removed. Its saved history stays readable here.");
 }
 
 function RestoreMachineButton(props: {
@@ -62,6 +66,7 @@ function RestoreMachineButton(props: {
   const restore = useAtomCommand(serverEnvironment.restoreProvisionedEnvironment, {
     reportFailure: false,
   });
+  const gt = useGT();
   if (!restorable) return null;
   const onRestore = async () => {
     const result = await restore({
@@ -71,16 +76,16 @@ function RestoreMachineButton(props: {
     if (result._tag === "Success" && result.value.kind === "restored") return;
     toastManager.add({
       type: "warning",
-      title: "Could not restore this chat's cloud machine",
+      title: gt("Could not restore this chat's cloud machine"),
       description:
         result._tag === "Success" && result.value.kind === "refused"
           ? result.value.message
-          : "Retry when the cloud manager is reachable.",
+          : gt("Retry when the cloud manager is reachable."),
     });
   };
   return (
     <Button size="xs" variant="outline" onClick={() => void onRestore()}>
-      Restore
+      <T>Restore</T>
     </Button>
   );
 }
@@ -110,6 +115,7 @@ export function cloudUnavailableBanner(
   },
   reconnecting: boolean,
   machine: CloudMachine | null,
+  resolve: MessageResolver = m,
 ): Partial<Pick<ComposerBannerStackItem, "title" | "description" | "actions">> {
   const target = appAtomRegistry
     .get(environmentCatalog.catalogValueAtom)
@@ -122,13 +128,14 @@ export function cloudUnavailableBanner(
   if (state.connection.blockedReason === "workspace-missing") {
     return box === null
       ? {
-          title: `${name} is no longer available`,
-          description:
-            "This chat's cloud machine was removed. Its saved history stays readable here.",
+          title: resolve(msg("{name} is no longer available", { name })),
+          description: resolve(
+            msg("This chat's cloud machine was removed. Its saved history stays readable here."),
+          ),
           actions: <OpenConnectionsButton />,
         }
       : {
-          title: `${name} is no longer available`,
+          title: resolve(msg("{name} is no longer available", { name })),
           description: (
             <RemovedMachineDescription
               managerId={box.managerId}
@@ -148,5 +155,11 @@ export function cloudUnavailableBanner(
     const { title, description } = cloudWakeNotice(status, machine);
     return { title, description };
   }
-  return isBox ? { title: `${name} is ${reconnecting ? "reconnecting" : "offline"}` } : {};
+  return isBox
+    ? {
+        title: reconnecting
+          ? resolve(msg("{name} is reconnecting", { name }))
+          : resolve(msg("{name} is offline", { name })),
+      }
+    : {};
 }

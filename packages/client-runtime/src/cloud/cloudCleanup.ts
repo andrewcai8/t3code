@@ -1,18 +1,31 @@
 // @effect-diagnostics globalDate:off - cleanup times are ISO timestamps compared with the caller's clock.
 import type { ProvisionedCleanup } from "@t3tools/contracts";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-const plural = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"}`;
-
-function removedIn(remainingMs: number): string {
-  if (remainingMs <= 0) return "Removed soon";
-  if (remainingMs < HOUR_MS) return `Removed in ${Math.ceil(remainingMs / MINUTE_MS)} min`;
-  if (remainingMs < DAY_MS)
-    return `Removed in ${plural(Math.round(remainingMs / HOUR_MS), "hour")}`;
-  return `Removed in ${plural(Math.round(remainingMs / DAY_MS), "day")}`;
+function removedIn(remainingMs: number, resolve: MFunctionType): string {
+  if (remainingMs <= 0) return resolve(msg("Removed soon"));
+  if (remainingMs < HOUR_MS) {
+    return resolve(
+      msg("Removed in {minutes} min", { minutes: Math.ceil(remainingMs / MINUTE_MS) }),
+    );
+  }
+  if (remainingMs < DAY_MS) {
+    return resolve(
+      msg("{count, plural, one {Removed in {count} hour} other {Removed in {count} hours}}", {
+        count: Math.round(remainingMs / HOUR_MS),
+      }),
+    );
+  }
+  return resolve(
+    msg("{count, plural, one {Removed in {count} day} other {Removed in {count} days}}", {
+      count: Math.round(remainingMs / DAY_MS),
+    }),
+  );
 }
 
 /**
@@ -23,14 +36,22 @@ function removedIn(remainingMs: number): string {
 export function describeCloudCleanup(
   cleanup: ProvisionedCleanup | undefined,
   now: number,
+  resolve: MFunctionType = mFallback,
 ): { readonly text: string; readonly action: "keep" | "allow" | null } | null {
   if (cleanup === undefined) return null;
   if (cleanup.kind === "kept")
     return cleanup.reason === "user"
-      ? { text: "Kept", action: "allow" }
-      : { text: "Kept · work could not be backed up", action: null };
-  const text = removedIn(Date.parse(cleanup.at) - now);
-  return { text: cleanup.reason === "settled" ? `Settled · ${text}` : text, action: "keep" };
+      ? {
+          text: resolve(msg("Kept", { $context: "cloud machine exempt from cleanup" })),
+          action: "allow",
+        }
+      : { text: resolve(msg("Kept · work could not be backed up")), action: null };
+  const text = removedIn(Date.parse(cleanup.at) - now, resolve);
+  return {
+    text:
+      cleanup.reason === "settled" ? resolve(msg("Settled · {removal}", { removal: text })) : text,
+    action: "keep",
+  };
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -42,9 +63,15 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 export function describeRestorable(
   restorableUntil: string | null | undefined,
   now: number,
+  resolve: MFunctionType = mFallback,
 ): string | null {
   if (!restorableUntil) return null;
   const until = new Date(restorableUntil);
   if (!(until.getTime() > now)) return null;
-  return `Restorable until ${MONTHS[until.getMonth()]} ${until.getDate()}`;
+  return resolve(
+    msg("Restorable until {month} {day}", {
+      month: MONTHS[until.getMonth()],
+      day: until.getDate(),
+    }),
+  );
 }

@@ -3,6 +3,7 @@ import { useNavigation } from "@react-navigation/native";
 import { offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import { useGT } from "gt-react-native";
 import { useState } from "react";
 import { ActivityIndicator, Alert, Pressable, View } from "react-native";
 
@@ -33,6 +34,7 @@ export function ProvisionedEnvironmentRows(props: {
   readonly managerId: EnvironmentId;
   readonly managerLabel: string;
 }) {
+  const gt = useGT();
   const config = useAtomValue(serverEnvironment.configValueAtom(props.managerId));
   const supported = config?.environmentControl === true;
   const canCreate = offeredProvisionProviders(config).length > 0;
@@ -71,40 +73,45 @@ export function ProvisionedEnvironmentRows(props: {
     query.refresh();
   }
   const resumeEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
-    act(environment, "Resuming…", async () => {
+    act(environment, gt("Resuming…"), async () => {
       const result = await resume({
         environmentId: managerId,
         input: { environmentId: environment.environmentId },
       });
-      if (result._tag === "Failure") return "The host could not resume this machine. Try again.";
+      if (result._tag === "Failure")
+        return gt("The host could not resume this machine. Try again.");
       return result.value.kind === "resumed" ? null : result.value.message;
     });
   const keepEnvironment = (environment: DiscoveredProvisionedEnvironment, kept: boolean) =>
-    act(environment, kept ? "Keeping…" : "Allowing cleanup…", async () => {
+    act(environment, kept ? gt("Keeping…") : gt("Allowing cleanup…"), async () => {
       const result = await keep({
         environmentId: managerId,
         input: { requestId: environment.requestId, keep: kept },
       });
-      if (result._tag === "Failure") return "The host could not update this machine. Try again.";
+      if (result._tag === "Failure")
+        return gt("The host could not update this machine. Try again.");
       return result.value.kind === "updated" ? null : result.value.message;
     });
   const deleteEnvironment = (environment: DiscoveredProvisionedEnvironment, title: string) =>
     Alert.alert(
-      "Delete this cloud machine?",
-      `This stops the machine for "${title}" and ends any running work. A chat's machine can be restored here for 30 days. The chat's history stays.`,
+      gt("Delete this cloud machine?"),
+      gt(
+        "This stops the machine for \"{title}\" and ends any running work. A chat's machine can be restored here for 30 days. The chat's history stays.",
+        { title },
+      ),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: gt("Cancel"), style: "cancel" },
         {
-          text: "Delete",
+          text: gt("Delete", { $context: "button, deletes a cloud machine" }),
           style: "destructive",
           onPress: () =>
-            void act(environment, "Deleting…", async () => {
+            void act(environment, gt("Deleting…"), async () => {
               const result = await dispose({
                 environmentId: managerId,
                 input: { requestId: environment.requestId },
               });
               if (result._tag === "Failure" || result.value.kind !== "disposed")
-                return "The host could not delete this machine. Try again.";
+                return gt("The host could not delete this machine. Try again.");
               // A machine that can be restored keeps its chat's lease, so a restore brings both back.
               if (environment.threadId !== null && result.value.restorableUntil === undefined)
                 provisionedSandboxLeases.forget(
@@ -116,12 +123,13 @@ export function ProvisionedEnvironmentRows(props: {
       ],
     );
   const restoreEnvironment = (environment: DiscoveredProvisionedEnvironment) =>
-    act(environment, "Restoring…", async () => {
+    act(environment, gt("Restoring…"), async () => {
       const result = await restore({
         environmentId: managerId,
         input: { leaseId: environment.leaseId },
       });
-      if (result._tag === "Failure") return "The host could not restore this machine. Try again.";
+      if (result._tag === "Failure")
+        return gt("The host could not restore this machine. Try again.");
       return result.value.kind === "restored" ? null : result.value.message;
     });
 
@@ -133,13 +141,13 @@ export function ProvisionedEnvironmentRows(props: {
           className="min-w-0 flex-1 text-sm font-t3-bold uppercase text-foreground-muted"
           numberOfLines={1}
         >
-          Cloud machines · {props.managerLabel}
+          {gt("Cloud machines · {managerLabel}", { managerLabel: props.managerLabel })}
         </Text>
         <View className="flex-row items-center gap-2">
           {canCreate ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="New cloud chat"
+              accessibilityLabel={gt("New cloud chat")}
               onPress={() =>
                 navigation.navigate("NewTaskCloudMachine", {
                   environmentId: String(props.managerId),
@@ -157,7 +165,7 @@ export function ProvisionedEnvironmentRows(props: {
           ) : null}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Refresh cloud machines"
+            accessibilityLabel={gt("Refresh cloud machines")}
             disabled={query.isPending}
             onPress={query.refresh}
             className="h-9 w-9 items-center justify-center rounded-full bg-subtle active:opacity-70 disabled:opacity-50"
@@ -178,14 +186,15 @@ export function ProvisionedEnvironmentRows(props: {
       {query.error ? (
         <View collapsable={false} className="rounded-[24px] bg-card p-5">
           <Text className="text-sm text-foreground-muted">
-            Cloud machines could not be loaded. Refresh to try again.
+            {gt("Cloud machines could not be loaded. Refresh to try again.")}
           </Text>
         </View>
       ) : rows.length === 0 ? (
         <View collapsable={false} className="rounded-[24px] bg-card p-5">
           <Text className="text-sm text-foreground-muted">
-            No cloud machines yet. Start a cloud chat and its machine keeps running after you close
-            the app.
+            {gt(
+              "No cloud machines yet. Start a cloud chat and its machine keeps running after you close the app.",
+            )}
           </Text>
         </View>
       ) : (
@@ -217,6 +226,7 @@ function ProvisionedEnvironmentRowView(props: {
   readonly onDelete: (title: string) => void;
   readonly onRestore: () => void;
 }) {
+  const gt = useGT();
   const { environment } = props;
   const threadRef =
     environment.threadId === null
@@ -235,19 +245,29 @@ function ProvisionedEnvironmentRowView(props: {
   });
   const working = props.action.kind === "working";
   const buttons = [
-    ...(environment.lifecycle === "paused" ? [{ label: "Resume", onPress: props.onResume }] : []),
+    ...(environment.lifecycle === "paused"
+      ? [
+          {
+            label: gt("Resume", { $context: "button, wakes a paused cloud machine" }),
+            onPress: props.onResume,
+          },
+        ]
+      : []),
     ...(presentation.cleanupAction === null
       ? []
       : [
           {
-            label: presentation.cleanupAction === "keep" ? "Keep" : "Allow cleanup",
+            label:
+              presentation.cleanupAction === "keep"
+                ? gt("Keep", { $context: "button, keeps a cloud machine from automatic cleanup" })
+                : gt("Allow cleanup"),
             onPress: () => props.onKeep(presentation.cleanupAction === "keep"),
           },
         ]),
     ...(thread !== null && threadRef !== null
       ? [
           {
-            label: "Open chat",
+            label: gt("Open chat"),
             onPress: () =>
               selectDetail({
                 name: "Thread",
@@ -259,10 +279,22 @@ function ProvisionedEnvironmentRowView(props: {
           },
         ]
       : []),
-    ...(presentation.restorable ? [{ label: "Restore", onPress: props.onRestore }] : []),
+    ...(presentation.restorable
+      ? [
+          {
+            label: gt("Restore", { $context: "button, restores a deleted cloud machine" }),
+            onPress: props.onRestore,
+          },
+        ]
+      : []),
     ...(environment.lifecycle === "disposed"
       ? []
-      : [{ label: "Delete", onPress: () => props.onDelete(presentation.title) }]),
+      : [
+          {
+            label: gt("Delete", { $context: "button, deletes a cloud machine" }),
+            onPress: () => props.onDelete(presentation.title),
+          },
+        ]),
   ];
   return (
     <View

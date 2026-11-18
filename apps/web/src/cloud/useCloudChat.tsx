@@ -35,6 +35,7 @@ import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitation
 import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@t3tools/shared/model";
 import { truncate } from "@t3tools/shared/String";
 import { AsyncResult } from "effect/reactivity";
+import { msg, T, useGT } from "gt-react";
 import { SendIcon } from "lucide-react";
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -51,6 +52,7 @@ import {
   collectUserMessageBlobPreviewUrls,
 } from "../components/ChatView.logic";
 import { Button } from "../components/ui/button";
+import { m } from "../i18n/messages";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { collapseExpandedComposerCursor, type ComposerSubmissionIntent } from "../composer-logic";
 import {
@@ -326,6 +328,7 @@ export function useCloudChat(input: {
     directAnnotation?: DirectAnnotation,
   ) => Promise<void>;
 }) {
+  const gt = useGT();
   const {
     draftId,
     threadId,
@@ -436,8 +439,10 @@ export function useCloudChat(input: {
     const label = cloudEnvironmentLabel(provider);
     toastManager.add({
       type: "info",
-      title: `${label} selected`,
-      description: `Your ${label} environment will start when you send the first message.`,
+      title: m(msg("{label} selected", { label })),
+      description: m(
+        msg("Your {label} environment will start when you send the first message.", { label }),
+      ),
     });
   };
   // While a cloud environment is pending, the branch picker chooses the branch it clones. The
@@ -779,7 +784,8 @@ export function useCloudChat(input: {
     const error = squashAtomCommandFailure(connected);
     return {
       kind: "failed",
-      message: error instanceof Error ? error.message : "The environment could not reconnect.",
+      message:
+        error instanceof Error ? error.message : m(msg("The environment could not reconnect.")),
     };
   };
   const sendReconnected = (pendingSend: ReconnectedSend) => {
@@ -792,13 +798,19 @@ export function useCloudChat(input: {
   const notifyReconnectSendAbandoned = () => {
     toastManager.add({
       type: "info",
-      title: "Message not sent",
-      description: "You left the chat before it reconnected. The message is still in its composer.",
+      title: m(msg("Message not sent")),
+      description: m(
+        msg("You left the chat before it reconnected. The message is still in its composer."),
+      ),
     });
   };
   const notifyReconnectSendFailed = (message: string) => {
     toastManager.add(
-      stackedThreadToast({ type: "error", title: "Message not sent", description: message }),
+      stackedThreadToast({
+        type: "error",
+        title: m(msg("Message not sent")),
+        description: message,
+      }),
     );
   };
   const reconnect = useReconnectSend<ReconnectedSend>({
@@ -818,10 +830,10 @@ export function useCloudChat(input: {
           id: `pending-send:${input.routeThreadKey}`,
           variant: "info",
           icon: <SendIcon />,
-          title: "Your message sends once this chat reconnects",
+          title: gt("Your message sends once this chat reconnects"),
           actions: (
             <Button size="xs" variant="ghost" onClick={cancelReconnectSend}>
-              Cancel send
+              <T>Cancel send</T>
             </Button>
           ),
         },
@@ -933,8 +945,8 @@ export function useCloudChat(input: {
     if (!claimed) {
       toastManager.add({
         type: "warning",
-        title: "Cloud chat started, but its lease could not be claimed.",
-        description: "Stop the cloud machine from the thread menu after reconnecting.",
+        title: m(msg("Cloud chat started, but its lease could not be claimed.")),
+        description: m(msg("Stop the cloud machine from the thread menu after reconnecting.")),
       });
     }
   };

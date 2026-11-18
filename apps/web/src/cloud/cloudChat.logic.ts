@@ -7,7 +7,9 @@ import {
   type RepositoryIdentity,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { msg } from "gt-react";
 
+import { m, type MessageResolver } from "../i18n/messages";
 import type { PendingCloudEnvironmentSend } from "./pendingCloudSendSchema";
 
 /**
@@ -98,7 +100,7 @@ export function isInProgressCloudProvisioningPhase(
   return phase === "creating" || phase === "pairing" || phase === "loading-project";
 }
 
-export function pendingCloudSendPreview(text: string): string {
+export function pendingCloudSendPreview(text: string, resolve: MessageResolver = m): string {
   const line = text.trim().split("\n", 1)[0] ?? "";
-  return line.length > 0 ? line : "Preparing environment";
+  return line.length > 0 ? line : resolve(msg("Preparing environment"));
 }

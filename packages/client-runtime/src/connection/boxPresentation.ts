@@ -1,4 +1,6 @@
 import type { CloudMachineKind, CloudMachineState } from "@t3tools/contracts";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 import { cloudProviderVendor } from "../cloud/provisioning.ts";
 import { workspaceMissingError } from "./boxErrors.ts";
@@ -56,8 +58,6 @@ const PROVIDER_BY_MACHINE: Record<CloudMachineKind, string> = {
   mac: "Namespace",
 };
 
-const BOX_TITLE_NAME = BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME.slice(1);
-
 /**
  * The banner for a cloud chat whose machine is waking or updating, with the time that machine
  * really takes: an E2B sandbox resumes in seconds, a Namespace Devbox boots, and a Namespace Mac is
@@ -67,62 +67,75 @@ const BOX_TITLE_NAME = BOX_STATUS_NAME.charAt(0).toUpperCase() + BOX_STATUS_NAME
 export function cloudWakeNotice(
   state: Exclude<CloudMachineStatus, "asleep">,
   cloudMachine: CloudMachine | null | undefined,
+  resolve: MFunctionType = mFallback,
 ): { readonly title: string; readonly description: string; readonly eta: string | null } {
   const machine = cloudMachine?.machine;
   if (state === "unavailable") {
     const provider = cloudMachine?.provider
       ? cloudProviderVendor(cloudMachine.provider)
       : machine === undefined
-        ? "The cloud provider"
+        ? resolve(msg("The cloud provider"))
         : PROVIDER_BY_MACHINE[machine];
     const failure = cloudMachine?.providerFailure;
     // @effect-diagnostics-next-line globalDate:off - the host's ISO time, said in local time.
     const lastTried = failure && new Date(failure.at);
     const time = lastTried?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const retrying = `Retrying on its own${time ? `, last tried at ${time}` : ""}.`;
+    const retrying = time
+      ? resolve(msg("Retrying on its own, last tried at {time}.", { time }))
+      : resolve(msg("Retrying on its own."));
+    const eta = resolve(msg("retrying", { $context: "cloud machine start status" }));
     // Only a failure the provider answered with is said to be on its side; a timeout may not be.
     return failure?.cause === "provider-unreachable"
       ? {
-          title: `Couldn't reach ${provider} yet`,
-          description: `It didn't answer when asked to start ${BOX_STATUS_NAME}. ${retrying}`,
-          eta: "retrying",
+          title: resolve(msg("Couldn't reach {provider} yet", { provider })),
+          description: resolve(
+            msg("It didn't answer when asked to start this chat's cloud machine. {retrying}", {
+              retrying,
+            }),
+          ),
+          eta,
         }
       : {
-          title: `${provider} couldn't start ${BOX_STATUS_NAME} yet`,
-          description: `The problem is on their side. ${retrying}`,
-          eta: "retrying",
+          title: resolve(
+            msg("{provider} couldn't start this chat's cloud machine yet", { provider }),
+          ),
+          description: resolve(msg("The problem is on their side. {retrying}", { retrying })),
+          eta,
         };
   }
   if (state === "updating")
     return {
-      title: `${BOX_TITLE_NAME} is updating`,
-      description:
-        "It moves to the latest version, then reconnects on its own. This usually takes a few minutes.",
-      eta: "a few minutes",
+      title: resolve(msg("This chat's cloud machine is updating")),
+      description: resolve(
+        msg(
+          "It moves to the latest version, then reconnects on its own. This usually takes a few minutes.",
+        ),
+      ),
+      eta: resolve(msg("a few minutes")),
     };
   switch (machine) {
     case "sandbox":
       return {
-        title: `${BOX_TITLE_NAME} is waking up`,
-        description: "This usually takes about 10 seconds.",
-        eta: "about 10 seconds",
+        title: resolve(msg("This chat's cloud machine is waking up")),
+        description: resolve(msg("This usually takes about 10 seconds.")),
+        eta: resolve(msg("about 10 seconds")),
       };
     case "mac":
       return {
-        title: "Restoring this chat's Mac",
-        description: "This takes about 2 minutes. It reconnects on its own.",
-        eta: "about 2 minutes",
+        title: resolve(msg("Restoring this chat's Mac")),
+        description: resolve(msg("This takes about 2 minutes. It reconnects on its own.")),
+        eta: resolve(msg("about 2 minutes")),
       };
     case "devbox":
       return {
-        title: `${BOX_TITLE_NAME} is starting`,
-        description: "This usually takes a minute or two.",
-        eta: "a minute or two",
+        title: resolve(msg("This chat's cloud machine is starting")),
+        description: resolve(msg("This usually takes a minute or two.")),
+        eta: resolve(msg("a minute or two")),
       };
     case undefined:
       return {
-        title: `${BOX_TITLE_NAME} is waking up`,
-        description: "It reconnects on its own.",
+        title: resolve(msg("This chat's cloud machine is waking up")),
+        description: resolve(msg("It reconnects on its own.")),
         eta: null,
       };
   }

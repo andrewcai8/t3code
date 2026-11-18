@@ -1,5 +1,6 @@
 import { cloudEnvironmentLabel, offeredProvisionProviders } from "@t3tools/client-runtime/cloud";
 import type { EnvironmentId, ProvisionProvider } from "@t3tools/contracts";
+import { useGT, useMessages } from "gt-react-native";
 import { type ReactNode, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 
@@ -31,6 +32,8 @@ export function NewCloudMachineForm(props: {
   readonly initialRepository?: string;
   readonly creation: ReturnType<typeof useCreateCloudMachine>;
 }) {
+  const gt = useGT();
+  const m = useMessages();
   const projects = useProjects();
   const serverConfig = useEnvironmentServerConfig(props.managerId);
   const repositories = useMemo(
@@ -56,21 +59,23 @@ export function NewCloudMachineForm(props: {
     provider: selectedProvider,
     account: selectedAccount,
   };
-  const blockReason = cloudMachineBlockReason(selection);
+  const blockReason = cloudMachineBlockReason(selection, m);
   const { state, create, dismissError } = props.creation;
   const working = state.kind === "working";
 
   return (
     <>
       <Text className="px-5 pb-3 text-sm text-foreground-muted">
-        {props.managerLabel} starts the machine and this device joins it. It keeps running when this
-        app is closed.
+        {gt(
+          "{managerLabel} starts the machine and this device joins it. It keeps running when this app is closed.",
+          { managerLabel: props.managerLabel },
+        )}
       </Text>
 
       <ScrollView className="flex-1" contentContainerClassName="gap-5 px-5 pb-8">
-        <Section title="Repository">
+        <Section title={gt("Repository")}>
           {repositories.length === 0 ? (
-            <Empty text="No project on this manager has a git remote to clone." />
+            <Empty text={gt("No project on this manager has a git remote to clone.")} />
           ) : (
             repositories.map((option, index) => (
               <Choice
@@ -86,12 +91,12 @@ export function NewCloudMachineForm(props: {
           )}
         </Section>
 
-        <Section title="Run on">
+        <Section title={gt("Run on")}>
           {providers.map((candidate, index) => (
             <Choice
               key={candidate}
               title={cloudEnvironmentLabel(candidate)}
-              subtitle={CLOUD_MACHINE_PLATFORMS[candidate]}
+              subtitle={m(CLOUD_MACHINE_PLATFORMS[candidate])}
               selected={selectedProvider === candidate}
               borderTop={index !== 0}
               disabled={working}
@@ -100,16 +105,20 @@ export function NewCloudMachineForm(props: {
           ))}
         </Section>
 
-        <Section title="Account">
+        <Section
+          title={gt("Account", {
+            $context: "section title, the provider account an agent signs in as",
+          })}
+        >
           {accounts.length === 0 ? (
-            <Empty text="No provider account on this manager is ready to run an agent." />
+            <Empty text={gt("No provider account on this manager is ready to run an agent.")} />
           ) : (
             accounts.map((option, index) => (
               <Choice
                 key={option.instanceId}
                 title={option.label}
-                {...(cloudMachineAccountDetail(option)
-                  ? { subtitle: cloudMachineAccountDetail(option) as string }
+                {...(cloudMachineAccountDetail(option, m)
+                  ? { subtitle: cloudMachineAccountDetail(option, m) as string }
                   : {})}
                 selected={selectedAccount?.instanceId === option.instanceId}
                 borderTop={index !== 0}
@@ -123,7 +132,7 @@ export function NewCloudMachineForm(props: {
         {state.kind === "failed" ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Dismiss error"
+            accessibilityLabel={gt("Dismiss error")}
             onPress={dismissError}
             className="rounded-[20px] bg-card p-4"
           >
@@ -137,7 +146,7 @@ export function NewCloudMachineForm(props: {
           <View className="flex-row items-center gap-3">
             <ActivityIndicator colorClassName="accent-icon" size="small" />
             <Text className="flex-1 text-sm text-foreground-muted">
-              {createCloudMachineProgressText(state.phase, selectedProvider)}
+              {createCloudMachineProgressText(state.phase, selectedProvider, m)}
             </Text>
           </View>
         ) : blockReason !== null ? (
@@ -145,7 +154,7 @@ export function NewCloudMachineForm(props: {
         ) : null}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Create cloud machine"
+          accessibilityLabel={gt("Create cloud machine")}
           disabled={working || blockReason !== null}
           onPress={() => {
             if (
@@ -163,7 +172,7 @@ export function NewCloudMachineForm(props: {
           className="min-h-12 items-center justify-center rounded-full bg-primary active:opacity-80 disabled:opacity-50"
         >
           <Text className="text-base font-t3-bold text-primary-foreground">
-            {working ? "Starting…" : "Create machine"}
+            {working ? gt("Starting…") : gt("Create machine")}
           </Text>
         </Pressable>
       </View>

@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
+import { useGT } from "gt-react-native";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
@@ -17,6 +18,7 @@ export function CloudComputeControls({
   managerLabel: string;
   onStarted: (id: EnvironmentId) => boolean;
 }) {
+  const gt = useGT();
   const supported =
     useAtomValue(serverEnvironment.configValueAtom(managerId))?.environmentControl === true;
   const query = useEnvironmentQuery(
@@ -37,11 +39,13 @@ export function CloudComputeControls({
         input: { environmentId },
       });
       if (AsyncResult.isFailure(result))
-        setMessage("Compute command failed. Refresh to check the provider state.");
+        setMessage(gt("Compute command failed. Refresh to check the provider state."));
       else if (result.value.kind === "refused") setMessage(result.value.message);
       else if (action === "start" && !onStarted(environmentId))
         setMessage(
-          "Started. Choose this environment in T3 Connect or pair with it to connect this device.",
+          gt(
+            "Started. Choose this environment in T3 Connect or pair with it to connect this device.",
+          ),
         );
     } finally {
       setPending(null);
@@ -52,7 +56,7 @@ export function CloudComputeControls({
     <View className="mt-4 gap-3 rounded-[24px] bg-card p-4">
       <View className="flex-row items-center justify-between gap-2">
         <Text className="flex-1 text-xs text-foreground-muted">
-          Cloud compute managed by {managerLabel}
+          {gt("Cloud compute managed by {managerLabel}", { managerLabel })}
         </Text>
         <Pressable
           accessibilityRole="button"
@@ -60,12 +64,12 @@ export function CloudComputeControls({
           onPress={query.refresh}
           className="p-2"
         >
-          <Text className="text-sm text-foreground">Refresh</Text>
+          <Text className="text-sm text-foreground">{gt("Refresh")}</Text>
         </Pressable>
       </View>
       {query.error ? (
         <Text className="text-xs text-foreground-muted">
-          Cloud controls unavailable. The manager must be connected and configured.
+          {gt("Cloud controls unavailable. The manager must be connected and configured.")}
         </Text>
       ) : null}
       {query.data?.map((environment) => (
@@ -76,10 +80,12 @@ export function CloudComputeControls({
           <View className="flex-1">
             <Text className="text-sm text-foreground">{environment.label}</Text>
             <Text className="text-xs text-foreground-muted">
-              Compute:{" "}
-              {environment.state.kind === "unavailable"
-                ? environment.state.message
-                : environment.state.kind}
+              {gt("Compute: {state}", {
+                state:
+                  environment.state.kind === "unavailable"
+                    ? environment.state.message
+                    : environment.state.kind,
+              })}
             </Text>
           </View>
           <Pressable
@@ -95,10 +101,10 @@ export function CloudComputeControls({
           >
             <Text className="text-sm text-foreground">
               {pending === environment.environmentId
-                ? "Working…"
+                ? gt("Working…")
                 : environment.state.kind === "running"
-                  ? "Stop"
-                  : "Start"}
+                  ? gt("Stop", { $context: "verb, stops a cloud machine" })
+                  : gt("Start", { $context: "verb, starts a cloud machine" })}
             </Text>
           </Pressable>
         </View>

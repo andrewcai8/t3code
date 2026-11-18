@@ -8,9 +8,11 @@ import type {
   EnvironmentProvisionUpgradeResult,
   ServerSelfUpdateCapability,
 } from "@t3tools/contracts";
+import { msg } from "gt-react";
 
 import type { ServerUpdateOutcome } from "../components/ServerUpdateAction";
 import { toastManager } from "../components/ui/toast";
+import { m, type MessageResolver } from "../i18n/messages";
 import { serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import { provisionedSandboxOwnedByEnvironment } from "./provisionedSandboxLeases";
@@ -68,9 +70,10 @@ export function isRemoteServerUpdate(target: {
 export function guestServerUpdateLabel(
   environmentId: EnvironmentId,
   selfUpdate: ServerSelfUpdateCapability | null,
+  resolve: MessageResolver = m,
 ): string | null {
   return resolveEnvironmentServerUpdatePath(environmentId, selfUpdate).kind === "manager-upgrade"
-    ? "Update via manager"
+    ? resolve(msg("Update via manager"))
     : null;
 }
 
@@ -83,20 +86,24 @@ export interface UpgradeResultToast {
 export function describeUpgradeResult(
   result: EnvironmentProvisionUpgradeResult,
   serverLabel: string,
+  resolve: MessageResolver = m,
 ): UpgradeResultToast {
   switch (result.kind) {
     case "upgraded":
       return {
         type: "success",
-        title: `${serverLabel} updated`,
-        description: `Now on ${result.t3Revision.slice(0, 7)}`,
+        title: resolve(msg("{serverLabel} updated", { serverLabel })),
+        description: resolve(msg("Now on {revision}", { revision: result.t3Revision.slice(0, 7) })),
       };
     case "current":
-      return { type: "info", title: `${serverLabel} is already on the manager's build` };
+      return {
+        type: "info",
+        title: resolve(msg("{serverLabel} is already on the manager's build", { serverLabel })),
+      };
     case "refused":
       return {
         type: "error",
-        title: `${serverLabel} update refused`,
+        title: resolve(msg("{serverLabel} update refused", { serverLabel })),
         description: result.message,
       };
   }

@@ -1,5 +1,6 @@
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
+import { useGT } from "gt-react-native";
 import { useCallback, useEffect, useRef } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -49,6 +50,7 @@ function NewTaskCloudMachine({
   repository,
   branch,
 }: NewTaskCloudMachineRouteParams) {
+  const gt = useGT();
   const managerId = EnvironmentId.make(environmentId);
   const navigation = useNavigation();
   const selectDetail = useSelectWorkspaceDetail();
@@ -95,7 +97,10 @@ function NewTaskCloudMachine({
     <View className="flex-1 bg-sheet" style={{ paddingBottom: insets.bottom }}>
       <NewCloudMachineForm
         managerId={managerId}
-        managerLabel={manager?.environmentLabel ?? "The host"}
+        managerLabel={
+          manager?.environmentLabel ??
+          gt("The host", { $context: "fallback name for the server that starts a cloud machine" })
+        }
         {...(repository ? { initialRepository: repository } : {})}
         creation={creation}
       />

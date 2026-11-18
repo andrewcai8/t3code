@@ -2574,6 +2574,7 @@ it.layer(
           PORT: "5173",
           T3CODE_PORT: "3773",
           T3CODE_HOME: "/home/user/.t3",
+          T3CODE_THREAD_ID: "server-thread",
           VITE_DEV_SERVER_URL: "http://localhost:5173",
           TEST_TERMINAL_KEEP: "keep-me",
           TMUX: "/tmp/tmux-1000/default,1234,0",
@@ -2583,7 +2584,12 @@ it.layer(
         },
       });
       yield* manager.open(openInput());
-      yield* manager.open(openInput({ terminalId: "explicit", env: { TMUX_PANE: "%9" } }));
+      yield* manager.open(
+        openInput({
+          terminalId: "explicit",
+          env: { TMUX_PANE: "%9", T3CODE_THREAD_ID: "client-thread" },
+        }),
+      );
       const spawnInput = ptyAdapter.spawnInputs[0];
       expect(spawnInput).toBeDefined();
       if (!spawnInput) return;
@@ -2592,6 +2598,8 @@ it.layer(
       expect(spawnInput.env.T3CODE_PORT).toBeUndefined();
       // The bun shim takes T3CODE_HOME to mean an agent, never a person at a terminal.
       expect(spawnInput.env.T3CODE_HOME).toBeUndefined();
+      expect(spawnInput.env.T3CODE_THREAD_ID).toBe("thread-1");
+      expect(ptyAdapter.spawnInputs[1]?.env.T3CODE_THREAD_ID).toBe("thread-1");
       expect(spawnInput.env.VITE_DEV_SERVER_URL).toBeUndefined();
       expect(spawnInput.env.TEST_TERMINAL_KEEP).toBe("keep-me");
       expect(spawnInput.env.TMUX).toBeUndefined();

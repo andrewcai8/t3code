@@ -12,9 +12,11 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
+import { msg } from "gt-react";
 
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { environmentCatalog } from "../connection/catalog";
+import { m } from "../i18n/messages";
 import { readLocalApi } from "../localApi";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readThreadShell } from "../state/entities";
@@ -67,7 +69,7 @@ export function useCloudThreadActions() {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Cloud workspace remains running",
+          title: m(msg("Cloud workspace remains running")),
           description: result.value.message,
         }),
       );
@@ -75,8 +77,8 @@ export function useCloudThreadActions() {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Could not pause cloud workspace",
-          description: "Retry when the cloud manager is reachable.",
+          title: m(msg("Could not pause cloud workspace")),
+          description: m(msg("Retry when the cloud manager is reachable.")),
         }),
       );
     }
@@ -91,7 +93,7 @@ export function useCloudThreadActions() {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Thread deleted, but its cloud machine is still running.",
+          title: m(msg("Thread deleted, but its cloud machine is still running.")),
           description: value.message,
         }),
       );
@@ -101,8 +103,8 @@ export function useCloudThreadActions() {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Thread deleted, but its cloud machine is still running.",
-          description: "Retry deleting the thread after the cloud manager is reachable.",
+          title: m(msg("Thread deleted, but its cloud machine is still running.")),
+          description: m(msg("Retry deleting the thread after the cloud manager is reachable.")),
         }),
       );
     }
@@ -133,10 +135,10 @@ export function useCloudThreadActions() {
         toastManager.add(
           stackedThreadToast({
             type: "success",
-            title: "Deleted on this device",
-            description: "It will be removed from the machine if it reconnects.",
+            title: m(msg("Deleted on this device")),
+            description: m(msg("It will be removed from the machine if it reconnects.")),
             actionProps: {
-              children: "Undo",
+              children: m(msg("Undo")),
               onClick: () => setThreadLifecycleOverlay(appAtomRegistry, target, pendingOverlay),
             },
           }),
@@ -162,9 +164,15 @@ export function useCloudThreadActions() {
     const confirmed = await settlePromise(() =>
       api.dialogs.confirm(
         [
-          `Stop the cloud machine for "${thread?.title ?? "this thread"}"?`,
-          "This permanently stops the cloud machine and ends any running work.",
-          "The thread and conversation will remain.",
+          m(
+            msg('Stop the cloud machine for "{title}"?', {
+              title:
+                thread?.title ??
+                m(msg("this thread", { $context: "fallback name inside a confirmation question" })),
+            }),
+          ),
+          m(msg("This permanently stops the cloud machine and ends any running work.")),
+          m(msg("The thread and conversation will remain.")),
         ].join("\n"),
         { variant: "destructive" },
       ),
@@ -174,8 +182,8 @@ export function useCloudThreadActions() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not confirm cloud machine stop",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: m(msg("Could not confirm cloud machine stop")),
+          description: error instanceof Error ? error.message : m(msg("An error occurred.")),
         }),
       );
       return;
@@ -187,19 +195,19 @@ export function useCloudThreadActions() {
     if (result._tag === "Success" && result.value.kind === "disposed") {
       toastManager.add({
         type: "success",
-        title: "Cloud machine stopped",
-        description: "The thread remains, but its cloud workspace has been released.",
+        title: m(msg("Cloud machine stopped")),
+        description: m(msg("The thread remains, but its cloud workspace has been released.")),
       });
       return;
     }
     const description =
       result._tag === "Success" && result.value.kind === "refused"
         ? result.value.message
-        : "Retry after the cloud manager is reachable.";
+        : m(msg("Retry after the cloud manager is reachable."));
     toastManager.add(
       stackedThreadToast({
         type: "warning",
-        title: "Could not stop cloud machine",
+        title: m(msg("Could not stop cloud machine")),
         description,
       }),
     );

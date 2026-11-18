@@ -27,6 +27,16 @@ vi.mock("~/hooks/useSettings", () => ({
     selector: (settings: { continueThreadsAfterServerUpdate: boolean }) => unknown,
   ) => selector({ continueThreadsAfterServerUpdate: false }),
 }));
+// The component runs as a plain function here, outside any GT provider.
+vi.mock("gt-react", async (importOriginal) => {
+  const original = await importOriginal<typeof import("gt-react")>();
+  const english = (message: string, variables: Record<string, unknown> = {}) => {
+    const decoded = original.decodeOptions(message);
+    const source = typeof decoded?.$_source === "string" ? decoded.$_source : message;
+    return original.gtFallback(source, { ...(decoded ?? variables), $locale: "en" });
+  };
+  return { ...original, useGT: () => english, useMessages: () => english };
+});
 vi.mock("~/state/server", () => ({
   serverEnvironment: testState.commands,
 }));

@@ -1,3 +1,6 @@
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
+
 import type { DraftProvisionRequest } from "./provisionRequests.ts";
 import {
   type CloudProvisionDraft,
@@ -28,7 +31,10 @@ export interface CloudSendDriverPorts extends Pick<CloudProvisionPorts, "request
  * draft. Everything it needs survives a reload, so a page loading a draft mid-setup resumes it, and
  * one page running both a send and a resume joins them into one drive.
  */
-export function createCloudSendDriver(ports: CloudSendDriverPorts) {
+export function createCloudSendDriver(
+  ports: CloudSendDriverPorts,
+  resolve: MFunctionType = mFallback,
+) {
   const { requests } = ports;
   const drives = new Map<
     string,
@@ -47,6 +53,7 @@ export function createCloudSendDriver(ports: CloudSendDriverPorts) {
         ...ports.host(request),
         onPhase: (phase) => ports.record(draftId, { kind: "progress", phase }),
       },
+      resolve,
     ).then((result) => {
       if (drives.get(draftId)?.requestId === requestId) drives.delete(draftId);
       // A request cancelled and replaced leaves the draft to the replacement's drive.
@@ -69,7 +76,10 @@ export function createCloudSendDriver(ports: CloudSendDriverPorts) {
     } catch (error) {
       const failed = {
         kind: "failed",
-        message: error instanceof Error ? error.message : "Could not prepare the environment.",
+        message:
+          error instanceof Error
+            ? error.message
+            : resolve(msg("Could not prepare the environment.")),
       } as const;
       ports.record(draft.draftId, failed);
       return Promise.resolve(failed);
@@ -86,7 +96,9 @@ export function createCloudSendDriver(ports: CloudSendDriverPorts) {
     if (request !== null) return drive(draftId, request);
     const stopped = {
       kind: "failed",
-      message: "Setup stopped before the environment was ready. Send again to start it.",
+      message: resolve(
+        msg("Setup stopped before the environment was ready. Send again to start it."),
+      ),
     } as const;
     ports.record(draftId, stopped);
     return Promise.resolve(stopped);
