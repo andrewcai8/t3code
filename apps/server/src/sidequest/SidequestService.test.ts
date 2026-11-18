@@ -10,6 +10,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
@@ -514,13 +515,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SidequestService
             const sidequest = yield* SidequestService.SidequestService;
             yield* sidequest.connect;
             yield* sidequest.fetchAd({ threadId, runId });
-            world.routes.set(`POST /api/impression/${impressionId}`, () => ({ status: 500 }));
-            const failing = yield* Effect.forkChild(sidequest.reportImpression({ impressionId }), {
-              startImmediately: true,
+            // The first attempt follows real file I/O, so advance the clock only after each attempt.
+            const attempts = yield* Queue.unbounded<void>();
+            world.routes.set(`POST /api/impression/${impressionId}`, () => {
+              Queue.offerUnsafe(attempts, undefined);
+              return { status: 500 };
             });
-            yield* TestClock.adjust("10 seconds");
-            yield* TestClock.adjust("10 seconds");
-            yield* TestClock.adjust("10 seconds");
+            const failing = yield* Effect.forkChild(sidequest.reportImpression({ impressionId }));
+            for (let retry = 0; retry < 3; retry++) {
+              yield* Queue.take(attempts);
+              yield* TestClock.adjust("10 seconds");
+            }
             yield* Fiber.join(failing);
             expect(impressionRequests(world)).toHaveLength(4);
 
