@@ -689,7 +689,9 @@ const verify = Effect.fn("verifyBoxReconnect")(function* (options: Options) {
       for (const route of entry ? connectionRoutes(entry) : []) {
         if (!("connectionId" in route.target)) continue;
         const credential = yield* credentials.get(route.target.connectionId);
-        if (Option.isSome(credential)) return credential.value.token;
+        if (Option.isSome(credential) && credential.value._tag === "BearerConnectionCredential") {
+          return credential.value.token;
+        }
       }
       return null;
     });
