@@ -53,6 +53,7 @@ import {
 } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
 import { requestThreadMessageJump } from "../threads/threadMessageJump";
+import { useCanShareWithGuest } from "../threads/useCanShareWithGuest";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
@@ -293,6 +294,7 @@ export function CommandPalette(props: {
     useAtomValue(serverEnvironment.prepareTriage.permissionAtom(triageEnvironmentId)) &&
     triageEnvironmentId !== null &&
     serverConfigs.get(triageEnvironmentId)?.environment.capabilities.triage === true;
+  const canShareWithGuest = useCanShareWithGuest(activeThreadRef?.environmentId ?? null);
   const contentMatchByKey = new Map(
     search.matches
       .filter((match) => match.source === "user" || match.source === "assistant")
@@ -403,6 +405,15 @@ export function CommandPalette(props: {
           run: () => runCommand(command),
         })),
       );
+      if (canShareWithGuest) {
+        actions.push({
+          key: "shareWithGuest",
+          kind: "action",
+          title: gt("Share with guest"),
+          searchTerms: ["share", "guest", "invite", "link", "teammate"],
+          run: () => navigation.navigate("ThreadGuestShare", activeThreadRef),
+        });
+      }
     }
     const openProjects = projects.filter((project) => project.archivedAt == null);
     const projectItems: CommandPaletteItem[] = [
@@ -469,6 +480,7 @@ export function CommandPalette(props: {
     activeThreadRef,
     environments.length,
     canTriage,
+    canShareWithGuest,
     navigation,
     newThreadInProject,
     projects,
