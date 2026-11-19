@@ -48,8 +48,9 @@ import {
 } from "./GitVcsDriverCore.ts";
 import * as CheckoutCloner from "./CheckoutCloner.ts";
 import {
+  checkpointScratchFreeBytes,
   checkpointScratchRoot,
-  isOutOfSpace,
+  MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
   sweepCheckpointScratch,
 } from "./checkpointScratch.ts";
 import * as CheckpointUntrackedBlobs from "./checkpointUntrackedBlobs.ts";
@@ -633,6 +634,8 @@ const HEAD_MARK_TRAILER_PATTERN = new RegExp(`^${HEAD_MARK_TRAILER}: (\\d+) (\\d
 export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (options?: {
   /** Directory for throwaway checkpoint indexes, or null for the git dir. Defaults to the host tmpfs. */
   readonly checkpointScratchDir?: string | null;
+  /** Free bytes on the scratch dir's filesystem; defaults to statfs. */
+  readonly checkpointScratchFreeBytes?: (dir: string) => Effect.Effect<number>;
 }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1130,7 +1133,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const indexName = `t3-checkpoint-index-${indexId}`;
       const gitIndexPath = path.join(gitCommonDir, indexName);
       // Nothing in the index outlives the capture, so it lives in memory when the host has a
-      // tmpfs that is ours and writable.
+      // tmpfs that is ours, writable and has room to spare. Git cannot be rerun after a full
+      // tmpfs, so the room is checked up front.
       const memoryIndexDir =
         checkpointScratchDir === null
           ? undefined
@@ -1143,7 +1147,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               if (hostUserId !== undefined && Option.isSome(uid) && uid.value !== hostUserId)
                 return undefined;
               yield* fileSystem.access(checkpointScratchDir, { writable: true });
-              return checkpointScratchDir;
+              const freeBytes = yield* (
+                options?.checkpointScratchFreeBytes ?? checkpointScratchFreeBytes
+              )(checkpointScratchDir);
+              return freeBytes >= MIN_CHECKPOINT_SCRATCH_FREE_BYTES
+                ? checkpointScratchDir
+                : undefined;
             }).pipe(Effect.orElseSucceed(() => undefined));
       const hostEnv = yield* HostProcess.Environment;
       // VcsProcess clears inherited object selectors, so every other command uses this store.
@@ -1173,8 +1182,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             ),
           ),
       );
-      // Mutable so a full tmpfs can fall back to the disk without rebuilding the capture below.
-      let tempIndexPath =
+      const tempIndexPath =
         memoryIndexDir === undefined ? gitIndexPath : path.join(memoryIndexDir, indexName);
       const commitEnv: NodeJS.ProcessEnv = {
         GIT_INDEX_FILE: tempIndexPath,
@@ -1191,15 +1199,13 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
       };
 
-      const cleanupTempIndex = Effect.suspend(() =>
-        Effect.forEach(
-          [tempIndexPath, `${tempIndexPath}.lock`],
-          (indexFile) => fileSystem.remove(indexFile, { force: true }).pipe(Effect.ignore),
-          { discard: true },
-        ),
+      const cleanupTempIndex = Effect.forEach(
+        [tempIndexPath, `${tempIndexPath}.lock`],
+        (indexFile) => fileSystem.remove(indexFile, { force: true }).pipe(Effect.ignore),
+        { discard: true },
       );
 
-      const capture = Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const sparseConfig = yield* execute({
           operation,
           cwd: input.cwd,
@@ -1812,18 +1818,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
         }
       }).pipe(Effect.ensuring(cleanupTempIndex));
-      // A full tmpfs is not the capture's failure: run it again with the index on the disk.
-      yield* capture.pipe(
-        Effect.catchIf(
-          (error) => tempIndexPath !== gitIndexPath && isOutOfSpace(error),
-          () =>
-            Effect.suspend(() => {
-              tempIndexPath = gitIndexPath;
-              commitEnv.GIT_INDEX_FILE = gitIndexPath;
-              return capture;
-            }),
-        ),
-      );
 
       // The tree records only each submodule's HEAD, so submodules keep their own ref.
       const hasSubmodules =

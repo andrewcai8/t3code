@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - clears a crashed server's scratch synchronously before the driver exists.
+import * as Effect from "effect/Effect";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -33,16 +34,14 @@ export const sweepCheckpointScratch = (root: string, ownPid: number) => {
   }
 };
 
-/** A Git or filesystem failure that means the device is full, however deeply it is wrapped. */
-export const isOutOfSpace = (error: unknown, depth = 0): boolean => {
-  if (typeof error !== "object" || error === null || depth > 4) return false;
-  const { code, message, detail, cause, reason } = error as Record<string, unknown>;
-  return (
-    code === "ENOSPC" ||
-    [message, detail].some(
-      (text) => typeof text === "string" && text.includes("No space left on device"),
-    ) ||
-    isOutOfSpace(cause, depth + 1) ||
-    isOutOfSpace(reason, depth + 1)
+/** A capture's index is a few megabytes; a margin this size leaves room for every capture in flight. */
+export const MIN_CHECKPOINT_SCRATCH_FREE_BYTES = 256 * 1024 * 1024;
+
+/** Free bytes on the filesystem holding `dir`; 0 when it cannot be read, which keeps the index on disk. */
+export const checkpointScratchFreeBytes = (dir: string) =>
+  Effect.promise(() =>
+    NodeFS.promises.statfs(dir).then(
+      (stats) => stats.bavail * stats.bsize,
+      () => 0,
+    ),
   );
-};

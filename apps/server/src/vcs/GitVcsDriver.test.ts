@@ -27,6 +27,7 @@ import { gitCommandDuration, gitCommandsTotal } from "../observability/Metrics.t
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import { MIN_CHECKPOINT_SCRATCH_FREE_BYTES } from "./checkpointScratch.ts";
 import type * as VcsDriver from "./VcsDriver.ts";
 import * as VcsDriverRegistry from "./VcsDriverRegistry.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -803,7 +804,7 @@ it.effect.skipIf(!symlinksSupported)(
           },
         }),
       );
-      const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      const driver = yield* GitVcsDriver.makeVcsDriverShape({ checkpointScratchDir: null }).pipe(
         Effect.provideService(VcsProcess.VcsProcess, captureProcess),
       );
       const sandbox = yield* fileSystem.makeTempDirectoryScoped({
@@ -1714,25 +1715,28 @@ const captureRecordingGitCommands = Effect.fn("test.captureRecordingGitCommands"
   checkpointRef: CheckpointRef,
   options?: {
     readonly scratchDir?: string | null;
-    /** Receives the GIT_INDEX_FILE of each `git add`; one that returns an error fails that add. */
-    readonly onAdd?: (indexFile: string) => VcsProcessExitError | undefined;
+    readonly scratchFreeBytes?: number;
+    /** Collects the directory of every GIT_INDEX_FILE git was run with. */
+    readonly indexDirs?: Set<string>;
   },
 ) {
+  const path = yield* Path.Path;
   const liveProcess = yield* VcsProcess.VcsProcess;
   const commands: Array<string | undefined> = [];
-  const driver = yield* GitVcsDriver.makeVcsDriverShape(
-    options?.scratchDir === undefined ? undefined : { checkpointScratchDir: options.scratchDir },
-  ).pipe(
+  const driver = yield* GitVcsDriver.makeVcsDriverShape({
+    ...(options?.scratchDir === undefined ? {} : { checkpointScratchDir: options.scratchDir }),
+    checkpointScratchFreeBytes: () =>
+      Effect.succeed(options?.scratchFreeBytes ?? MIN_CHECKPOINT_SCRATCH_FREE_BYTES),
+  }).pipe(
     Effect.provideService(VcsProcess.VcsProcess, {
       run: (input) => {
         let index = 0;
         while (input.args[index] === "-C" || input.args[index] === "-c") index += 2;
         commands.push(input.args[index]);
-        const failure =
-          input.args[index] === "add"
-            ? options?.onAdd?.(input.env?.GIT_INDEX_FILE ?? "")
-            : undefined;
-        return failure === undefined ? liveProcess.run(input) : Effect.fail(failure);
+        if (input.env?.GIT_INDEX_FILE !== undefined) {
+          options?.indexDirs?.add(path.dirname(input.env.GIT_INDEX_FILE));
+        }
+        return liveProcess.run(input);
       },
     }),
   );
@@ -1847,13 +1851,33 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
 );
 
 it.effect.each([
-  { name: "a scratch dir", where: "scratch", scratch: "dir", full: false },
-  { name: "a scratch dir that is full", where: "git", scratch: "dir", full: true },
-  { name: "a scratch dir that cannot be made", where: "git", scratch: "blocked", full: false },
-  { name: "no scratch dir", where: "git", scratch: "none", full: false },
+  {
+    name: "a scratch dir with room",
+    where: "scratch",
+    scratch: "dir",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
+  },
+  {
+    name: "a scratch dir with too little room",
+    where: "git",
+    scratch: "dir",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES - 1,
+  },
+  {
+    name: "a scratch dir that cannot be made",
+    where: "git",
+    scratch: "blocked",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
+  },
+  {
+    name: "no scratch dir",
+    where: "git",
+    scratch: "none",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
+  },
 ] as const)(
-  "checkpoint capture keeps its index in the scratch dir, else the git dir ($name)",
-  ({ where, scratch, full }) =>
+  "checkpoint capture keeps its index in the scratch dir only when it is usable and has room ($name)",
+  ({ where, scratch, free }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -1866,30 +1890,17 @@ it.effect.each([
       const scratchDir =
         scratch === "dir" ? root : scratch === "blocked" ? path.join(blocker, "x") : null;
       const gitDir = path.join(cwd, ".git");
-      const addedWith: Array<string> = [];
 
+      const indexDirs = new Set<string>();
       yield* captureRecordingGitCommands(cwd, checkpointRef, {
         scratchDir,
-        onAdd: (indexFile) => {
-          addedWith.push(path.dirname(indexFile));
-          return full && path.dirname(indexFile) === root
-            ? new VcsProcessExitError({
-                operation: "test",
-                command: "git add",
-                cwd,
-                exitCode: 128,
-                detail: "fatal: unable to write new index file: No space left on device",
-              })
-            : undefined;
-        },
+        scratchFreeBytes: free,
+        indexDirs,
       });
 
-      // Staging retries once itself after a failed add, so a run of adds on one dir counts once.
       assert.deepStrictEqual(
-        [...new Set(addedWith)],
-        full
-          ? [root, yield* fileSystem.realPath(gitDir)]
-          : [where === "scratch" ? root : yield* fileSystem.realPath(gitDir)],
+        [...indexDirs],
+        [where === "scratch" ? root : yield* fileSystem.realPath(gitDir)],
       );
       assert.strictEqual((yield* git(["show", `${checkpointRef}:file.txt`])).stdout, "unstaged\n");
       assert.deepStrictEqual(
