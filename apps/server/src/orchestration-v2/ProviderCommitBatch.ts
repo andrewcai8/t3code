@@ -19,6 +19,12 @@ export const enabled = Config.Boolean("T3CODE_PROVIDER_COMMIT_BATCHING").pipe(
   Config.withDefault(true),
   Effect.orDie,
 );
+// Snapshots arriving this soon after the first ready one share its transaction.
+const LINGER_MILLIS = 100;
+const lingerMillis = Config.Int("T3CODE_PROVIDER_COMMIT_LINGER_MS").pipe(
+  Config.withDefault(LINGER_MILLIS),
+  Effect.orDie,
+);
 
 type Snapshot =
   | { readonly type: "node.updated"; readonly node: { readonly threadId: string } }
@@ -66,8 +72,8 @@ interface Batch {
   readonly reason: "ready" | "limit";
 }
 
-function collect(queue: Queue.Queue<Job>) {
-  return Stream.fromEffectRepeat(Queue.takeBetween(queue, 1, MAX_EVENTS)).pipe(
+function collect(take: Effect.Effect<ReadonlyArray<Job>>) {
+  return Stream.fromEffectRepeat(take).pipe(
     Stream.flatMap((ready) => {
       const batches: Array<Batch> = [];
       let events: Array<Job> = [];
@@ -104,10 +110,38 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
   ) => Effect.Effect<void, CommitBatchError> = (work) => work,
 ) {
   const queue = yield* Queue.bounded<Job>(MAX_EVENTS);
+  const lingerFor = yield* lingerMillis;
   const pending = new Set<Job>();
   let closed = false;
   // Writes in `barrier` that have not finished; they wait on the batch or the writer it holds.
   let waitingWriters = 0;
+  // Writes in `barrier` that wait on a queued snapshot; they end the linger.
+  let blockedWriters = 0;
+  let linger: Deferred.Deferred<void> | undefined;
+  // While the worker lingers, `pending` holds exactly the jobs the next batch can take.
+  const lingerOver = () => {
+    let bytes = 0;
+    for (const job of pending) bytes += job.bytes;
+    return blockedWriters > 0 || pending.size >= MAX_EVENTS || bytes >= MAX_BYTES;
+  };
+  const endLingerIfOver = () => {
+    if (linger !== undefined && lingerOver()) Deferred.doneUnsafe(linger, Effect.void);
+  };
+  const takeLingering = Effect.gen(function* () {
+    const ready = yield* Queue.takeBetween(queue, 1, MAX_EVENTS);
+    if (lingerFor <= 0 || lingerOver()) return ready;
+    linger = yield* Deferred.make<void>();
+    yield* Deferred.await(linger).pipe(
+      Effect.timeoutOption(lingerFor),
+      Effect.ensuring(
+        Effect.sync(() => {
+          linger = undefined;
+        }),
+      ),
+    );
+    if ((yield* Queue.size(queue)) === 0) return ready;
+    return [...ready, ...(yield* Queue.takeBetween(queue, 1, MAX_EVENTS - ready.length))];
+  });
   const shutdown = Effect.gen(function* () {
     closed = true;
     yield* Queue.shutdown(queue);
@@ -171,6 +205,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           Effect.onError(() => job.cancel),
         );
         if (!accepted) yield* job.cancel;
+        endLingerIfOver();
       }),
     );
     return Deferred.await(reply);
@@ -236,7 +271,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
       }),
     ).pipe(Effect.withSpan("orchestrationV2.ProviderCommitBatch.flush"));
   if (enabled) {
-    yield* collect(queue).pipe(
+    yield* collect(takeLingering).pipe(
       Stream.runForEach(
         Effect.fnUntraced(function* (batch: Batch) {
           let jobs = batch.events;
@@ -264,11 +299,16 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     if (!enabled || (yield* CurrentWorker) === (yield* Effect.fiberId)) return yield* effect;
     return yield* Effect.uninterruptibleMask((restore) => {
       waitingWriters++;
+      const blocking = Array.from(pending).filter(
+        (job) => threadIds === undefined || threadIds.includes(job.threadId),
+      );
+      if (blocking.length > 0) {
+        blockedWriters++;
+        endLingerIfOver();
+      }
       return restore(
         Effect.gen(function* () {
-          for (const job of Array.from(pending)) {
-            if (threadIds === undefined || threadIds.includes(job.threadId)) yield* job.settled;
-          }
+          for (const job of blocking) yield* job.settled;
           if (closed) return yield* Effect.interrupt;
           return yield* effect;
         }),
@@ -276,6 +316,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
         Effect.ensuring(
           Effect.sync(() => {
             waitingWriters--;
+            if (blocking.length > 0) blockedWriters--;
           }),
         ),
       );

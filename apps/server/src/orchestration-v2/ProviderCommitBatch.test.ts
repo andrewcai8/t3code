@@ -3,6 +3,7 @@ import { MessageId, ProviderDriverKind, ProviderTurnId, ThreadId } from "@t3tool
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Cause from "effect/Cause";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -36,6 +37,15 @@ function event(index: number, text = `delta:${index}`): ProviderAdapter.Provider
     },
   };
 }
+const make = (...args: Parameters<typeof ProviderCommitBatch.make>) =>
+  ProviderCommitBatch.make(...args).pipe(
+    Effect.provideService(
+      ConfigProvider.ConfigProvider,
+      ConfigProvider.fromUnknown({ T3CODE_PROVIDER_COMMIT_LINGER_MS: 100 }),
+    ),
+  );
+// The settling turn lets the batch worker start the linger before the clock passes it.
+const passLinger = TestClock.adjust(0).pipe(Effect.andThen(TestClock.adjust("100 millis")));
 const control: ProviderAdapter.ProviderAdapterV2Event = {
   type: "background_work.updated",
   driver,
@@ -48,7 +58,7 @@ const recordBatches = Effect.fn("test.recordProviderBatches")(function* (
 ) {
   const output = yield* Queue.unbounded<ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>>();
   let current: ProviderAdapter.ProviderAdapterV2Event[] = [];
-  const coordinator = yield* ProviderCommitBatch.make(
+  const coordinator = yield* make(
     (work) =>
       Effect.gen(function* () {
         yield* beforeCommit;
@@ -75,16 +85,18 @@ it.effect("publishes preceding snapshots before a control", () =>
       .consume(Stream.fromQueue(input), recorder.process, Effect.succeed(true))
       .pipe(Effect.forkScoped);
     yield* Queue.offer(input, event(1));
+    yield* passLinger;
     assert.deepEqual(yield* Queue.take(recorder.output), [event(1)]);
     yield* Queue.offer(input, event(2));
     yield* Queue.offer(input, control);
+    yield* passLinger;
     assert.deepEqual(yield* Queue.take(recorder.output), [event(2)]);
     assert.deepEqual(yield* Queue.take(recorder.output), [control]);
     yield* Fiber.join(consumer);
   }),
 );
 
-it.effect("publishes isolated snapshots without advancing the clock", () =>
+it.effect("holds an isolated snapshot for the linger, then publishes it alone", () =>
   Effect.gen(function* () {
     const recorder = yield* recordBatches();
     const input = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
@@ -100,6 +112,8 @@ it.effect("publishes isolated snapshots without advancing the clock", () =>
       yield* Queue.offer(input, raw);
       yield* Queue.take(pulled);
       yield* TestClock.adjust(0);
+      assert.equal((yield* Queue.poll(recorder.output))._tag, "None");
+      yield* passLinger;
       const published = yield* Queue.poll(recorder.output);
       assert.equal(published._tag, "Some");
       if (published._tag === "Some") assert.deepEqual(published.value, [raw]);
@@ -154,7 +168,7 @@ it.effect("bounds transactions by count and bytes, including the final partial g
 it.effect("keeps updates immediate and ordered when batching is disabled", () =>
   Effect.gen(function* () {
     const seen: ProviderAdapter.ProviderAdapterV2Event[] = [];
-    const coordinator = yield* ProviderCommitBatch.make(() => Effect.die("must not batch"), false);
+    const coordinator = yield* make(() => Effect.die("must not batch"), false);
     yield* coordinator.consume(
       Stream.make(event(1), control, event(2)),
       (raw) =>
@@ -233,7 +247,7 @@ it.effect("does not hold the shared worker while one consumer checks background 
   Effect.gen(function* () {
     const checking = yield* Deferred.make<void>();
     const release = yield* Deferred.make<void>();
-    const coordinator = yield* ProviderCommitBatch.make((work) => work, true);
+    const coordinator = yield* make((work) => work, true);
     const consumer = yield* coordinator
       .consume(
         Stream.make(control),
@@ -258,7 +272,7 @@ it.effect.each(["job", "commit"] as const)(
   "isolates a %s failure at its transaction boundary",
   (mode) =>
     Effect.gen(function* () {
-      const coordinator = yield* ProviderCommitBatch.make(
+      const coordinator = yield* make(
         (work) =>
           mode === "commit"
             ? work.pipe(
@@ -302,17 +316,19 @@ it.effect.each(["job", "commit"] as const)(
 it.effect("keeps a transaction failure when rolling back one failed snapshot", () =>
   Effect.gen(function* () {
     const transactionError = new ProviderCommitBatch.CommitBatchError({ cause: "ROLLBACK failed" });
-    const coordinator = yield* ProviderCommitBatch.make(
+    const coordinator = yield* make(
       (work) => work.pipe(Effect.mapError(() => transactionError)),
       true,
     );
-    const exit = yield* coordinator
+    const consumer = yield* coordinator
       .consume(
         Stream.concat(Stream.make(event(1)), Stream.never),
         () => Effect.fail("invalid snapshot"),
         Effect.succeed(false),
       )
-      .pipe(Effect.exit);
+      .pipe(Effect.exit, Effect.forkScoped);
+    yield* passLinger;
+    const exit = yield* Fiber.join(consumer);
     assert.isTrue(Exit.isFailure(exit));
     if (Exit.isFailure(exit)) assert.strictEqual(Cause.squash(exit.cause), transactionError);
   }),
@@ -322,7 +338,7 @@ it.effect(
   "allows a command holding the thread lock to commit while a provider control waits for it",
   () =>
     Effect.gen(function* () {
-      const coordinator = yield* ProviderCommitBatch.make((work) => work, true);
+      const coordinator = yield* make((work) => work, true);
       const locks = yield* KeyedLock.make<ThreadId>();
       const threadId = ThreadId.make("locked-thread");
       const held = yield* Deferred.make<void>();
@@ -374,6 +390,7 @@ it.effect.each([false, true])(
       const leading = yield* recorder
         .consume(Stream.make(event(-1)), recorder.process, Effect.succeed(false))
         .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* passLinger;
       yield* Deferred.await(started);
       const pulled = yield* Deferred.make<void>();
       let arrivals = 0;
@@ -395,6 +412,7 @@ it.effect.each([false, true])(
       if (cancel) yield* Fiber.interrupt(consumers[0]!);
       assert.equal(yield* Queue.size(recorder.output), 0);
       yield* Deferred.succeed(release, undefined);
+      yield* passLinger;
       yield* Fiber.join(leading);
       yield* Effect.forEach(consumers.slice(cancel ? 1 : 0), Fiber.join);
       assert.deepEqual(yield* Queue.takeAll(recorder.output), [
@@ -422,6 +440,7 @@ it.effect.each(["none", "writer", "snapshots"] as const)(
       const leading = yield* recorder
         .consume(Stream.make(event(-1)), recorder.process, Effect.succeed(false))
         .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* passLinger;
       yield* Deferred.await(started);
       yield* recorder.consume(Stream.make(control), recorder.process, Effect.succeed(true));
       assert.deepEqual(yield* Queue.takeAll(recorder.output), [[control]]);
@@ -451,6 +470,7 @@ it.effect.each(["none", "writer", "snapshots"] as const)(
         .pipe(Effect.forkScoped({ startImmediately: true }));
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(leading);
+      yield* passLinger;
       yield* Fiber.join(slow);
       yield* Deferred.succeed(writerFree, undefined);
       yield* Fiber.join(write);
@@ -468,12 +488,12 @@ it.effect.each(["failure", "stop"] as const)(
   (mode) =>
     Effect.gen(function* () {
       const seen: ProviderAdapter.ProviderAdapterV2Event[] = [];
-      const coordinator = yield* ProviderCommitBatch.make((work) => work, true);
+      const coordinator = yield* make((work) => work, true);
       const source =
         mode === "failure"
           ? Stream.concat(Stream.make(event(1), event(2)), Stream.fail("provider failed"))
           : Stream.make(event(1), control, event(2));
-      const exit = yield* coordinator
+      const consumer = yield* coordinator
         .consume(
           source,
           (raw) =>
@@ -482,7 +502,9 @@ it.effect.each(["failure", "stop"] as const)(
             }),
           Effect.succeed(mode === "stop"),
         )
-        .pipe(Effect.exit);
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* passLinger;
+      const exit = yield* Fiber.join(consumer);
       assert.deepEqual(seen, mode === "failure" ? [event(1), event(2)] : [event(1), control]);
       assert.equal(Exit.isFailure(exit), mode === "failure");
       assert.equal(
@@ -522,10 +544,96 @@ it.effect("does not force a separate commit for every consumer that ends", () =>
 
 it.effect("settles calls made after the coordinator's scope closes", () =>
   Effect.gen(function* () {
-    const coordinator = yield* ProviderCommitBatch.make((work) => work, true).pipe(Effect.scoped);
+    const coordinator = yield* make((work) => work, true).pipe(Effect.scoped);
     const exit = yield* coordinator
       .barrier(Effect.die("must not execute after shutdown"))
       .pipe(Effect.exit);
     assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+  }),
+);
+
+it.effect("commits snapshots that arrive within the linger together, past an unrelated write", () =>
+  Effect.gen(function* () {
+    const recorder = yield* recordBatches();
+    const pulled = yield* Queue.unbounded<void>();
+    const inputs = yield* Effect.forEach([0, 1, 2], () =>
+      Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>(),
+    );
+    for (const input of inputs) {
+      yield* recorder
+        .consume(
+          Stream.fromQueue(input).pipe(Stream.tap(() => Queue.offer(pulled, undefined))),
+          recorder.process,
+          Effect.succeed(false),
+        )
+        .pipe(Effect.forkScoped);
+    }
+    const arrive = (index: number) =>
+      Queue.offer(inputs[index]!, event(index)).pipe(
+        Effect.andThen(Queue.take(pulled)),
+        Effect.andThen(TestClock.adjust(0)),
+      );
+    yield* arrive(0);
+    yield* TestClock.adjust("50 millis");
+    yield* arrive(1);
+    assert.equal(
+      yield* recorder.barrier(Effect.succeed("unrelated"), ["other-thread"]),
+      "unrelated",
+    );
+    yield* TestClock.adjust("49 millis");
+    yield* arrive(2);
+    assert.equal(yield* Queue.size(recorder.output), 0);
+    yield* TestClock.adjust("1 millis");
+    assert.deepEqual(yield* Queue.takeAll(recorder.output), [[event(0), event(1), event(2)]]);
+  }),
+);
+
+it.effect("commits a lingering snapshot at once for a write waiting on it", () =>
+  Effect.gen(function* () {
+    const recorder = yield* recordBatches();
+    const input = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+    const pulled = yield* Queue.unbounded<void>();
+    yield* recorder
+      .consume(
+        Stream.fromQueue(input).pipe(Stream.tap(() => Queue.offer(pulled, undefined))),
+        recorder.process,
+        Effect.succeed(false),
+      )
+      .pipe(Effect.forkScoped);
+    yield* Queue.offer(input, event(1));
+    yield* Queue.take(pulled);
+    yield* TestClock.adjust(0);
+    const write = yield* recorder
+      .barrier(Effect.succeed("sent"), ["single-thread"])
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* TestClock.adjust(0);
+    assert.deepEqual(write.pollUnsafe(), Exit.succeed("sent"));
+    assert.deepEqual(yield* Queue.takeAll(recorder.output), [[event(1)]]);
+  }),
+);
+
+it.effect("commits a full batch without waiting for the linger", () =>
+  Effect.gen(function* () {
+    const recorder = yield* recordBatches();
+    const events = Array.from({ length: 65 }, (_, index) => event(index));
+    const pulled = yield* Deferred.make<void>();
+    let arrivals = 0;
+    yield* recorder
+      .consume(
+        Stream.fromArray(events).pipe(
+          Stream.tap(() =>
+            ++arrivals === events.length ? Deferred.succeed(pulled, undefined) : Effect.void,
+          ),
+        ),
+        recorder.process,
+        Effect.succeed(false),
+      )
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* Deferred.await(pulled);
+    yield* TestClock.adjust(0);
+    assert.deepEqual(yield* Queue.takeAll(recorder.output), [events.slice(0, 64)]);
+    assert.equal(yield* Queue.size(recorder.output), 0);
+    yield* passLinger;
+    assert.deepEqual(yield* Queue.takeAll(recorder.output), [events.slice(64)]);
   }),
 );
