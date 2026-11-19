@@ -811,7 +811,11 @@ it.effect.each([
       status: terminalized ? "cancelled" : resent ? "starting" : "queued",
       startedAt: scenario === "starting-steered" ? startedAt : null,
     });
-    assert.isEmpty(command.effects);
+    // Only a queue the restart alone held resumes; a prompt the provider never took waits for its person.
+    assert.deepEqual(
+      command.effects.map((effect) => effect.request),
+      scenario === "queued" ? [{ type: "queue.release-restart-hold" }] : [],
+    );
     assert.deepEqual(
       written.map((effect) => effect.request),
       resent ? [{ type: "provider-turn.start", runId }] : [],

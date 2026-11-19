@@ -819,8 +819,10 @@ it.effect.each([3, 4])(
               turnItems: [],
               attempts: [],
             } as unknown as OrchestrationV2ThreadProjection),
-          dispatch: () =>
-            Ref.update(events, (entries) => [...entries, "dispatch"]).pipe(Effect.as({} as never)),
+          dispatch: (command) =>
+            Ref.update(events, (entries) => [...entries, command.type]).pipe(
+              Effect.as({} as never),
+            ),
           recoverDelegatedTask: () =>
             Ref.update(events, (entries) => [...entries, "recover-child"]),
         },
@@ -832,9 +834,12 @@ it.effect.each([3, 4])(
           request: { type: "provider-runtime.continue", sourceRunId: runId, processLossCount },
         });
       }).pipe(Effect.provide(layer));
+      // A run that keeps crashing the server leaves the queue the restart held for its person.
       assert.deepEqual(
         yield* Ref.get(events),
-        processLossCount > 3 ? ["recover-child"] : ["dispatch", "recover-child"],
+        processLossCount > 3
+          ? ["recover-child"]
+          : ["message.dispatch", "recover-child", "queue.release-restart-hold"],
       );
     }),
 );

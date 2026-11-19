@@ -686,12 +686,20 @@ export const make = Effect.gen(function* () {
         ...queuedRunsInDeliveryOrder({ runs: queuedRuns }),
       ];
       const reposition = retryableRuns.length > 0 || released.length > 0;
+      // The server resumes what only the restart held. A prompt the provider never took, or a
+      // queue a person already held (Stop, usage limit, failure), waits for the person.
+      const restartHold =
+        retryableRuns.length === 0 &&
+        !queuedRuns.some((run) => run.queueHeld === true && run.queueHoldReason !== "restart");
+      let restartHeldRuns = 0;
       for (const [index, run] of heldRuns.entries()) {
         if (bufferedMessageIds.has(run.userMessageId)) {
           runs.push(run);
           continue;
         }
+        if (restartHold) restartHeldRuns += 1;
         if (run.queueHeld === true && !reposition) continue;
+        const { queueHoldReason: _reason, ...unheld } = run;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -700,9 +708,10 @@ export const make = Effect.gen(function* () {
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
           payload: {
-            ...run,
+            ...unheld,
             status: "queued",
             queueHeld: true,
+            ...(restartHold ? { queueHoldReason: "restart" as const } : {}),
             ...(reposition ? { queuePosition: index + 1 } : {}),
           },
         });
@@ -1133,6 +1142,7 @@ export const make = Effect.gen(function* () {
         if (Option.isSome(previous) && previous.value.request.type === "provider-runtime.continue")
           processLossCount += previous.value.request.processLossCount ?? 0;
       }
+      // Without a turn to continue, the queue the restart held runs on its own.
       const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
         ? [
             {
@@ -1146,7 +1156,16 @@ export const make = Effect.gen(function* () {
               },
             },
           ]
-        : [];
+        : continueAfterRestart && trigger === "startup" && restartHeldRuns > 0
+          ? [
+              {
+                id: `effect:restart-hold-release:${commandId}`,
+                commandId,
+                threadId: projection.thread.id,
+                request: { type: "queue.release-restart-hold" },
+              },
+            ]
+          : [];
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
@@ -1171,6 +1190,18 @@ export const make = Effect.gen(function* () {
           );
         cancelledEffectIds = retiredEffectIds;
         retiredEffects = retiredEffectIds.length;
+        if (effects.length > 0) {
+          yield* eventSink.writeWithEffects({ events: [], effects }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderRuntimeRecoveryError({
+                  operation: "reconcile",
+                  threadId: projection.thread.id,
+                  cause,
+                }),
+            ),
+          );
+        }
       } else {
         const result = yield* eventSink
           .commitCommand({
