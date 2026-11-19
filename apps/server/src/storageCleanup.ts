@@ -599,6 +599,7 @@ const make = Effect.gen(function* () {
     serverSettings: ServerSettings,
     entries: StorageCleanupReportEntry[],
     scratchRoot: string | null,
+    trigger: StorageCleanupReport["trigger"],
   ) {
     const orphanAfterDays = serverSettings.storageCleanup.orphanWorktreeAfterDays;
     const orphanRules = resolveWorktreeCleanup(serverSettings, null);
@@ -643,11 +644,8 @@ const make = Effect.gen(function* () {
       }
       return result;
     });
-    // Let the first walk time out and cache unmeasurable folders; later walks share the remaining budget.
     const now = yield* Clock.currentTimeMillis;
-    const measurementDeadline = now + 30_000;
-    let firstMeasurement = true;
-    const reported = new Set<string>();
+    const reported = new Map<string, { path: string; reason: string; linked: boolean }>();
     const report = Effect.fnUntraced(
       function* (worktreePath: string, scratch = false) {
         const key = pathKey(worktreePath);
@@ -662,54 +660,14 @@ const make = Effect.gen(function* () {
         if (modified !== null && modified.getTime() > now - ORPHAN_WORKTREE_GRACE_MS) return;
         const gitPath = path.join(worktreePath, ".git");
         const linked = (yield* fs.exists(gitPath)) && (yield* isLinkedWorktree(worktreePath));
-        reported.add(key);
-        const remaining = measurementDeadline - (yield* Clock.currentTimeMillis);
-        if (!orphanSizes.has(key) && (firstMeasurement || remaining > 0)) {
-          const measured = yield* measureWorktree(worktreePath).pipe(
-            firstMeasurement ? Effect.asSome : Effect.timeoutOption(remaining),
-          );
-          firstMeasurement = false;
-          if (Option.isSome(measured)) orphanSizes.set(key, measured.value.bytes);
-        }
-        const bytes = orphanSizes.get(key) ?? null;
-        const orphan: StorageCleanupReportEntry = {
-          kind: "worktree",
-          outcome: "kept",
+        reported.set(key, {
+          path: worktreePath,
+          linked,
           reason: linked
             ? "No thread uses this worktree"
             : scratch
               ? "No thread uses this folder"
               : "No thread uses this folder, and it isn't a git worktree",
-          path: worktreePath,
-          projectPath: null,
-          threadId: null,
-          threadTitle: null,
-          bytes,
-          files: null,
-        };
-        // Only linked worktrees are removed. A plain folder may hold anything.
-        if (!linked || orphanAfterDays === null) return void entries.push(orphan);
-        const result = yield* removeOrphanWorktree(
-          worktreePath,
-          orphanRules,
-          orphanAfterDays,
-          now,
-        ).pipe(
-          Effect.catch((error) =>
-            Effect.succeed({ outcome: "failed" as const, reason: cleanupFailureReason(error) }),
-          ),
-        );
-        if (result.outcome === "failed")
-          yield* Effect.logWarning("storage cleanup failed for orphan worktree", {
-            path: worktreePath,
-            reason: result.reason,
-          });
-        entries.push({
-          ...orphan,
-          outcome: result.outcome,
-          reason:
-            result.outcome === "kept" ? `${orphan.reason}, but ${result.reason}` : result.reason,
-          bytes: result.outcome === "failed" ? null : bytes,
         });
       },
       Effect.orElseSucceed(() => undefined),
@@ -753,6 +711,72 @@ const make = Effect.gen(function* () {
     }
     if (scratchRoot !== null)
       for (const folder of yield* directories(scratchRoot, null)) yield* report(folder, true);
+
+    // Discovery runs git probes, so the measurement budget starts after it.
+    const measurementDeadline = (yield* Clock.currentTimeMillis) + 30_000;
+    // Give the first new folder a full walk so every sweep can make progress.
+    let firstMeasurement = true;
+    const refresh = trigger === "manual" ? [...orphanSizes] : [];
+    for (const [key, { path }] of reported) {
+      if (orphanSizes.has(key)) continue;
+      const remaining = measurementDeadline - (yield* Clock.currentTimeMillis);
+      if (!firstMeasurement && remaining <= 0) break;
+      const measured = yield* measureWorktree(path).pipe(
+        firstMeasurement ? Effect.asSome : Effect.timeoutOption(remaining),
+      );
+      firstMeasurement = false;
+      if (Option.isSome(measured)) orphanSizes.set(key, measured.value.bytes);
+    }
+    for (const [key, bytes] of refresh) {
+      const orphan = reported.get(key);
+      if (orphan === undefined || bytes === null) continue;
+      const remaining = measurementDeadline - (yield* Clock.currentTimeMillis);
+      if (remaining <= 0) break;
+      const measured = yield* measureWorktree(orphan.path).pipe(Effect.timeoutOption(remaining));
+      // A slow or failed refresh moves to the end too, so it cannot starve the next orphan.
+      orphanSizes.delete(key);
+      orphanSizes.set(key, Option.getOrUndefined(measured)?.bytes ?? bytes);
+    }
+    for (const [key, { linked, ...found }] of reported) {
+      const bytes = orphanSizes.get(key) ?? null;
+      const orphan: StorageCleanupReportEntry = {
+        ...found,
+        kind: "worktree",
+        outcome: "kept",
+        projectPath: null,
+        threadId: null,
+        threadTitle: null,
+        bytes,
+        files: null,
+      };
+      // Only linked worktrees are removed. A plain folder may hold anything.
+      if (!linked || orphanAfterDays === null) {
+        entries.push(orphan);
+        continue;
+      }
+      const result = yield* removeOrphanWorktree(
+        found.path,
+        orphanRules,
+        orphanAfterDays,
+        now,
+      ).pipe(
+        Effect.catch((error) =>
+          Effect.succeed({ outcome: "failed" as const, reason: cleanupFailureReason(error) }),
+        ),
+      );
+      if (result.outcome === "failed")
+        yield* Effect.logWarning("storage cleanup failed for orphan worktree", {
+          path: found.path,
+          reason: result.reason,
+        });
+      entries.push({
+        ...orphan,
+        outcome: result.outcome,
+        reason:
+          result.outcome === "kept" ? `${orphan.reason}, but ${result.reason}` : result.reason,
+        bytes: result.outcome === "failed" ? null : bytes,
+      });
+    }
     for (const key of orphanSizes.keys()) {
       if (!reported.has(key)) orphanSizes.delete(key);
     }
@@ -1205,6 +1229,7 @@ const make = Effect.gen(function* () {
     serverSettings: ServerSettings,
     now: number,
     entries: StorageCleanupReportEntry[],
+    trigger: StorageCleanupReport["trigger"],
   ) {
     if (
       !anyWorktreePolicy(serverSettings, worktreeCleanupEnabled) &&
@@ -1778,6 +1803,7 @@ const make = Effect.gen(function* () {
       serverSettings,
       entries,
       scratchRoot,
+      trigger,
     );
     return { waiting, kept };
   });
@@ -1947,7 +1973,7 @@ const make = Effect.gen(function* () {
     yield* cleanCheckpointRefs().pipe(
       Effect.catch((cause) => Effect.logWarning("checkpoint ref cleanup failed", { cause })),
     );
-    const deletedWorktrees = yield* cleanWorktrees(serverSettings, now, entries).pipe(
+    const deletedWorktrees = yield* cleanWorktrees(serverSettings, now, entries, trigger).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           entries.push({
