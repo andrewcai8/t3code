@@ -742,6 +742,8 @@ export const OrchestrationV2Run = Schema.Struct({
   status: OrchestrationV2RunStatus,
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
   queueHeld: Schema.optional(Schema.Boolean),
+  /** Set when a server restart held the queue; the server resumes it. Other holds wait for a person. */
+  queueHoldReason: Schema.optional(Schema.Literal("restart")),
   steerWhenReadyRunId: Schema.optional(RunId),
   requestedAt: Schema.DateTimeUtc,
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -3656,6 +3658,12 @@ const OrchestrationV2InternalCommand = Schema.Union([
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
   }),
   /** Moves a thread to a project rooted at the folder it already works in, so its cwd never changes. */
+  /** Resumes the queued runs a server restart held, and starts the next one. */
+  Schema.Struct({
+    type: Schema.Literal("queue.release-restart-hold"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
   Schema.Struct({
     type: Schema.Literal("thread.project.adopt-folder"),
     commandId: CommandId,

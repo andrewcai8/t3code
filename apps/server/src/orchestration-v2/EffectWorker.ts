@@ -117,6 +117,13 @@ export const layerExecutor: Layer.Layer<
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const settings = yield* ServerSettings.ServerSettingsService;
+    // Keyed by the restart that held the queue, so a retry replays and the next restart releases anew.
+    const releaseRestartHold = (effect: EffectOutbox.OrchestrationEffectV2) =>
+      threads.dispatch({
+        type: "queue.release-restart-hold",
+        commandId: CommandId.make(`${effect.commandId}:release-restart-hold`),
+        threadId: effect.threadId,
+      });
     const startRun = (
       effect: EffectOutbox.OrchestrationEffectV2,
       runId: RunId,
@@ -167,6 +174,9 @@ export const layerExecutor: Layer.Layer<
                 ? {}
                 : { processLossCount: effect.request.processLossCount }),
             }).pipe(
+              Effect.flatMap((outcome) =>
+                outcome === "resume" ? releaseRestartHold(effect) : Effect.void,
+              ),
               Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
               Effect.provideService(ServerSettings.ServerSettingsService, settings),
               Effect.tapError(() =>
@@ -184,6 +194,17 @@ export const layerExecutor: Layer.Layer<
               ),
             );
           }
+          case "queue.release-restart-hold":
+            return releaseRestartHold(effect).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "provider-session.detach":
             return providerSessions
               .detach({

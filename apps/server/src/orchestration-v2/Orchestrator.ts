@@ -677,6 +677,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "queued-message.promote-to-steer":
     case "queued-run.start":
     case "queue.resume":
+    case "queue.release-restart-hold":
     case "queue.hold":
     case "queued-run.reorder":
     case "queued-run.cancel":
@@ -1010,6 +1011,17 @@ function worktreeSetupPending(
         run.workspacePreparation?.type === "worktree",
     )
   );
+}
+
+/** A hold placed here waits for a person, and a release clears the reason, so none inherits a restart's. */
+function heldRun(run: OrchestrationV2Run): OrchestrationV2Run {
+  const { queueHoldReason: _reason, ...rest } = run;
+  return { ...rest, queueHeld: true };
+}
+
+function releasedRun(run: OrchestrationV2Run): OrchestrationV2Run {
+  const { queueHoldReason: _reason, ...rest } = run;
+  return { ...rest, queueHeld: false };
 }
 
 function nextQueuedRun(
@@ -2647,7 +2659,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               runId: run.id,
               providerInstanceId: run.providerInstanceId,
               occurredAt: now,
-              payload: { ...run, queueHeld: true },
+              payload: heldRun(run),
             })),
         );
         return wakes.length > 0;
@@ -2847,7 +2859,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               runId: run.id,
               providerInstanceId: run.providerInstanceId,
               occurredAt: now,
-              payload: { ...run, queueHeld: true },
+              payload: heldRun(run),
             })),
         );
         return;
@@ -3530,7 +3542,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId: run.id,
         providerInstanceId: run.providerInstanceId,
         occurredAt: now,
-        payload: { ...run, queueHeld: false },
+        payload: releasedRun(run),
       })),
     );
   });
@@ -7942,7 +7954,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId: held.id,
         providerInstanceId: held.providerInstanceId,
         occurredAt: releasedAt,
-        payload: { ...held, queueHeld: false },
+        payload: releasedRun(held),
       });
     }
     if (shouldQueue) {
@@ -8043,9 +8055,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   }),
               ),
             );
-      const queueIsHeld = projection.runs.some(
+      const heldQueue = projection.runs.filter(
         (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
       );
+      const queueIsHeld = heldQueue.length > 0;
       // Buffered wakes need a T3 run for output the CLI already started producing.
       // Stop still holds wakes that arrive before the active run settles.
       const wakeSkipsHold =
@@ -8097,14 +8110,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         status: "queued",
         ...(steerWhenReadyRunId === undefined ? {} : { steerWhenReadyRunId }),
         // A restart cancels its run; nobody knows whether the provider read the steer, so a person decides.
-        ...(worktreeMissingRun !== undefined ||
-        steerFollowUpSource?.status === "cancelled" ||
-        (heldRunsToRelease.length === 0 &&
-          queueIsHeld &&
-          !wakeSkipsHold &&
-          queuedRunStop?.skipsHeldQueue !== true)
+        ...(worktreeMissingRun !== undefined || steerFollowUpSource?.status === "cancelled"
           ? { queueHeld: true }
-          : {}),
+          : heldRunsToRelease.length === 0 &&
+              queueIsHeld &&
+              !wakeSkipsHold &&
+              queuedRunStop?.skipsHeldQueue !== true
+            ? // Behind a restart hold alone, it resumes with that queue.
+              heldQueue.every((held) => held.queueHoldReason === "restart")
+              ? { queueHeld: true, queueHoldReason: "restart" as const }
+              : { queueHeld: true }
+            : {}),
         queuePosition:
           queuedRunStop !== undefined
             ? 1
@@ -12246,7 +12262,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
   const loadProjectionForCommand = <K extends ProjectionRecordField>(
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) =>
@@ -12612,7 +12628,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId: run.id,
         providerInstanceId: run.providerInstanceId,
         occurredAt: now,
-        payload: { ...run, queueHeld: false },
+        payload: releasedRun(run),
       });
     }
   });
@@ -13183,14 +13199,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         continue;
       }
-      if (run.queueHeld === true) continue;
+      if (run.queueHeld === true && run.queueHoldReason === undefined) continue;
       yield* emitEvent({
         type: "run.updated",
         threadId: thread.id,
         runId: run.id,
         providerInstanceId: run.providerInstanceId,
         occurredAt: input.now,
-        payload: { ...run, queueHeld: true },
+        payload: heldRun(run),
       });
     }
     const pullRequests = thread.pullRequests ?? [];
@@ -15784,10 +15800,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             runId: run.id,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...run, queueHeld: false },
+            payload: releasedRun(run),
           });
         }
         if (queued.length === 0) {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "thread.metadata-updated",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: projection.thread,
+          });
+        }
+        break;
+      }
+      case "queue.release-restart-hold": {
+        const projection = yield* loadProjectionForCommand(command, ["runs"]);
+        const now = yield* DateTime.now;
+        const held = projection.runs.filter(
+          (run) =>
+            run.status === "queued" && run.queueHeld === true && run.queueHoldReason === "restart",
+        );
+        for (const run of held) {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run.updated",
+            threadId: command.threadId,
+            runId: run.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: releasedRun(run),
+          });
+        }
+        if (held.length === 0) {
           yield* emit(
             events,
             command,
@@ -15805,7 +15854,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // commits no queued run can start until the queue is resumed.
         const projection = yield* loadProjectionForCommand(command, ["runs"]);
         const now = yield* DateTime.now;
-        const unheld = projection.runs.filter((run) => run.status === "queued" && !run.queueHeld);
+        const unheld = projection.runs.filter(
+          (run) => run.status === "queued" && (!run.queueHeld || run.queueHoldReason !== undefined),
+        );
         for (const run of unheld) {
           yield* emit(
             events,
@@ -15816,7 +15867,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             runId: run.id,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...run, queueHeld: true },
+            payload: heldRun(run),
           });
         }
         if (unheld.length === 0) {
@@ -15940,10 +15991,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
       ),
     );
-    if (command.type === "queue.resume" || command.type === "queued-run.start") {
+    if (
+      command.type === "queue.resume" ||
+      command.type === "queued-run.start" ||
+      command.type === "queue.release-restart-hold"
+    ) {
       yield* mapDispatchError(command)(
         startNextQueuedRun(command.threadId, {
-          userStarted: true,
+          userStarted: command.type !== "queue.release-restart-hold",
           ...(command.type === "queued-run.start" ? { queuedRunId: command.runId } : {}),
         }),
       );
@@ -16195,11 +16250,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       command.type === "queue.resume" ||
       command.type === "queued-run.start" ||
+      command.type === "queue.release-restart-hold" ||
       (command.type === "thread.runtime-mode.set" && runtimeModeCeiling !== undefined)
     ) {
       yield* mapDispatchError(command)(
         startNextQueuedRun(command.threadId, {
-          userStarted: command.type !== "thread.runtime-mode.set",
+          userStarted: command.type === "queue.resume" || command.type === "queued-run.start",
           ...(command.type === "queued-run.start" ? { queuedRunId: command.runId } : {}),
         }),
       );

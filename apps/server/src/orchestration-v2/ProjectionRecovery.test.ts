@@ -210,7 +210,11 @@ it.effect.each(["startup", "shutdown"] as const)(
         assert.equal(projection.runs[0]?.status, "queued");
         assert.isTrue(projection.runs[0]?.queueHeld);
       }
-      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), []);
+      // A startup leaves each held queue an intent to resume it, which a later boot replays.
+      assert.deepEqual(
+        new Set(yield* projections.getRecoveryThreadIds("runtime")),
+        new Set(trigger === "startup" ? durableThreads : []),
+      );
     }).pipe(Effect.provide(layerRecoveryTest)),
 );
 

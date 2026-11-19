@@ -38,6 +38,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     sourceRunId: RunId,
     processLossCount: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   }),
+  Schema.Struct({ type: Schema.Literal("queue.release-restart-hold") }),
   Schema.Struct({
     type: Schema.Literal("provider-session.detach"),
     providerSessionId: ProviderSessionId,
@@ -141,6 +142,7 @@ export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.T
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "provider-runtime.continue",
+  "queue.release-restart-hold",
   "provider-session.detach",
   "provider-thread.rollback",
   "checkpoint.capture",

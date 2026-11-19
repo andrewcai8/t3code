@@ -363,7 +363,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -11045,7 +11045,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         for (const [index, run] of queued.entries()) {
           assert.deepEqual(
             held.runs.find((row) => row.id === run.id),
-            { ...run, queueHeld: true, ...(started ? {} : { queuePosition: index + 2 }) },
+            {
+              ...run,
+              queueHeld: true,
+              // A prompt the provider never took waits for its person, and so does the queue behind it.
+              ...(started ? { queueHoldReason: "restart" } : { queuePosition: index + 2 }),
+            },
           );
           assert.deepEqual(
             held.messages.find((row) => row.id === run.userMessageId),
@@ -11316,6 +11321,197 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         { ...textContinuation, queueHeld: false },
       );
     }),
+  );
+
+  // A restart cuts the active turn of a thread with queued messages, then the worker runs what
+  // its reconcile left.
+  const restartWithQueue = Effect.fn("restartWithQueue")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly resumable: boolean;
+    readonly beforeRestart?: Effect.Effect<void>;
+  }) {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+    const eventSink = yield* EventSink.EventSinkV2;
+    const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+    const { threadId } = input;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make(`${threadId}:create`),
+      threadId,
+      projectId: ProjectId.make(`${threadId}:project`),
+      title: "Restart with a queue",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: process.cwd(),
+    });
+    for (const key of ["active", "first", "second"]) {
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:${key}`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:${key}`),
+        text: key,
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: key === "active" ? "start_immediately" : "queue_after_active" },
+      });
+    }
+    const before = yield* orchestrator.getThreadProjection(threadId);
+    const source = before.runs[0]!;
+    const providerThread = before.providerThreads.find(
+      (candidate) => candidate.id === source.providerThreadId,
+    )!;
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(`${threadId}:running`),
+          type: "run.updated",
+          threadId,
+          runId: source.id,
+          occurredAt: now,
+          payload: { ...source, status: "running", startedAt: now },
+        },
+        {
+          id: EventId.make(`${threadId}:turn`),
+          type: "provider-turn.updated",
+          threadId,
+          runId: source.id,
+          occurredAt: now,
+          payload: {
+            id: ProviderTurnId.make(`${threadId}:turn`),
+            providerThreadId: providerThread.id,
+            nodeId: source.rootNodeId!,
+            runAttemptId: source.activeAttemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+        },
+        // The saved native thread a continuation resumes.
+        ...(input.resumable
+          ? [
+              {
+                id: EventId.make(`${threadId}:session`),
+                type: "provider-session.attached" as const,
+                threadId,
+                occurredAt: now,
+                payload: {
+                  id: providerThread.providerSessionId!,
+                  driver,
+                  providerInstanceId: modelSelection.instanceId,
+                  status: "running" as const,
+                  cwd: process.cwd(),
+                  model: modelSelection.model,
+                  capabilities: CodexProviderCapabilitiesV2,
+                  createdAt: now,
+                  updatedAt: now,
+                  lastError: null,
+                },
+              },
+              {
+                id: EventId.make(`${threadId}:native-thread`),
+                type: "provider-thread.updated" as const,
+                threadId,
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: {
+                  ...providerThread,
+                  status: "active" as const,
+                  nativeThreadRef: {
+                    driver,
+                    nativeId: `${threadId}:native`,
+                    strength: "strong" as const,
+                  },
+                },
+              },
+            ]
+          : []),
+      ],
+    });
+    if (input.beforeRestart !== undefined) yield* input.beforeRestart;
+    yield* recovery.reconcile("startup");
+    yield* worker.drain();
+    const after = yield* orchestrator.getThreadProjection(threadId);
+    return after.runs.map((run) => ({
+      message:
+        run.restartContinuationOfRunId === undefined
+          ? run.userMessageId.slice(threadId.length + 1)
+          : "continuation",
+      status: run.status,
+      queueHeld: run.queueHeld === true,
+    }));
+  });
+
+  it.effect.each([true, false])(
+    "runs a queue the restart held after its continuation, with a resumable turn: %s",
+    (resumable) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`restart-hold-resumes-${resumable}`);
+        const runs = yield* restartWithQueue({ threadId, resumable });
+        assert.deepEqual(
+          runs,
+          resumable
+            ? [
+                { message: "active", status: "cancelled", queueHeld: false },
+                { message: "first", status: "queued", queueHeld: false },
+                { message: "second", status: "queued", queueHeld: false },
+                { message: "continuation", status: "starting", queueHeld: false },
+              ]
+            : [
+                { message: "active", status: "cancelled", queueHeld: false },
+                { message: "first", status: "starting", queueHeld: false },
+                { message: "second", status: "queued", queueHeld: false },
+              ],
+        );
+      }),
+  );
+
+  it.effect.each(["a Stop", "continuation off"] as const)(
+    "keeps a queue held across a restart after %s",
+    (cause) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const threadId = ThreadId.make(`restart-hold-stays-${cause.replace(" ", "-")}`);
+        const runs = yield* restartWithQueue({
+          threadId,
+          resumable: true,
+          beforeRestart:
+            cause === "a Stop"
+              ? orchestrator
+                  .dispatch({
+                    type: "thread.stop",
+                    commandId: CommandId.make(`${threadId}:stop`),
+                    threadId,
+                  })
+                  .pipe(Effect.asVoid, Effect.orDie)
+              : settings
+                  .updateSettings({
+                    projectSettingsOverrides: {
+                      [`${threadId}:project`]: { continueThreadsAfterServerUpdate: false },
+                    },
+                  })
+                  .pipe(Effect.asVoid, Effect.orDie),
+        });
+        assert.deepEqual(
+          runs.filter((run) => run.status === "queued"),
+          [
+            { message: "first", status: "queued", queueHeld: true },
+            { message: "second", status: "queued", queueHeld: true },
+          ],
+        );
+      }),
   );
 
   it.effect("starts a provider wake queued behind a run that fails, holding the rest", () =>
