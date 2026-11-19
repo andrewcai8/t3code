@@ -47,6 +47,11 @@ import {
   splitNullSeparatedGitStdoutPaths,
 } from "./GitVcsDriverCore.ts";
 import * as CheckoutCloner from "./CheckoutCloner.ts";
+import {
+  checkpointScratchRoot,
+  isOutOfSpace,
+  sweepCheckpointScratch,
+} from "./checkpointScratch.ts";
 import * as CheckpointUntrackedBlobs from "./checkpointUntrackedBlobs.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -625,12 +630,23 @@ const HEAD_MOVES_SCAN_LIMIT = 512;
 const HEAD_MARK_TRAILER = "T3-Head-Moved-At";
 const HEAD_MARK_TRAILER_PATTERN = new RegExp(`^${HEAD_MARK_TRAILER}: (\\d+) (\\d+)$`, "m");
 
-export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* () {
+export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (options?: {
+  /** Directory for throwaway checkpoint indexes, or null for the git dir. Defaults to the host tmpfs. */
+  readonly checkpointScratchDir?: string | null;
+}) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const vcsProcess = yield* VcsProcess.VcsProcess;
   const random = yield* SecureRandom.SecureRandom;
   const hostPlatform = yield* HostProcess.Platform;
+  const hostUserId = yield* HostProcess.UserId;
+  const scratchRoot = checkpointScratchRoot(hostPlatform, hostUserId);
+  const checkpointScratchDir =
+    options?.checkpointScratchDir !== undefined
+      ? options.checkpointScratchDir
+      : scratchRoot === null
+        ? null
+        : path.join(scratchRoot, String(process.pid));
   // Returns stdout, or null when there is no work tree. A non-repository exits 128 like a broken
   // one, so only Git's message (pinned to the C locale) or a missing cwd tells them apart.
   const probeWorkTree = Effect.fn("GitVcsDriver.probeWorkTree")(function* (
@@ -1111,7 +1127,24 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           : undefined;
       const startedAt = yield* Clock.currentTimeMillis;
       const indexId = yield* random.uuidV4();
-      const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${indexId}`);
+      const indexName = `t3-checkpoint-index-${indexId}`;
+      const gitIndexPath = path.join(gitCommonDir, indexName);
+      // Nothing in the index outlives the capture, so it lives in memory when the host has a
+      // tmpfs that is ours and writable.
+      const memoryIndexDir =
+        checkpointScratchDir === null
+          ? undefined
+          : yield* Effect.gen(function* () {
+              yield* fileSystem.makeDirectory(checkpointScratchDir, {
+                recursive: true,
+                mode: 0o700,
+              });
+              const { uid } = yield* fileSystem.stat(checkpointScratchDir);
+              if (hostUserId !== undefined && Option.isSome(uid) && uid.value !== hostUserId)
+                return undefined;
+              yield* fileSystem.access(checkpointScratchDir, { writable: true });
+              return checkpointScratchDir;
+            }).pipe(Effect.orElseSucceed(() => undefined));
       const hostEnv = yield* HostProcess.Environment;
       // VcsProcess clears inherited object selectors, so every other command uses this store.
       const sharedObjects = path.join(gitCommonDir, "objects");
@@ -1140,6 +1173,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             ),
           ),
       );
+      // Mutable so a full tmpfs can fall back to the disk without rebuilding the capture below.
+      let tempIndexPath =
+        memoryIndexDir === undefined ? gitIndexPath : path.join(memoryIndexDir, indexName);
       const commitEnv: NodeJS.ProcessEnv = {
         GIT_INDEX_FILE: tempIndexPath,
         GIT_OBJECT_DIRECTORY: privateObjects,
@@ -1155,13 +1191,15 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
       };
 
-      const cleanupTempIndex = Effect.forEach(
-        [tempIndexPath, `${tempIndexPath}.lock`],
-        (indexFile) => fileSystem.remove(indexFile, { force: true }).pipe(Effect.ignore),
-        { discard: true },
+      const cleanupTempIndex = Effect.suspend(() =>
+        Effect.forEach(
+          [tempIndexPath, `${tempIndexPath}.lock`],
+          (indexFile) => fileSystem.remove(indexFile, { force: true }).pipe(Effect.ignore),
+          { discard: true },
+        ),
       );
 
-      yield* Effect.gen(function* () {
+      const capture = Effect.gen(function* () {
         const sparseConfig = yield* execute({
           operation,
           cwd: input.cwd,
@@ -1774,6 +1812,18 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
         }
       }).pipe(Effect.ensuring(cleanupTempIndex));
+      // A full tmpfs is not the capture's failure: run it again with the index on the disk.
+      yield* capture.pipe(
+        Effect.catchIf(
+          (error) => tempIndexPath !== gitIndexPath && isOutOfSpace(error),
+          () =>
+            Effect.suspend(() => {
+              tempIndexPath = gitIndexPath;
+              commitEnv.GIT_INDEX_FILE = gitIndexPath;
+              return capture;
+            }),
+        ),
+      );
 
       // The tree records only each submodule's HEAD, so submodules keep their own ref.
       const hasSubmodules =
@@ -2289,6 +2339,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
 });
 
 export const makeVcsDriver = Effect.gen(function* () {
+  const root = checkpointScratchRoot(yield* HostProcess.Platform, yield* HostProcess.UserId);
+  if (root !== null) yield* Effect.sync(() => sweepCheckpointScratch(root, process.pid));
   const driver = yield* makeVcsDriverShape();
   return VcsDriver.VcsDriver.of(driver);
 });
