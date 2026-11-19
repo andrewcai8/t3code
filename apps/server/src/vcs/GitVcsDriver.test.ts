@@ -27,6 +27,7 @@ import { gitCommandDuration, gitCommandsTotal } from "../observability/Metrics.t
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import { MIN_CHECKPOINT_SCRATCH_FREE_BYTES } from "./checkpointScratch.ts";
 import type * as VcsDriver from "./VcsDriver.ts";
 import * as VcsDriverRegistry from "./VcsDriverRegistry.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -803,7 +804,7 @@ it.effect.skipIf(!symlinksSupported)(
           },
         }),
       );
-      const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      const driver = yield* GitVcsDriver.makeVcsDriverShape({ checkpointScratchDir: null }).pipe(
         Effect.provideService(VcsProcess.VcsProcess, captureProcess),
       );
       const sandbox = yield* fileSystem.makeTempDirectoryScoped({
@@ -1712,15 +1713,29 @@ it.effect.each(["missing", "invalid"] as const)(
 const captureRecordingGitCommands = Effect.fn("test.captureRecordingGitCommands")(function* (
   cwd: string,
   checkpointRef: CheckpointRef,
+  options?: {
+    readonly scratchDir?: string | null;
+    readonly scratchFreeBytes?: number;
+    /** Collects the directory of every GIT_INDEX_FILE git was run with. */
+    readonly indexDirs?: Set<string>;
+  },
 ) {
+  const path = yield* Path.Path;
   const liveProcess = yield* VcsProcess.VcsProcess;
   const commands: Array<string | undefined> = [];
-  const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+  const driver = yield* GitVcsDriver.makeVcsDriverShape({
+    ...(options?.scratchDir === undefined ? {} : { checkpointScratchDir: options.scratchDir }),
+    checkpointScratchFreeBytes: () =>
+      Effect.succeed(options?.scratchFreeBytes ?? MIN_CHECKPOINT_SCRATCH_FREE_BYTES),
+  }).pipe(
     Effect.provideService(VcsProcess.VcsProcess, {
       run: (input) => {
         let index = 0;
         while (input.args[index] === "-C" || input.args[index] === "-c") index += 2;
         commands.push(input.args[index]);
+        if (input.env?.GIT_INDEX_FILE !== undefined) {
+          options?.indexDirs?.add(path.dirname(input.env.GIT_INDEX_FILE));
+        }
         return liveProcess.run(input);
       },
     }),
@@ -1803,7 +1818,10 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       const { git, checkpointRef } = yield* makeCheckpointFixture(driver, cwd);
       const originalIndex = yield* fileSystem.readFile(path.join(cwd, ".git", "index"));
 
-      const commands = yield* captureRecordingGitCommands(cwd, checkpointRef);
+      const scratchDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-checkpoint-shm-",
+      });
+      const commands = yield* captureRecordingGitCommands(cwd, checkpointRef, { scratchDir });
 
       assert.deepStrictEqual(commands, [
         "rev-parse",
@@ -1826,6 +1844,73 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         (yield* fileSystem.readDirectory(path.join(cwd, ".git"))).filter((name) =>
           name.startsWith("t3-checkpoint-index-"),
         ),
+        [],
+      );
+      assert.deepStrictEqual(yield* fileSystem.readDirectory(scratchDir), []);
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
+it.effect.each([
+  {
+    name: "a scratch dir with room",
+    where: "scratch",
+    scratch: "dir",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
+  },
+  {
+    name: "a scratch dir with too little room",
+    where: "git",
+    scratch: "dir",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES - 1,
+  },
+  {
+    name: "a scratch dir that cannot be made",
+    where: "git",
+    scratch: "blocked",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
+  },
+  {
+    name: "no scratch dir",
+    where: "git",
+    scratch: "none",
+    free: MIN_CHECKPOINT_SCRATCH_FREE_BYTES,
+  },
+] as const)(
+  "checkpoint capture keeps its index in the scratch dir only when it is usable and has room ($name)",
+  ({ where, scratch, free }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-checkpoint-scratch-" });
+      const { git, checkpointRef } = yield* makeCheckpointFixture(driver, cwd);
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-checkpoint-shm-" });
+      const blocker = path.join(root, "blocker");
+      yield* fileSystem.writeFileString(blocker, "");
+      const scratchDir =
+        scratch === "dir" ? root : scratch === "blocked" ? path.join(blocker, "x") : null;
+      const gitDir = path.join(cwd, ".git");
+
+      const indexDirs = new Set<string>();
+      yield* captureRecordingGitCommands(cwd, checkpointRef, {
+        scratchDir,
+        scratchFreeBytes: free,
+        indexDirs,
+      });
+
+      assert.deepStrictEqual(
+        [...indexDirs],
+        [where === "scratch" ? root : yield* fileSystem.realPath(gitDir)],
+      );
+      assert.strictEqual((yield* git(["show", `${checkpointRef}:file.txt`])).stdout, "unstaged\n");
+      assert.deepStrictEqual(
+        (yield* fileSystem.readDirectory(gitDir)).filter((name) =>
+          name.startsWith("t3-checkpoint-index-"),
+        ),
+        [],
+      );
+      assert.deepStrictEqual(
+        (yield* fileSystem.readDirectory(root)).filter((name) => name !== "blocker"),
         [],
       );
     }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
