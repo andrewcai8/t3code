@@ -1,5 +1,6 @@
 import { assert, it, vi } from "@effect/vitest";
 import {
+  CommandId,
   MessageId,
   NodeId,
   ProviderDriverKind,
@@ -17,6 +18,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -24,6 +26,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 it.effect("expires orphaned runtime requests before command readiness", () => {
@@ -80,6 +83,58 @@ it.effect("expires orphaned runtime requests before command readiness", () => {
       assert.equal(command.events[0].payload.status, "expired");
       assert.equal(command.events[0].payload.responseCapability.type, "not_resumable");
     }
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("keeps a turn start dispatched while startup recovery is still running", () => {
+  const recoveringThreadId = ThreadId.make("thread_recovery_during_dispatch");
+  const dispatchThreadId = ThreadId.make("thread_dispatch_during_recovery");
+  const turnStart = (name: string) => ({
+    id: `effect_${name}`,
+    commandId: CommandId.make(`command_${name}`),
+    threadId: dispatchThreadId,
+    request: { type: "provider-turn.start" as const, runId: RunId.make(`run_${name}`) },
+  });
+  const lostStart = turnStart("lost_with_the_previous_process");
+  const liveStart = turnStart("dispatched_during_recovery");
+  let dispatchDuringRecovery: Effect.Effect<void> = Effect.void;
+  const projection = {
+    thread: { id: recoveringThreadId },
+    runtimeRequests: [],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [],
+    runs: [],
+    attempts: [],
+    nodes: [],
+    subagents: [],
+    messages: [],
+    turnItems: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([recoveringThreadId]),
+          // A reactor dispatches a turn while recovery is still reconciling other threads.
+          getRuntimeRecoveryProjection: () => dispatchDuringRecovery.pipe(Effect.as(projection)),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({}),
+        IdAllocator.layer,
+        EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    yield* outbox.enqueue([lostStart]);
+    dispatchDuringRecovery = outbox.enqueue([liveStart]).pipe(Effect.orDie);
+    yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).recover;
+    const status = (id: string) =>
+      outbox.get(id).pipe(Effect.map(Option.map((effect) => effect.status)));
+    assert.deepEqual(yield* status(lostStart.id), Option.some("cancelled"));
+    assert.deepEqual(yield* status(liveStart.id), Option.some("pending"));
   }).pipe(Effect.provide(layer));
 });
 
@@ -209,8 +264,8 @@ it.effect(
     );
 
     return Effect.gen(function* () {
-      const summary =
-        yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+      const summary = yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService)
+        .recover;
       assert.equal(summary.terminalizedRuns, 0);
       assert.equal(summary.requeuedEffects, 1);
 

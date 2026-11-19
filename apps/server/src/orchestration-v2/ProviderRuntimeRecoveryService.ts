@@ -74,7 +74,6 @@ export interface ProviderRuntimeReconciliationSummary {
   readonly stoppedSessions: number;
   readonly closedRequests: number;
   readonly retiredEffects: number;
-  readonly requeuedEffects: number;
 }
 
 export class ProviderRuntimeRecoveryService extends Context.Service<
@@ -1271,11 +1270,6 @@ export const make = Effect.gen(function* () {
       // Eventless outbox cancellations also wait for the group's durable commit.
       if (cancelledEffectIds.length > 0) yield* outbox.signalCancellations(cancelledEffectIds);
     }
-    const outboxReconciliation = yield* outbox.reconcileAfterProcessLoss.pipe(
-      Effect.mapError(
-        (cause) => new ProviderRuntimeRecoveryError({ operation: "drain-outbox", cause }),
-      ),
-    );
     // After the drain, which cancels every unsettled provider start. A crash before this write
     // leaves the run unstarted, so the next recovery sends it again.
     if (resends.length > 0) {
@@ -1291,8 +1285,7 @@ export const make = Effect.gen(function* () {
       terminalizedRuns,
       stoppedSessions,
       closedRequests,
-      retiredEffects: retiredEffects + outboxReconciliation.cancelled,
-      requeuedEffects: outboxReconciliation.requeued,
+      retiredEffects,
     } satisfies ProviderRuntimeReconciliationSummary;
   });
 
@@ -1360,7 +1353,18 @@ export const make = Effect.gen(function* () {
   );
 
   const recover = Effect.gen(function* () {
-    return (yield* reconcile("startup")) satisfies ProviderRuntimeRecoverySummary;
+    // Before any reconcile write: those wake reactors whose new turn starts belong to this process.
+    const outboxReconciliation = yield* outbox.reconcileAfterProcessLoss.pipe(
+      Effect.mapError(
+        (cause) => new ProviderRuntimeRecoveryError({ operation: "drain-outbox", cause }),
+      ),
+    );
+    const summary = yield* reconcile("startup");
+    return {
+      ...summary,
+      retiredEffects: summary.retiredEffects + outboxReconciliation.cancelled,
+      requeuedEffects: outboxReconciliation.requeued,
+    } satisfies ProviderRuntimeRecoverySummary;
   });
 
   return ProviderRuntimeRecoveryService.of({ reconcile, prepareForShutdown, recover });
