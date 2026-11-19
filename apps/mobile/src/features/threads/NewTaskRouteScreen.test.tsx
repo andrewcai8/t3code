@@ -133,6 +133,11 @@ vi.mock("./new-task-flow-provider", () => ({
     ],
     selectedEnvironmentId: environmentId,
     setProject: harness.setProject,
+    cloud: {
+      boxes: new Map(),
+      placement: { environmentState: () => ({ connection: { phase: "connected" } }) },
+      boxStart: null,
+    },
   }),
 }));
 
