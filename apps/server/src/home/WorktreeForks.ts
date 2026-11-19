@@ -52,7 +52,12 @@ import {
   type SandboxSize,
   type WorktreeForksHost,
 } from "./worktreeForksConfig.ts";
-import { makeUploadCache, type Upload, type UploadFailed } from "./worktreeForkCache.ts";
+import {
+  makeUploadCache,
+  memoryScratchRoot,
+  type Upload,
+  type UploadFailed,
+} from "./worktreeForkCache.ts";
 import {
   applyArgv,
   type Checkout,
@@ -470,6 +475,11 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   const { stateDir, baseDir: t3Home } = yield* ServerConfig;
   const hostTag = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor).environmentId;
   const hostHome = yield* HostProcess.HomeDirectory;
+  const memoryRoot = memoryScratchRoot(
+    yield* HostProcess.Platform,
+    yield* HostProcess.UserId,
+    stateDir,
+  );
   const serverEnvironment = yield* HostProcess.Environment;
   const runner = yield* ProcessRunner.ProcessRunner;
   const threads = yield* ThreadManagementService.ThreadManagementService;
@@ -496,7 +506,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
       kind: platform.kind,
       sandboxes,
       bases: yield* makeBases(host, platform, sandboxes, hostTag, live),
-      cache: yield* makeUploadCache(platform, sandboxes, stateDir),
+      cache: yield* makeUploadCache(platform, sandboxes, stateDir, memoryRoot),
     });
   }
   const defaultLane = lanes.get(host.platforms[0].kind)!;
@@ -506,7 +516,10 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   const scratchRoot = NodePath.join(stateDir, "worktree-forks", "tmp");
   const resultsRoot = NodePath.join(stateDir, "fork-results");
   const jobsDir = jobsRoot(stateDir);
-  yield* Effect.sync(() => NodeFS.rmSync(scratchRoot, { recursive: true, force: true }));
+  yield* Effect.sync(() => {
+    for (const root of [scratchRoot, memoryRoot])
+      if (root !== null) NodeFS.rmSync(root, { recursive: true, force: true });
+  });
 
   /** A job cut short by this server shutting down, which the next run adopts. */
   const paused = (exit: Exit.Exit<unknown, unknown>) => closing && Exit.hasInterrupts(exit);
