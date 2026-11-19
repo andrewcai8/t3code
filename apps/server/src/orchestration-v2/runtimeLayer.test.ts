@@ -363,7 +363,8 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  // Nothing routes accounts without a provider registry, so instances here are the user's picks.
+  Layer.provide(ServerSettings.layerTest({ autoPickProviderAccounts: false })),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -13770,7 +13771,11 @@ const layerLimitSwitchTest = (accounts: ReturnType<typeof limitSwitchAccounts>) 
     Layer.provide(layerPlatformTest),
   );
 
-const limitedThread = (scenario: string, projectId: ProjectId) =>
+const limitedThread = (
+  scenario: string,
+  projectId: ProjectId,
+  queued: ReadonlyArray<string> = [],
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const events = yield* EventSink.EventSinkV2;
@@ -13808,6 +13813,19 @@ const limitedThread = (scenario: string, projectId: ProjectId) =>
       createdBy: "user",
       creationSource: "web",
     });
+    for (const [index, text] of queued.entries()) {
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`limit-switch:queued:${scenario}:${index}`),
+        threadId,
+        messageId: MessageId.make(`limit-switch:queued:${scenario}:${index}`),
+        text,
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+    }
     const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
     yield* events.write({
       commandId: CommandId.make(`limit-switch:failure:${scenario}`),
@@ -13858,20 +13876,46 @@ it.layer(layerLimitSwitchTest(limitSwitchAccounts(100, 10)))("usage-limit accoun
   it.effect("continues a limited chat on another account with room before the reset, once", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
       const sweep = yield* UsageLimitRecoveryWorker.makeSweep;
-      const threadId = yield* limitedThread("room", ProjectId.make("project:limit-switch-room"));
+      const threadId = yield* limitedThread("room", ProjectId.make("project:limit-switch-room"), [
+        "Queued before the limit.",
+        "Also queued.",
+      ]);
       yield* sweep();
       yield* sweep();
       const { messages, runs, thread } = yield* orchestrator.getThreadProjection(threadId);
+      const [, queued, rider, continuation] = runs;
       assert.deepEqual(
-        runs.map((run) => run.modelSelection.instanceId),
-        [modelSelection.instanceId, alternateInstanceId],
+        [queued?.status, rider?.status, continuation?.modelSelection.instanceId],
+        ["queued", "queued", alternateInstanceId],
       );
       assert.isFalse(thread.limitRecovery?.snooze);
       assert.equal(
-        messages.at(-1)?.text,
+        messages.find((message) => message.id === continuation?.userMessageId)?.text,
         "/poteto-mode Continue where you left off.\n\nYour previous account hit its usage limit, so this chat moved to another account with room. Subagents and new chats are also routed to accounts with room, so keep working and delegating as usual.",
       );
+
+      // Work queued on the spent account follows the chat instead of waiting for the reset.
+      const now = yield* DateTime.now;
+      yield* events.write({
+        commandId: CommandId.make("limit-switch:continuation-completed"),
+        events: [
+          {
+            id: EventId.make("limit-switch:continuation-completed"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...continuation!, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.resumeQueuedRuns;
+      const after = (yield* orchestrator.getThreadProjection(threadId)).runs;
+      const delivered = after.find((run) => run.id === queued?.id);
+      assert.equal(delivered?.status, "starting");
+      assert.equal(delivered?.modelSelection.instanceId, alternateInstanceId);
+      assert.equal(after.find((run) => run.id === rider?.id)?.joinedRunId, queued?.id);
     }),
   );
 
@@ -13993,6 +14037,7 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   Layer.provide(layerServerConfig),
   Layer.provide(
     ServerSettings.layerTest({
+      autoPickProviderAccounts: false,
       providerInstances: {
         [alternateInstanceId]: { driver: "codex", enabled: true },
       },

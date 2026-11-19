@@ -84,6 +84,7 @@ import {
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { ROUTED_ACCOUNT_DRIVERS } from "@t3tools/shared/usageLimits";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { modelSwitchSince } from "./modelSwitch.ts";
 import { contextBoundaryOrdinal, isScheduledFreshRun } from "./contextBoundary.ts";
@@ -1048,6 +1049,27 @@ function queuedRunModelSelection(
     : run.modelSelection;
 }
 
+/**
+ * Auto-picked accounts bind when a queued run starts: one queued on another account of the
+ * thread's routed driver runs on the thread's current account, which routing moved off spent ones.
+ */
+function deliveryModelSelection(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages" | "providerThreads">,
+  run: OrchestrationV2Run,
+  routedDriver: string | undefined,
+): ModelSelection {
+  const selection = queuedRunModelSelection(projection, run);
+  const current = projection.thread.modelSelection.instanceId;
+  return routedDriver !== undefined &&
+    selection.instanceId !== current &&
+    projection.providerThreads.some(
+      (thread) =>
+        thread.providerInstanceId === selection.instanceId && thread.driver === routedDriver,
+    )
+    ? { ...selection, instanceId: current }
+    : selection;
+}
+
 /** Queued text that can share a turn: not a command, fresh session, continuation, task, or schedule. */
 function isPlainQueuedPrompt(
   run: OrchestrationV2Run,
@@ -1070,9 +1092,13 @@ function isPlainQueuedPrompt(
  * wake stays alone: it drains output that provider already produced instead of prompting.
  */
 function queuedRunRiders(
-  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "messages">,
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "messages" | "providerThreads"
+  >,
   starting: OrchestrationV2Run,
   startingMessage: OrchestrationV2ConversationMessage,
+  routedDriver: string | undefined,
 ): ReadonlyArray<{
   readonly run: OrchestrationV2Run;
   readonly message: OrchestrationV2ConversationMessage;
@@ -1088,7 +1114,10 @@ function queuedRunRiders(
       !isStalePullRequestWatchWake(projection, run) &&
       (followsCurrentConversation(message) ||
         (run.providerThreadId === starting.providerThreadId &&
-          modelSelectionsEqual(run.modelSelection, starting.modelSelection)))
+          modelSelectionsEqual(
+            deliveryModelSelection(projection, run, routedDriver),
+            starting.modelSelection,
+          )))
       ? [{ run, message }]
       : [];
   });
@@ -2528,7 +2557,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queuedMessage = projection.messages.find(
         (candidate) => candidate.id === storedQueuedRun.userMessageId,
       );
-      const modelSelection = queuedRunModelSelection(projection, storedQueuedRun);
+      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+      const routedDriver = settings.autoPickProviderAccounts
+        ? yield* providerAdapters.get(projection.thread.modelSelection.instanceId).pipe(
+            Effect.map((adapter) =>
+              ROUTED_ACCOUNT_DRIVERS.has(adapter.driver) ? adapter.driver : undefined,
+            ),
+            Effect.orElseSucceed(() => undefined),
+          )
+        : undefined;
+      const modelSelection = deliveryModelSelection(projection, storedQueuedRun, routedDriver);
       const queuedRun = {
         ...storedQueuedRun,
         modelSelection,
@@ -2564,7 +2602,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         failedRun?.id === endedRunId &&
         failedRun?.workspacePreparation?.type === "worktree" &&
         projection.thread.worktreePath === null;
-      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
       const projectOverride =
         settings.projectSettingsOverrides[projection.thread.projectId]?.providerInstances?.[
           queuedRun.providerInstanceId
@@ -2684,7 +2721,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
-      const followsCurrent = followsCurrentConversation(queuedMessage);
+      const followsCurrent =
+        followsCurrentConversation(queuedMessage) ||
+        queuedRun.providerInstanceId !== storedQueuedRun.providerInstanceId;
       const freshContext = queuedRun.freshContext === true;
       // A scheduled fresh run is a side conversation, so it must not drop the fork's context.
       const supersededForkTransfer =
@@ -3186,7 +3225,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               },
             ]
           : [];
-      const riders = queuedRunRiders(projection, queuedRun, queuedMessage);
+      const riders = queuedRunRiders(projection, queuedRun, queuedMessage, routedDriver);
       const riderEvents: Array<Omit<OrchestrationV2DomainEvent, "id">> = [];
       for (const [index, rider] of riders.entries()) {
         const tasks = yield* notificationTasks(threadId, rider.message, projection.subagents);
