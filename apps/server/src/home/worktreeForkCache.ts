@@ -31,6 +31,27 @@ const IDLE_MS = DAY;
 const MOUNTS = "/tmp/t3-cache";
 const STAGES = "/tmp/t3-cache-stage";
 
+/**
+ * Where packs are written when the host has a tmpfs, so a job's scratch never wears the disk; null
+ * elsewhere. Named by user and state dir so servers on one host do not clear each other's.
+ */
+export const memoryScratchRoot = (
+  platform: NodeJS.Platform,
+  uid: number | undefined,
+  stateDir: string,
+): string | null =>
+  platform === "linux"
+    ? NodePath.join(
+        "/dev/shm",
+        `t3-worktree-forks-${uid ?? "user"}-${NodeCrypto.createHash("sha256").update(stateDir).digest("hex").slice(0, 12)}`,
+      )
+    : null;
+
+const outOfSpace = (error: CheckoutRefused) =>
+  error.cause instanceof Error &&
+  ((error.cause as NodeJS.ErrnoException).code === "ENOSPC" ||
+    error.cause.message.includes("No space left on device"));
+
 /** Moves an upload ($1) into its own directory ($3) once its sha256 matches $2. */
 const VERIFY_SCRIPT = `echo "$2  $1" | sha256sum -c --status && mkdir -p "$3" && mv "$1" "$3/archive"`;
 
@@ -88,6 +109,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
   platform: ForkPlatform,
   sandboxes: ForkSandboxes,
   stateDir: string,
+  memoryRoot: string | null = null,
 ) {
   const path = NodePath.join(stateDir, "worktree-forks", `upload-cache.${platform.kind}.json`);
   // Before each platform had its own index, a host's one index had no suffix; the scope check
@@ -96,7 +118,19 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
   const workspace = NodeCrypto.createHash("sha256").update(platformScope(platform)).digest("hex");
   const index = new Map<string, Entry>();
   const scope = yield* Effect.scope;
-  const packRoot = NodePath.join(stateDir, "worktree-forks", "tmp", "packs");
+  const diskPacks = NodePath.join(stateDir, "worktree-forks", "tmp", "packs");
+  const memoryPacks = memoryRoot === null ? null : NodePath.join(memoryRoot, "packs");
+  /** The tmpfs when this host has a writable one, else the disk. */
+  const packRoot = () => {
+    if (memoryPacks === null) return diskPacks;
+    try {
+      NodeFS.mkdirSync(memoryPacks, { recursive: true, mode: 0o700 });
+      NodeFS.accessSync(memoryPacks, NodeFS.constants.W_OK);
+      return memoryPacks;
+    } catch {
+      return diskPacks;
+    }
+  };
   yield* Effect.try({
     try: () => {
       const from = NodeFS.existsSync(path) ? path : unsuffixed;
@@ -139,7 +173,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
     string,
     {
       readonly packed: Deferred.Deferred<Packed, CheckoutRefused>;
-      readonly dir: string;
+      dir: string;
       refs: number;
     }
   >();
@@ -153,7 +187,7 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
         }
         const shared = {
           packed: Deferred.makeUnsafe<Packed, CheckoutRefused>(),
-          dir: NodePath.join(packRoot, NodeCrypto.randomUUID()),
+          dir: NodePath.join(packRoot(), NodeCrypto.randomUUID()),
           refs: 1,
         };
         packs.set(item.key, shared);
@@ -170,6 +204,17 @@ export const makeUploadCache = Effect.fn("WorktreeForks.makeUploadCache")(functi
       Effect.tap(({ shared, fresh }) =>
         fresh
           ? item.pack(shared.dir).pipe(
+              // A full tmpfs is not the job's failure: pack again on the disk.
+              Effect.catchIf(
+                (error) =>
+                  memoryPacks !== null && shared.dir.startsWith(memoryPacks) && outOfSpace(error),
+                () =>
+                  Effect.suspend(() => {
+                    NodeFS.rmSync(shared.dir, { recursive: true, force: true });
+                    shared.dir = NodePath.join(diskPacks, NodeCrypto.randomUUID());
+                    return item.pack(shared.dir);
+                  }),
+              ),
               Effect.exit,
               Effect.flatMap((exit) => Deferred.done(shared.packed, exit)),
               Effect.ensuring(

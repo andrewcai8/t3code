@@ -9,12 +9,13 @@ import * as Logger from "effect/Logger";
 import * as TestClock from "effect/testing/TestClock";
 
 import { makeUploadCache, type Upload } from "./worktreeForkCache.ts";
+import { CheckoutRefused } from "./worktreeForkShip.ts";
 import type { ModalPlatform } from "./worktreeForksConfig.ts";
 import { makeFakeSandboxes } from "./worktreeForksTestkit.ts";
 
 const HOUR = 3_600_000;
 
-const setup = (directoryImages = true) => {
+const setup = (directoryImages = true, memoryRoot: string | null = null) => {
   const stateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-cache-"));
   const archive = NodePath.join(stateDir, "input.tgz");
   NodeFS.writeFileSync(archive, "archive bytes");
@@ -31,7 +32,13 @@ const setup = (directoryImages = true) => {
     environment: undefined,
   };
   const fake = makeFakeSandboxes({ directoryImages });
-  return { stateDir, item, platform, fake, start: makeUploadCache(platform, fake.port, stateDir) };
+  return {
+    stateDir,
+    item,
+    platform,
+    fake,
+    start: makeUploadCache(platform, fake.port, stateDir, memoryRoot),
+  };
 };
 
 const copy = (fake: ReturnType<typeof makeFakeSandboxes>) =>
@@ -165,5 +172,69 @@ it.effect("a platform with no directory images sends every archive directly", ()
     }
     expect(uploads(fake)).toBe(2);
     expect(fake.calls.filter((call) => call.op === "exec")).toEqual([]);
+  }).pipe(Effect.scoped);
+});
+
+/** An item that records where each pack ran, failing a pack in `full` the way a full tmpfs does. */
+const recording = (item: Upload, dirs: Array<string>, full?: string) =>
+  ({
+    key: item.key,
+    pack: (dir) => {
+      dirs.push(dir);
+      return full !== undefined && dir.startsWith(full)
+        ? Effect.fail(
+            new CheckoutRefused({
+              reason: "unreadable",
+              cause: new Error(
+                "tar exited 2: tar: state.tar: Cannot write: No space left on device",
+              ),
+            }),
+          )
+        : item.pack(dir);
+    },
+  }) satisfies Upload;
+
+it.effect("packs in the tmpfs when the host has one, else on the disk", () => {
+  const memoryRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-shm-"));
+  const withMemory = setup(false, memoryRoot);
+  const withoutMemory = setup(false);
+  return Effect.gen(function* () {
+    const inMemory: Array<string> = [];
+    const memory = yield* withMemory.start;
+    yield* memory.place(yield* copy(withMemory.fake), recording(withMemory.item, inMemory), "/x");
+    expect(inMemory).toHaveLength(1);
+    expect(NodePath.dirname(inMemory[0]!)).toBe(NodePath.join(memoryRoot, "packs"));
+
+    const onDisk: Array<string> = [];
+    const disk = yield* withoutMemory.start;
+    yield* disk.place(yield* copy(withoutMemory.fake), recording(withoutMemory.item, onDisk), "/x");
+    expect(NodePath.dirname(onDisk[0]!)).toBe(
+      NodePath.join(withoutMemory.stateDir, "worktree-forks", "tmp", "packs"),
+    );
+  }).pipe(Effect.scoped);
+});
+
+it.effect("a pack that fills the tmpfs is packed again on the disk; other failures stay", () => {
+  const memoryRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3wf-shm-"));
+  const { item, fake, start, stateDir } = setup(false, memoryRoot);
+  return Effect.gen(function* () {
+    const cache = yield* start;
+    const dirs: Array<string> = [];
+    const placed = yield* cache.place(yield* copy(fake), recording(item, dirs, memoryRoot), "/x");
+    expect(placed.uploadedBytes).toBe(13);
+    expect(dirs).toHaveLength(2);
+    expect(dirs[0]!.startsWith(memoryRoot)).toBe(true);
+    expect(dirs[1]!.startsWith(NodePath.join(stateDir, "worktree-forks", "tmp", "packs"))).toBe(
+      true,
+    );
+    expect(NodeFS.existsSync(dirs[0]!)).toBe(false);
+
+    const broken: Upload = {
+      key: "c".repeat(64),
+      pack: () =>
+        Effect.fail(new CheckoutRefused({ reason: "unreadable", cause: new Error("boom") })),
+    };
+    const failed = yield* cache.place(yield* copy(fake), broken, "/x").pipe(Effect.flip);
+    expect(failed).toMatchObject({ _tag: "CheckoutRefused", reason: "unreadable" });
   }).pipe(Effect.scoped);
 });
