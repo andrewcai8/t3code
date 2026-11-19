@@ -1050,8 +1050,9 @@ function queuedRunModelSelection(
 }
 
 /**
- * Auto-picked accounts bind when a queued run starts: one queued on another account of the
+ * Inherited accounts bind when a queued run starts: one queued on another account of the
  * thread's routed driver runs on the thread's current account, which routing moved off spent ones.
+ * An account the sender picked for this message stays.
  */
 function deliveryModelSelection(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages" | "providerThreads">,
@@ -1061,6 +1062,7 @@ function deliveryModelSelection(
   const selection = queuedRunModelSelection(projection, run);
   const current = projection.thread.modelSelection.instanceId;
   return routedDriver !== undefined &&
+    run.accountPinned !== true &&
     selection.instanceId !== current &&
     projection.providerThreads.some(
       (thread) =>
@@ -8130,6 +8132,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...(freshContext ? { freshContext: true } : {}),
+        ...(command.modelSelection === undefined ? {} : { accountPinned: true as const }),
       };
       const attempt: OrchestrationV2RunAttempt = {
         id: attemptId,

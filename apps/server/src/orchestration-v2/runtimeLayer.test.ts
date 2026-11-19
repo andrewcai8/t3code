@@ -363,8 +363,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  // Nothing routes accounts without a provider registry, so instances here are the user's picks.
-  Layer.provide(ServerSettings.layerTest({ autoPickProviderAccounts: false })),
+  Layer.provide(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -14037,7 +14036,6 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   Layer.provide(layerServerConfig),
   Layer.provide(
     ServerSettings.layerTest({
-      autoPickProviderAccounts: false,
       providerInstances: {
         [alternateInstanceId]: { driver: "codex", enabled: true },
       },

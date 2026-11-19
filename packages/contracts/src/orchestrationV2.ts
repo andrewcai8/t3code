@@ -768,6 +768,8 @@ export const OrchestrationV2Run = Schema.Struct({
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
+  /** The queued message named its model, so account routing never moves the run when it starts. */
+  accountPinned: Schema.optional(Schema.Literal(true)),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
