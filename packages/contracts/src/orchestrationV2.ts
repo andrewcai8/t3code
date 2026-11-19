@@ -3657,13 +3657,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
   }),
-  /** Moves a thread to a project rooted at the folder it already works in, so its cwd never changes. */
   /** Resumes the queued runs a server restart held, and starts the next one. */
   Schema.Struct({
     type: Schema.Literal("queue.release-restart-hold"),
     commandId: CommandId,
     threadId: ThreadId,
   }),
+  /** Moves a thread to a project rooted at the folder it already works in, so its cwd never changes. */
   Schema.Struct({
     type: Schema.Literal("thread.project.adopt-folder"),
     commandId: CommandId,
