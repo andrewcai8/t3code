@@ -172,6 +172,7 @@ export default mergeConfig(
       setupFiles: [
         "./src/testUtils/gitConfig.setup.ts",
         "./src/testUtils/managedServiceEnv.setup.ts",
+        "./src/testUtils/providerCommitLinger.setup.ts",
       ],
       hookTimeout: 120_000,
       testTimeout: 120_000,

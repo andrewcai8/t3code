@@ -695,10 +695,12 @@ const makeReader = Effect.fnUntraced(function* (filename: string, pool: { unavai
 
 // A checkpoint copies WAL pages into the database and syncs it. On the writer's thread every
 // write would wait for that sync, so a second connection checkpoints beside the writes.
-const CHECKPOINT_FRAMES = 1000;
-const CHECKPOINT_IDLE_MS = 100;
+// Each checkpoint rewrites every page the WAL touched, so rarer checkpoints rewrite hot pages less.
+const CHECKPOINT_FRAMES = 10_000;
+// Catching up when writes pause must outlast the gaps between commits under load.
+const CHECKPOINT_IDLE_MS = 1000;
 // If checkpoints fall behind constant writes, the writer checkpoints itself, delaying writes only.
-const WRITER_BACKSTOP_FRAMES = 10_000;
+const WRITER_BACKSTOP_FRAMES = 25_000;
 
 const checkpointWorkerSource = `
 const { parentPort, workerData } = require("node:worker_threads");
