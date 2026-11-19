@@ -10,9 +10,11 @@ import {
 } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId, ProvisionProvider, ScopedProjectRef } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
+import { msg } from "gt-react-native";
 import { useCallback, useRef, useState } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
+import { m, type MessageResolver } from "../../i18n/messages";
 import { connectBoxPairing } from "../../connection/box-onboarding";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -36,15 +38,16 @@ const IDLE: CreateCloudMachineState = { kind: "idle" };
 export function createCloudMachineProgressText(
   phase: CloudProvisioningProgressPhase,
   provider: ProvisionProvider,
+  resolve: MessageResolver = m,
 ): string {
   const label = cloudEnvironmentLabel(provider);
   switch (phase) {
     case "creating":
-      return `Starting your ${label} machine…`;
+      return resolve(msg("Starting your {label} machine…", { label }));
     case "pairing":
-      return "Connecting this device to it…";
+      return resolve(msg("Connecting this device to it…"));
     case "loading-project":
-      return "Waiting for the checkout…";
+      return resolve(msg("Waiting for the checkout…"));
   }
 }
 

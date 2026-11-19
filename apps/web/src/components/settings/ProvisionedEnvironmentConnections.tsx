@@ -7,6 +7,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import type { DiscoveredProvisionedEnvironment, EnvironmentId } from "@t3tools/contracts";
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useEffect, useState } from "react";
 
 import { forgetProvisionedSandbox } from "../../cloud/provisionedSandboxLeases";
@@ -18,12 +19,12 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 
-const LIFECYCLE_LABELS: Record<DiscoveredProvisionedEnvironment["lifecycle"], string> = {
-  active: "Running",
-  paused: "Paused",
-  missing: "Lost",
-  disposed: "Deleted",
-};
+const LIFECYCLE_LABELS = {
+  active: msg("Running"),
+  paused: msg("Paused"),
+  missing: msg("Lost"),
+  disposed: msg("Deleted"),
+} satisfies Record<DiscoveredProvisionedEnvironment["lifecycle"], unknown>;
 
 /**
  * One cloud machine the host runs for a chat. Its chat opens it, when that chat is on this
@@ -44,10 +45,11 @@ function ProvisionedEnvironmentRow({
   onDelete: (title: string) => void;
   onRestore: () => void;
 }) {
+  const messages = useMessages();
   // The minute clock is UTC without its zone.
   const now = Date.parse(`${useNowMinute()}Z`);
-  const cleanup = describeCloudCleanup(environment.cleanup, now);
-  const restorable = describeRestorable(environment.restorableUntil, now);
+  const cleanup = describeCloudCleanup(environment.cleanup, now, messages);
+  const restorable = describeRestorable(environment.restorableUntil, now, messages);
   const threadRef =
     environment.threadId === null
       ? null
@@ -61,7 +63,8 @@ function ProvisionedEnvironmentRow({
         <p className="truncate text-sm">{title}</p>
         <p className="truncate text-xs text-muted-foreground">
           {environment.repository ?? environment.projectDir} ·{" "}
-          {cloudProviderVendor(environment.provider)} · {LIFECYCLE_LABELS[environment.lifecycle]}
+          {cloudProviderVendor(environment.provider)} ·{" "}
+          {messages(LIFECYCLE_LABELS[environment.lifecycle])}
           {cleanup ? ` · ${cleanup.text}` : null}
           {restorable ? ` · ${restorable}` : null}
         </p>
@@ -69,7 +72,7 @@ function ProvisionedEnvironmentRow({
       <div className="flex shrink-0 items-center gap-2">
         {environment.lifecycle === "paused" ? (
           <Button size="xs" variant="outline" disabled={busy} onClick={onResume}>
-            Resume
+            <T>Resume</T>
           </Button>
         ) : null}
         {cleanup?.action ? (
@@ -79,7 +82,9 @@ function ProvisionedEnvironmentRow({
             disabled={busy}
             onClick={() => onKeep(cleanup.action === "keep")}
           >
-            {cleanup.action === "keep" ? "Keep" : "Allow cleanup"}
+            {cleanup.action === "keep"
+              ? messages(msg("Keep", { $context: "verb, keep this cloud machine from cleanup" }))
+              : messages(msg("Allow cleanup"))}
           </Button>
         ) : null}
         {thread !== null && threadRef !== null ? (
@@ -88,13 +93,13 @@ function ProvisionedEnvironmentRow({
             variant="outline"
             onClick={() => void navigate({ to: "/$environmentId/$threadId", params: threadRef })}
           >
-            Open chat
+            <T>Open chat</T>
           </Button>
         ) : null}
         {environment.lifecycle === "disposed" ? (
           restorable ? (
             <Button size="xs" variant="outline" disabled={busy} onClick={onRestore}>
-              Restore
+              <T>Restore</T>
             </Button>
           ) : null
         ) : (
@@ -104,7 +109,7 @@ function ProvisionedEnvironmentRow({
             disabled={busy}
             onClick={() => onDelete(title)}
           >
-            Delete
+            <T>Delete</T>
           </Button>
         )}
       </div>
@@ -119,6 +124,7 @@ export function ProvisionedEnvironmentConnections({
   managerId: EnvironmentId;
   managerLabel: string;
 }) {
+  const gt = useGT();
   const supported =
     useAtomValue(serverEnvironment.configValueAtom(managerId))?.environmentControl === true;
   const query = useEnvironmentQuery(
@@ -167,7 +173,8 @@ export function ProvisionedEnvironmentConnections({
         environmentId: managerId,
         input: { environmentId: environment.environmentId },
       });
-      if (result._tag === "Failure") return "The host could not resume this machine. Try again.";
+      if (result._tag === "Failure")
+        return gt("The host could not resume this machine. Try again.");
       return result.value.kind === "resumed" ? null : result.value.message;
     });
   const keepEnvironment = (environment: DiscoveredProvisionedEnvironment, kept: boolean) =>
@@ -176,7 +183,8 @@ export function ProvisionedEnvironmentConnections({
         environmentId: managerId,
         input: { requestId: environment.requestId, keep: kept },
       });
-      if (result._tag === "Failure") return "The host could not update this machine. Try again.";
+      if (result._tag === "Failure")
+        return gt("The host could not update this machine. Try again.");
       return result.value.kind === "updated" ? null : result.value.message;
     });
   const deleteEnvironment = async (
@@ -185,8 +193,10 @@ export function ProvisionedEnvironmentConnections({
   ) => {
     const confirmed = await ensureLocalApi().dialogs.confirm(
       [
-        `Delete the cloud machine for "${title}"?`,
-        "This stops it and ends any running work. A chat's machine can be restored here for 30 days. The chat's history stays.",
+        gt('Delete the cloud machine for "{title}"?', { title }),
+        gt(
+          "This stops it and ends any running work. A chat's machine can be restored here for 30 days. The chat's history stays.",
+        ),
       ].join("\n"),
       { variant: "destructive" },
     );
@@ -196,8 +206,9 @@ export function ProvisionedEnvironmentConnections({
         environmentId: managerId,
         input: { requestId: environment.requestId },
       });
-      if (result._tag === "Failure") return "The host could not delete this machine. Try again.";
-      if (result.value.kind !== "disposed") return "The host could not delete this machine.";
+      if (result._tag === "Failure")
+        return gt("The host could not delete this machine. Try again.");
+      if (result.value.kind !== "disposed") return gt("The host could not delete this machine.");
       // A machine that can be restored keeps its chat's lease, so a restore brings both back.
       if (environment.threadId !== null && result.value.restorableUntil === undefined)
         forgetProvisionedSandbox(scopeThreadRef(environment.environmentId, environment.threadId));
@@ -210,7 +221,8 @@ export function ProvisionedEnvironmentConnections({
         environmentId: managerId,
         input: { leaseId: environment.leaseId },
       });
-      if (result._tag === "Failure") return "The host could not restore this machine. Try again.";
+      if (result._tag === "Failure")
+        return gt("The host could not restore this machine. Try again.");
       return result.value.kind === "restored" ? null : result.value.message;
     });
 
@@ -219,16 +231,18 @@ export function ProvisionedEnvironmentConnections({
     <div className="space-y-3 border-t border-border px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
-          Cloud machines · {managerLabel}
+          <T>
+            Cloud machines · <Var>{managerLabel}</Var>
+          </T>
           {query.data ? ` (${query.data.length})` : ""}
         </p>
         <Button size="xs" variant="outline" disabled={query.isPending} onClick={query.refresh}>
-          Refresh
+          <T>Refresh</T>
         </Button>
       </div>
       {query.error ? (
         <p className="text-xs text-destructive">
-          Cloud machines could not be loaded. Refresh to try again.
+          <T>Cloud machines could not be loaded. Refresh to try again.</T>
         </p>
       ) : null}
       {query.data?.map((environment) => (

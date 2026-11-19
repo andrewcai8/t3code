@@ -7,11 +7,13 @@ import {
 import type { EnvironmentId, ModelSelection, ThreadId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
+import { msg, T, useGT, useMessages } from "gt-react";
 import { useState } from "react";
 
 import { useOpenInPreferredEditor } from "../../editorPreferences";
 import { isElectron } from "../../env";
 import { usePrimarySettings } from "../../hooks/useSettings";
+import { m } from "../../i18n/messages";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionForInstance,
@@ -33,13 +35,16 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 
-const HOME_DESCRIPTION =
-  "An agent that can act across all your projects and connected machines. It can answer questions and approve requests for you.";
+const HOME_DESCRIPTION = msg(
+  "An agent that can act across all your projects and connected machines. It can answer questions and approve requests for you.",
+);
 
 /** Settings page for Home. Only a desktop app's own server can run it. */
 export function HomeSettings() {
+  const gt = useGT();
+  const searchableSetting = useSearchableSetting();
   const environmentId = usePrimaryEnvironmentId();
   const homeWorkspaceRoot = useAtomValue(
     primaryServerConfigAtom,
@@ -48,9 +53,12 @@ export function HomeSettings() {
   const homeThreadId = usePrimarySettings((settings) => settings.home.threadId);
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Home">
+      <SettingsSection title={gt("Home")}>
         {!isElectron || environmentId === null || homeWorkspaceRoot === null ? (
-          <SettingsRow {...searchableSetting("home")} description="Home runs in the desktop app." />
+          <SettingsRow
+            {...searchableSetting("home")}
+            description={gt("Home runs in the desktop app.")}
+          />
         ) : homeThreadId === null ? (
           <HomeOffRows environmentId={environmentId} />
         ) : (
@@ -69,7 +77,7 @@ function reportHomeFailure(title: string, error: unknown) {
   toastManager.add({
     type: "error",
     title,
-    description: error instanceof Error ? error.message : "An error occurred.",
+    description: error instanceof Error ? error.message : m(msg("An error occurred.")),
   });
 }
 
@@ -83,6 +91,8 @@ function useNavigateToThread() {
 }
 
 function HomeOffRows({ environmentId }: { environmentId: EnvironmentId }) {
+  const messages = useMessages();
+  const searchableSetting = useSearchableSetting();
   const settings = usePrimarySettings();
   const providers = useAtomValue(primaryServerProvidersAtom);
   const enable = useAtomCommand(homeEnvironment.enable, { reportFailure: false });
@@ -113,7 +123,7 @@ function HomeOffRows({ environmentId }: { environmentId: EnvironmentId }) {
     setPending(false);
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) {
-        reportHomeFailure("Could not turn on Home", squashAtomCommandFailure(result));
+        reportHomeFailure(m(msg("Could not turn on Home")), squashAtomCommandFailure(result));
       }
       return;
     }
@@ -123,10 +133,12 @@ function HomeOffRows({ environmentId }: { environmentId: EnvironmentId }) {
   return (
     <SettingsRow
       {...searchableSetting("home")}
-      description={HOME_DESCRIPTION}
+      description={messages(HOME_DESCRIPTION)}
       control={
         selection === null ? (
-          <span className="text-sm text-muted-foreground">No providers available.</span>
+          <span className="text-sm text-muted-foreground">
+            <T>No providers available.</T>
+          </span>
         ) : (
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             <ProviderModelPicker
@@ -147,7 +159,7 @@ function HomeOffRows({ environmentId }: { environmentId: EnvironmentId }) {
               }
             />
             <Button size="sm" disabled={pending} onClick={() => void turnOn()}>
-              Turn on Home
+              <T>Turn on Home</T>
             </Button>
           </div>
         )
@@ -162,6 +174,9 @@ function HomeOnRows(props: {
   homeWorkspaceRoot: string;
 }) {
   const { environmentId, threadId, homeWorkspaceRoot } = props;
+  const gt = useGT();
+  const messages = useMessages();
+  const searchableSetting = useSearchableSetting();
   const thread = useThreadShell(scopeThreadRef(environmentId, threadId));
   const providers = useAtomValue(primaryServerProvidersAtom);
   const availableEditors = useAtomValue(
@@ -194,7 +209,7 @@ function HomeOnRows(props: {
     setPending(false);
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) {
-        reportHomeFailure("Could not start a fresh Home", squashAtomCommandFailure(result));
+        reportHomeFailure(m(msg("Could not start a fresh Home")), squashAtomCommandFailure(result));
       }
       return;
     }
@@ -206,7 +221,7 @@ function HomeOnRows(props: {
     const result = await disable({ environmentId, input: {} });
     setPending(false);
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      reportHomeFailure("Could not turn off Home", squashAtomCommandFailure(result));
+      reportHomeFailure(m(msg("Could not turn off Home")), squashAtomCommandFailure(result));
     }
   };
 
@@ -217,7 +232,7 @@ function HomeOnRows(props: {
       `${homeWorkspaceRoot.replace(/[\\/]+$/, "")}${separator}AGENTS.md`,
     );
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      reportHomeFailure("Could not open instructions", squashAtomCommandFailure(result));
+      reportHomeFailure(m(msg("Could not open instructions")), squashAtomCommandFailure(result));
     }
   };
 
@@ -225,26 +240,26 @@ function HomeOnRows(props: {
     <>
       <SettingsRow
         {...searchableSetting("home")}
-        description={HOME_DESCRIPTION}
+        description={messages(HOME_DESCRIPTION)}
         control={
           <Button
             size="sm"
             variant="outline"
             onClick={() => void navigateToThread(environmentId, threadId)}
           >
-            Open Home
+            <T>Open Home</T>
           </Button>
         }
       />
       {modelLabel === null ? null : (
         <SettingsRow
-          title="Model"
+          title={gt("Model")}
           control={<span className="text-sm text-muted-foreground">{modelLabel}</span>}
         />
       )}
       <SettingsRow
-        title="Start fresh"
-        description="New Home thread. The current one stays as a normal thread."
+        title={gt("Start fresh")}
+        description={gt("New Home thread. The current one stays as a normal thread.")}
         control={
           <Button
             size="sm"
@@ -252,22 +267,22 @@ function HomeOnRows(props: {
             disabled={pending}
             onClick={() => void runStartFresh()}
           >
-            Start fresh
+            <T>Start fresh</T>
           </Button>
         }
       />
       <SettingsRow
-        title="Instructions"
-        description="AGENTS.md in the Home folder."
+        title={gt("Instructions")}
+        description={gt("AGENTS.md in the Home folder.")}
         control={
           <Button size="sm" variant="outline" onClick={() => void editInstructions()}>
-            Edit
+            <T context="button, opens the Home instructions file in an editor">Edit</T>
           </Button>
         }
       />
       <SettingsRow
-        title="Turn off"
-        description="Home stops. Its threads stay."
+        title={gt("Turn off")}
+        description={gt("Home stops. Its threads stay.")}
         control={
           <Button
             size="sm"
@@ -275,7 +290,7 @@ function HomeOnRows(props: {
             disabled={pending}
             onClick={() => void turnOff()}
           >
-            Turn off
+            <T context="button, turns off the Home agent">Turn off</T>
           </Button>
         }
       />

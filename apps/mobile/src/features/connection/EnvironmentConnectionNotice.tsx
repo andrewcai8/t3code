@@ -1,9 +1,11 @@
+import { msg, useGT, useMessages } from "gt-react-native";
 import { Button } from "../../components/ui/Button";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import {
   cloudMachineStatus,
   cloudWakeNotice,
+  connectionErrorText,
   type EnvironmentConnectionPhase,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -13,57 +15,92 @@ import { View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { useCloudMachine } from "../../state/cloud-machine";
+import type { MessageResolver } from "../../i18n/messages";
 
 function noticeTitle(
   phase: EnvironmentConnectionPhase,
   environmentLabel: string,
   awaitingApproval: boolean,
+  resolve: MessageResolver,
 ): string {
-  if (awaitingApproval) return `Waiting for ${environmentLabel} to approve this device`;
+  const environment = environmentLabel;
+  if (awaitingApproval)
+    return resolve(msg("Waiting for {environment} to approve this device", { environment }));
   switch (phase) {
     case "offline":
-      return "You are offline";
+      return resolve(msg("You are offline"));
     case "connecting":
-      return `Connecting to ${environmentLabel}...`;
+      return resolve(msg("Connecting to {environment}...", { environment }));
     case "reconnecting":
-      return `Reconnecting to ${environmentLabel}...`;
+      return resolve(msg("Reconnecting to {environment}...", { environment }));
     case "waking":
-      return `${environmentLabel.charAt(0).toUpperCase()}${environmentLabel.slice(1)} is waking up...`;
+      return resolve(
+        msg("{environment} is waking up...", {
+          environment: `${environmentLabel.charAt(0).toUpperCase()}${environmentLabel.slice(1)}`,
+        }),
+      );
     case "unsupported":
-      return "Client not supported";
+      return resolve(msg("Client not supported"));
     case "error":
-      return `${environmentLabel} is unavailable`;
+      return resolve(msg("{environment} is unavailable", { environment }));
     case "available":
-      return `${environmentLabel} is disconnected`;
+      return resolve(msg("{environment} is disconnected", { environment }));
     case "connected":
       return "";
   }
 }
 
+type ConnectionNoticeResource = "preview" | "review" | "terminal";
+
+const OFFLINE_DETAIL = {
+  preview: msg(
+    "Cached data remains available. The preview will load when your connection returns.",
+  ),
+  review: msg("Cached data remains available. The review will load when your connection returns."),
+  terminal: msg(
+    "Cached data remains available. The terminal will load when your connection returns.",
+  ),
+} satisfies Record<ConnectionNoticeResource, string>;
+
+const CONNECTING_DETAIL = {
+  preview: msg("The preview will load as soon as the environment is ready."),
+  review: msg("The review will load as soon as the environment is ready."),
+  terminal: msg("The terminal will load as soon as the environment is ready."),
+} satisfies Record<ConnectionNoticeResource, string>;
+
+const RECONNECT_DETAIL = {
+  preview: msg("Reconnect the environment to load the preview."),
+  review: msg("Reconnect the environment to load the review."),
+  terminal: msg("Reconnect the environment to load the terminal."),
+} satisfies Record<ConnectionNoticeResource, string>;
+
 function noticeDetail(
   phase: EnvironmentConnectionPhase,
-  resourceName: string,
+  resource: ConnectionNoticeResource,
   error: string | null,
   awaitingApproval: boolean,
+  resolve: MessageResolver,
 ): string {
   if (error && awaitingApproval) return error;
   if (error) {
-    return phase === "reconnecting" ? `The app will keep retrying automatically. ${error}` : error;
+    return phase === "reconnecting"
+      ? resolve(msg("The app will keep retrying automatically. {error}", { error }))
+      : error;
   }
 
   switch (phase) {
     case "offline":
-      return `Cached data remains available. The ${resourceName} will load when your connection returns.`;
+      return resolve(OFFLINE_DETAIL[resource]);
     case "connecting":
     case "reconnecting":
-      return `The ${resourceName} will load as soon as the environment is ready.`;
+      return resolve(CONNECTING_DETAIL[resource]);
     case "waking":
-      return "It reconnects on its own.";
+      return resolve(msg("It reconnects on its own."));
     case "unsupported":
-      return "Use compatible versions of the app and server to connect.";
+      return resolve(msg("Use compatible versions of the app and server to connect."));
     case "available":
     case "error":
-      return `Reconnect the environment to load the ${resourceName}.`;
+      return resolve(RECONNECT_DETAIL[resource]);
     case "connected":
       return "";
   }
@@ -72,11 +109,13 @@ function noticeDetail(
 export function EnvironmentConnectionNotice(props: {
   readonly environmentLabel: string;
   readonly connection: EnvironmentConnectionPresentation;
-  readonly resourceName: string;
+  readonly resource: ConnectionNoticeResource;
   readonly onRetry: () => void;
   /** A cloud box's id, so a waking or updating machine is said with the time it takes. */
   readonly environmentId?: EnvironmentId | null;
 }) {
+  const gt = useGT();
+  const m = useMessages();
   const machine = useCloudMachine(props.environmentId ?? null);
   const machineStatus = cloudMachineStatus(machine ?? undefined, props.connection.phase);
   const wake =
@@ -108,15 +147,17 @@ export function EnvironmentConnectionNotice(props: {
               props.connection.phase,
               props.environmentLabel,
               props.connection.awaitingApproval === true,
+              m,
             )}
         </Text>
         <Text className="text-center text-sm leading-normal text-foreground-muted">
           {wake?.description ??
             noticeDetail(
               props.connection.phase,
-              props.resourceName,
-              props.connection.error,
+              props.resource,
+              connectionErrorText(props.connection, m),
               props.connection.awaitingApproval === true,
+              m,
             )}
           {props.connection.traceId ? (
             <ConnectionTraceId traceId={props.connection.traceId} />
@@ -125,7 +166,7 @@ export function EnvironmentConnectionNotice(props: {
 
         {props.connection.phase !== "offline" && props.connection.phase !== "unsupported" ? (
           <View className="mt-1">
-            <Button label="Retry now" tone="secondary" onPress={props.onRetry} />
+            <Button label={gt("Retry now")} tone="secondary" onPress={props.onRetry} />
           </View>
         ) : null}
       </View>

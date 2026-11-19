@@ -16,6 +16,8 @@ import {
   type ServerConfig,
   type ThreadId,
 } from "@t3tools/contracts";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 import type { EnvironmentConnectionPresentation } from "../connection/presentation.ts";
 import { joinProvisionedEnvironment } from "../connection/provisioned.ts";
@@ -380,7 +382,9 @@ const CLOUD_PROVIDER_NAMES: Record<
   { readonly label: string; readonly vendor: string }
 > = {
   e2b: { label: "E2B", vendor: "E2B" },
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- product name
   namespace: { label: "Namespace Mac", vendor: "Namespace" },
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- product name
   modal: { label: "Modal", vendor: "Modal" },
 };
 
@@ -395,21 +399,28 @@ export function cloudProviderVendor(provider: ProvisionProvider): string {
 }
 
 /** What a client tells the user after asking a host to move a cloud chat onto another account. */
-export function describeAccountSwitch(result: EnvironmentProvisionSwitchAccountResult): {
+export function describeAccountSwitch(
+  result: EnvironmentProvisionSwitchAccountResult,
+  resolve: MFunctionType = mFallback,
+): {
   readonly switched: boolean;
   readonly title: string;
   readonly description: string;
 } {
   if (result.kind === "refused") {
-    return { switched: false, title: "Could not switch accounts", description: result.message };
+    return {
+      switched: false,
+      title: resolve(msg("Could not switch accounts")),
+      description: result.message,
+    };
   }
   return {
     switched: true,
-    title: `Switched to ${result.account}`,
+    title: resolve(msg("Switched to {account}", { account: result.account })),
     // The host already sent the continue message when `continued`, so the client must not resume.
     description: result.continued
-      ? "Continuing where it left off."
-      : "Resume the chat to continue.",
+      ? resolve(msg("Continuing where it left off."))
+      : resolve(msg("Resume the chat to continue.")),
   };
 }
 
@@ -465,6 +476,7 @@ export type CloudProvisionOutcome =
 export async function provisionCloudEnvironment(
   draft: CloudProvisionDraft,
   ports: CloudProvisionPorts,
+  resolve: MFunctionType = mFallback,
 ): Promise<CloudProvisionOutcome> {
   const { requests, leases } = ports;
   const label = cloudEnvironmentLabel(draft.input.provider);
@@ -480,7 +492,7 @@ export async function provisionCloudEnvironment(
     if (created.kind === "unreachable") {
       return {
         kind: "failed",
-        message: "Could not reach the environment manager. Send again to resume.",
+        message: resolve(msg("Could not reach the environment manager. Send again to resume.")),
       };
     }
     if (created.kind !== "ready") {
@@ -489,7 +501,9 @@ export async function provisionCloudEnvironment(
         message:
           created.kind === "refused"
             ? created.message
-            : `${created.message} Send again to resume this request.`,
+            : resolve(
+                msg("{message} Send again to resume this request.", { message: created.message }),
+              ),
       };
     }
     const environment = created.environment;
@@ -503,30 +517,40 @@ export async function provisionCloudEnvironment(
     });
     if (!stillThisRequest()) return { kind: "cancelled" };
     ports.onPhase("pairing");
-    const joined = await joinProvisionedEnvironment(environment, {
-      isPaired: ports.isPaired,
-      attach: async () => {
-        const attached = await ports.attach(request);
-        return attached === null || attached.kind === "refused"
-          ? {
-              kind: "refused",
-              message: "The environment is ready, but a connection could not be issued.",
-            }
-          : attached;
-      },
-      pair: async (pairingUrl) => {
-        const paired = await ports.pair(pairingUrl);
-        if (paired === null) throw new Error(`${label} was created but could not be connected.`);
-        return paired;
-      },
-      ...(ports.rewritePairingUrl
-        ? {
-            rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
-              ports.rewritePairingUrl!(pairingUrl, lease.leaseId),
+    const joined = await joinProvisionedEnvironment(
+      environment,
+      {
+        isPaired: ports.isPaired,
+        attach: async () => {
+          const attached = await ports.attach(request);
+          return attached === null || attached.kind === "refused"
+            ? {
+                kind: "refused",
+                message: resolve(
+                  msg("The environment is ready, but a connection could not be issued."),
+                ),
+              }
+            : attached;
+        },
+        pair: async (pairingUrl) => {
+          const paired = await ports.pair(pairingUrl);
+          if (paired === null) {
+            throw new Error(
+              resolve(msg("{label} was created but could not be connected.", { label })),
+            );
           }
-        : {}),
-      canReach: ports.canReach,
-    });
+          return paired;
+        },
+        ...(ports.rewritePairingUrl
+          ? {
+              rewritePairingUrl: (pairingUrl: string, lease: { readonly leaseId: string }) =>
+                ports.rewritePairingUrl!(pairingUrl, lease.leaseId),
+            }
+          : {}),
+        canReach: ports.canReach,
+      },
+      resolve,
+    );
     if (!stillThisRequest()) return { kind: "cancelled" };
     if (joined.kind !== "joined") {
       return {
@@ -534,7 +558,7 @@ export async function provisionCloudEnvironment(
         message:
           joined.kind === "refused"
             ? joined.message
-            : "This machine is reachable only through the computer that started it.",
+            : resolve(msg("This machine is reachable only through the computer that started it.")),
       };
     }
     // Pairing is asynchronous: the remote server must publish its cloned project before the
@@ -551,7 +575,12 @@ export async function provisionCloudEnvironment(
       // if project publication was delayed or the remote checkout failed.
       return {
         kind: "failed",
-        message: `${label} ready, but its project is still loading. Open a new ${label} chat after the project appears.`,
+        message: resolve(
+          msg(
+            "{label} ready, but its project is still loading. Open a new {label} chat after the project appears.",
+            { label },
+          ),
+        ),
       };
     }
     return {
@@ -563,7 +592,8 @@ export async function provisionCloudEnvironment(
     if (!requests.isActive(draft.draftId)) return { kind: "cancelled" };
     return {
       kind: "failed",
-      message: error instanceof Error ? error.message : "Could not prepare the environment.",
+      message:
+        error instanceof Error ? error.message : resolve(msg("Could not prepare the environment.")),
     };
   }
 }

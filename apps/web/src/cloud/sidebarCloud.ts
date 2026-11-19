@@ -6,6 +6,7 @@ import {
 } from "@t3tools/client-runtime/connection";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { msg } from "gt-react";
 
 import {
   type ComposerThreadDraftState,
@@ -14,6 +15,7 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
+import { m, type MessageResolver } from "../i18n/messages";
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "../state/presentation";
@@ -84,16 +86,20 @@ export function isCloudSendThreadListed(
 // flight the row names that step. A ready send only goes out from its open
 // ChatView, and a failed turn start leaves the phase at ready, so a parked
 // ready send is still unsent.
-export function sidebarDraftStatusLabel(session: DraftSessionState, isOpen: boolean): string {
+export function sidebarDraftStatusLabel(
+  session: DraftSessionState,
+  isOpen: boolean,
+  resolve: MessageResolver = m,
+): string {
   switch (session.pendingEnvironmentSend?.phase) {
     case "creating":
     case "pairing":
     case "loading-project":
-      return "Starting cloud machine…";
+      return resolve(msg("Starting cloud machine…"));
     case "ready":
-      return isOpen ? "Sending…" : "Unsent draft";
+      return isOpen ? resolve(msg("Sending…")) : resolve(msg("Unsent draft"));
     default:
-      return "Unsent draft";
+      return resolve(msg("Unsent draft"));
   }
 }
 

@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, SidequestConnection } from "@t3tools/contracts";
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useEffect, useEffectEvent, useState } from "react";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -8,19 +9,23 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { SettingsRow } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 
 const PENDING_REFRESH_MS = 2000;
 
 const STATUS_TEXT = {
-  disconnected: "Not connected. No sponsored line shows until you connect a Sidequest account.",
-  suspended: "This Sidequest device is suspended.",
-  unavailable: "Sidequest is unreachable or not available in your region right now.",
+  disconnected: msg(
+    "Not connected. No sponsored line shows until you connect a Sidequest account.",
+  ),
+  suspended: msg("This Sidequest device is suspended."),
+  unavailable: msg("Sidequest is unreachable or not available in your region right now."),
 } as const;
 
 export function SidequestRow() {
+  const gt = useGT();
+  const searchableSetting = useSearchableSetting();
   const { targets } = useSettingsScope();
   const hosts = [...new Map(targets.map((target) => [target.environmentId, target])).values()];
   const settings = useScopedSettings();
@@ -30,13 +35,15 @@ export function SidequestRow() {
       serverScoped
       {...searchableSetting("sidequest-sponsored")}
       settingKeys={["sidequestEnabled"]}
-      description="Show one dim sponsored line under the latest reply you typed a prompt for. It appears only while this machine is connected to a Sidequest account."
+      description={gt(
+        "Show one dim sponsored line under the latest reply you typed a prompt for. It appears only while this machine is connected to a Sidequest account.",
+      )}
       control={
         <ScopedSwitch
           settingKeys={["sidequestEnabled"]}
           checked={settings.sidequestEnabled}
           onCheckedChange={(checked) => updateSettings({ sidequestEnabled: Boolean(checked) })}
-          aria-label="Sponsored line under replies"
+          aria-label={gt("Sponsored line under replies")}
         />
       }
     >
@@ -58,6 +65,8 @@ function SidequestConnectionControls({
   readonly environmentId: EnvironmentId;
   readonly label: string | null;
 }) {
+  const gt = useGT();
+  const messages = useMessages();
   const canManage = useAtomValue(serverEnvironment.sidequestConnect.permissionAtom(environmentId));
   const getConnection = useAtomCommand(serverEnvironment.sidequestGetConnection, {
     reportFailure: false,
@@ -92,11 +101,15 @@ function SidequestConnectionControls({
     <div className="mt-2 grid gap-2 text-xs text-muted-foreground">
       {label === null ? null : <p className="font-medium text-foreground">{label}</p>}
       {connection === null ? null : connection.status === "connected" ? (
-        <p>Connected as {connection.email}.</p>
+        <p>
+          <T>
+            Connected as <Var>{connection.email}</Var>.
+          </T>
+        </p>
       ) : connection.status === "pending" ? (
         <PendingConnect connection={connection} />
       ) : (
-        <p>{STATUS_TEXT[connection.status]}</p>
+        <p>{messages(STATUS_TEXT[connection.status])}</p>
       )}
       {!canManage || connection === null ? null : (
         <div className="flex gap-2">
@@ -107,11 +120,13 @@ function SidequestConnectionControls({
               disabled={busy}
               onClick={() => void run(disconnect)}
             >
-              Disconnect
+              <T>Disconnect</T>
             </Button>
           ) : (
             <Button size="xs" variant="outline" disabled={busy} onClick={() => void run(connect)}>
-              {connection.status === "pending" ? "Restart connect" : "Connect"}
+              {connection.status === "pending"
+                ? gt("Restart connect")
+                : gt("Connect", { $context: "verb, connects a Sidequest account" })}
             </Button>
           )}
         </div>
@@ -125,13 +140,24 @@ function PendingConnect({
 }: {
   readonly connection: Extract<SidequestConnection, { status: "pending" }>;
 }) {
-  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "Sidequest code" });
+  const gt = useGT();
+  const { copyToClipboard, isCopied } = useCopyToClipboard({
+    target: {
+      target: "Sidequest code",
+      unavailableMessage: msg("Clipboard API is unavailable while copying Sidequest code."),
+      failureMessage: msg("Failed to copy Sidequest code to the clipboard."),
+    },
+  });
   return (
     <div className="grid gap-1.5">
       <p>
-        Open the link, sign in to Sidequest, and enter the code{" "}
-        <code className="font-mono text-foreground">{connection.userCode}</code>. This page updates
-        when it connects.
+        <T>
+          Open the link, sign in to Sidequest, and enter the code{" "}
+          <code className="font-mono text-foreground">
+            <Var>{connection.userCode}</Var>
+          </code>
+          . This page updates when it connects.
+        </T>
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <a
@@ -147,7 +173,7 @@ function PendingConnect({
           variant="outline"
           onClick={() => copyToClipboard(connection.userCode, undefined)}
         >
-          {isCopied ? "Copied" : "Copy code"}
+          {isCopied ? gt("Copied") : gt("Copy code")}
         </Button>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { connectionBox, isUnpairedBox } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { useGT } from "gt-react-native";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
 
@@ -15,6 +16,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
  * or removed with its cached data.
  */
 export function SavedCloudBoxConnections() {
+  const gt = useGT();
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const unmark = useAtomCommand(environmentCatalog.unmarkBox);
   const remove = useAtomCommand(environmentCatalog.remove);
@@ -38,7 +40,7 @@ export function SavedCloudBoxConnections() {
   return (
     <View collapsable={false} className="mt-5 gap-3">
       <Text className="px-1 text-sm font-t3-bold uppercase text-foreground-muted">
-        Cloud machine connections
+        {gt("Cloud machine connections")}
       </Text>
       <View collapsable={false} className="overflow-hidden rounded-[24px] bg-card">
         {boxes.map(({ environmentId, label, managerId }, index) => (
@@ -51,12 +53,17 @@ export function SavedCloudBoxConnections() {
               {label}
             </Text>
             <Text className="text-xs text-foreground-muted">
-              {`Started by ${catalog.entries.get(managerId)?.target.label ?? managerId} for one chat. It connects only while that chat needs it.`}
+              {gt("Started by {manager} for one chat. It connects only while that chat needs it.", {
+                manager: catalog.entries.get(managerId)?.target.label ?? managerId,
+              })}
             </Text>
             <View className="flex-row gap-2">
               {[
-                { label: "Not a cloud machine", action: () => unmark(environmentId) },
-                { label: "Remove", action: () => remove(environmentId) },
+                { label: gt("Not a cloud machine"), action: () => unmark(environmentId) },
+                {
+                  label: gt("Remove", { $context: "button, removes a saved connection" }),
+                  action: () => remove(environmentId),
+                },
               ].map((button) => (
                 <Pressable
                   key={button.label}

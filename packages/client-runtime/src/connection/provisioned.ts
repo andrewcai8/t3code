@@ -5,6 +5,8 @@ import type {
 } from "@t3tools/contracts";
 import { PROVISIONED_ENVIRONMENT_GATEWAY_PREFIX } from "@t3tools/shared/remote";
 import { isLoopbackHost } from "@t3tools/shared/preview";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 /** False for a loopback pairing URL: another device dialing it would reach itself, not the machine that minted it. */
 export function isOffDeviceReachablePairingUrl(pairingUrl: string): boolean {
@@ -64,17 +66,24 @@ export type ProvisionedJoinOutcome =
 export async function joinProvisionedEnvironment(
   environment: Pick<DiscoveredProvisionedEnvironment, "environmentId" | "leaseId">,
   ports: ProvisionedJoinPorts,
+  resolve: MFunctionType = mFallback,
 ): Promise<ProvisionedJoinOutcome> {
   if (ports.isPaired(environment.environmentId)) return { kind: "joined" };
   const attached = await ports.attach();
   if (attached.kind === "refused") return { kind: "refused", message: attached.message };
   if (attached.environmentId !== environment.environmentId)
-    return { kind: "refused", message: "The connection belongs to another environment." };
+    return {
+      kind: "refused",
+      message: resolve(msg("The connection belongs to another environment.")),
+    };
   const pairingUrl =
     ports.rewritePairingUrl?.(attached.pairingUrl, environment) ?? attached.pairingUrl;
   if (!ports.canReach(pairingUrl)) return { kind: "unreachable" };
   const pairedId = await ports.pair(pairingUrl);
   if (pairedId !== environment.environmentId)
-    return { kind: "refused", message: "The paired server does not match this environment." };
+    return {
+      kind: "refused",
+      message: resolve(msg("The paired server does not match this environment.")),
+    };
   return { kind: "joined" };
 }

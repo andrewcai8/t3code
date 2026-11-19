@@ -1,5 +1,6 @@
 import { cloudEnvironmentLabel } from "@t3tools/client-runtime/cloud";
 import type { ProvisionProvider } from "@t3tools/contracts";
+import { msg, useGT, useMessages } from "gt-react";
 import { CloudIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -7,6 +8,7 @@ import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { cn } from "~/lib/utils";
 
 export type CloudEnvironmentSetupPhase =
@@ -41,41 +43,53 @@ function useNowWhile(active: boolean): number {
   return nowMs;
 }
 
-export function environmentSetupHeader(snapshot: CloudEnvironmentSetupSnapshot): string {
+export function environmentSetupHeader(
+  snapshot: CloudEnvironmentSetupSnapshot,
+  resolve: MessageResolver = m,
+): string {
   switch (snapshot.phase) {
     case "creating":
-      return "Preparing environment";
+      return resolve(msg("Preparing environment"));
     case "pairing":
-      return "Connecting environment";
+      return resolve(msg("Connecting environment"));
     case "loading-project":
-      return "Loading project";
+      return resolve(msg("Loading project"));
     case "ready":
-      return "Environment ready";
+      return resolve(msg("Environment ready"));
     case "failed":
-      return "Environment setup failed";
+      return resolve(msg("Environment setup failed"));
   }
 }
 
-export function environmentSetupDescription(snapshot: CloudEnvironmentSetupSnapshot): string {
+export function environmentSetupDescription(
+  snapshot: CloudEnvironmentSetupSnapshot,
+  resolve: MessageResolver = m,
+): string {
   if (snapshot.phase === "failed") {
-    return snapshot.error ?? "Could not prepare the environment.";
+    return snapshot.error ?? resolve(msg("Could not prepare the environment."));
   }
   if (snapshot.phase === "creating" && snapshot.repository) {
-    return `Setting up the environment and cloning ${snapshot.repository}.`;
+    return resolve(
+      msg("Setting up the environment and cloning {repository}.", {
+        repository: snapshot.repository,
+      }),
+    );
   }
   switch (snapshot.phase) {
     case "creating":
-      return "Setting up the environment. This can take a few minutes.";
+      return resolve(msg("Setting up the environment. This can take a few minutes."));
     case "pairing":
-      return "Adding the new environment to this chat.";
+      return resolve(msg("Adding the new environment to this chat."));
     case "loading-project":
-      return "Waiting for the checkout to appear.";
+      return resolve(msg("Waiting for the checkout to appear."));
     case "ready":
-      return "Sending your first message.";
+      return resolve(msg("Sending your first message."));
   }
 }
 
 function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps) {
+  const gt = useGT();
+  const messages = useMessages();
   const running = snapshot.phase !== "ready" && snapshot.phase !== "failed";
   const nowMs = useNowWhile(running);
   const totalElapsed = (() => {
@@ -88,7 +102,7 @@ function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps)
 
   return (
     <section
-      aria-label="Environment setup"
+      aria-label={gt("Environment setup")}
       className="mt-3 rounded-lg border border-border bg-card/60 px-2.5 pt-1.5 pb-2"
       data-environment-setup-phase={snapshot.phase}
       data-environment-setup-provider={snapshot.provider}
@@ -106,7 +120,9 @@ function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps)
             <CloudIcon aria-hidden className="size-4 shrink-0" />
           )}
         </span>
-        <span className="min-w-0 flex-1 truncate">{environmentSetupHeader(snapshot)}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {environmentSetupHeader(snapshot, messages)}
+        </span>
         {totalElapsed !== null ? (
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
             {formatDuration(totalElapsed)}
@@ -114,7 +130,7 @@ function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps)
         ) : null}
       </div>
       <p className="mt-0.5 px-0.5 pl-8 text-xs text-muted-foreground">
-        {environmentSetupDescription(snapshot)}
+        {environmentSetupDescription(snapshot, messages)}
       </p>
       <p className="mt-0.5 px-0.5 pl-8 text-xs text-muted-foreground">{providerLabel}</p>
       {onCancel && (running || failed) ? (
@@ -122,7 +138,7 @@ function EnvironmentSetupCard({ snapshot, onCancel }: EnvironmentSetupCardProps)
           <span className="flex-1" />
           <Button type="button" size="xs" variant="outline" onClick={onCancel}>
             <XIcon aria-hidden />
-            {failed ? "Dismiss" : "Cancel"}
+            {failed ? gt("Dismiss") : gt("Cancel")}
           </Button>
         </div>
       ) : null}

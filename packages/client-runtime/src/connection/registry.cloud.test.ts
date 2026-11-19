@@ -519,6 +519,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         authorizeBearer: () => Effect.die(new Error("Authorization is not used.")),
         authorizeDpop: () => Effect.die(new Error("Authorization is not used.")),
         authorizeDpopHttp: () => Effect.die(new Error("Authorization is not used.")),
+        authorizeDirectDpop: () => Effect.die(new Error("Authorization is not used.")),
+        authorizeDirectDpopHttp: () => Effect.die(new Error("Authorization is not used.")),
         renewDpopBeforeExpiry: () => Effect.void,
         rememberCheckedDescriptor: () => Effect.void,
       }),
@@ -633,7 +635,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
                     prepared.target._tag === "BearerConnectionTarget"
                       ? current.get(prepared.target.connectionId)
                       : undefined;
-                  return credential === undefined
+                  return credential === undefined ||
+                    credential._tag !== "BearerConnectionCredential"
                     ? Option.none()
                     : Option.some({
                         authenticated: true,

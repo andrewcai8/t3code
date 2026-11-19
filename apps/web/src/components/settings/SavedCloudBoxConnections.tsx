@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { connectionBox, isUnpairedBox } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { useState } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
@@ -14,6 +15,7 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
  * environment again, or removed with its cached data.
  */
 export function SavedCloudBoxConnections() {
+  const gt = useGT();
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const unmark = useAtomCommand(environmentCatalog.unmarkBox);
   const remove = useAtomCommand(environmentCatalog.remove);
@@ -31,14 +33,17 @@ export function SavedCloudBoxConnections() {
     await action().finally(() => setBusy(null));
   };
   return (
-    <SettingsSection title="Cloud machine connections">
+    <SettingsSection title={gt("Cloud machine connections")}>
       {boxes.map(({ environmentId, label, managerId }) => {
         const host = catalog.entries.get(managerId)?.target.label ?? managerId;
         return (
           <SettingsRow
             key={environmentId}
             title={label}
-            description={`A cloud machine ${host} started for one chat. It connects only while that chat needs it.`}
+            description={gt(
+              "A cloud machine {host} started for one chat. It connects only while that chat needs it.",
+              { host },
+            )}
             control={
               <div className="flex shrink-0 items-center gap-2">
                 <Button
@@ -47,7 +52,7 @@ export function SavedCloudBoxConnections() {
                   disabled={busy !== null}
                   onClick={() => void run(environmentId, () => unmark(environmentId))}
                 >
-                  Not a cloud machine
+                  <T>Not a cloud machine</T>
                 </Button>
                 <Button
                   size="xs"
@@ -55,7 +60,7 @@ export function SavedCloudBoxConnections() {
                   disabled={busy !== null}
                   onClick={() => void run(environmentId, () => remove(environmentId))}
                 >
-                  Remove
+                  <T>Remove</T>
                 </Button>
               </div>
             }

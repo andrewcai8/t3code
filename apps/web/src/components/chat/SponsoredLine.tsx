@@ -1,4 +1,5 @@
 import { type RunId } from "@t3tools/contracts";
+import { T } from "gt-react";
 import { use, useEffect, useEffectEvent } from "react";
 
 import { useServerConfigs } from "../../state/entities";
@@ -40,7 +41,7 @@ export function SponsoredLine({ runId }: { readonly runId: RunId | null }) {
   return (
     <Tooltip>
       <TooltipTrigger render={<p className="mt-1 truncate px-1 text-xs text-muted-foreground" />}>
-        Sponsored · {text} ·{" "}
+        <T>Sponsored</T> · {text} ·{" "}
         <a
           href={ad.adLink}
           target="_blank"

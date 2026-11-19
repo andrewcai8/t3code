@@ -5,6 +5,9 @@ import {
   type ProvisionProvider,
   type ServerProvider,
 } from "@t3tools/contracts";
+import { msg } from "gt-react-native";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 
 /**
  * The choices a phone has to make before a manager can start a cloud machine: which repository
@@ -14,9 +17,9 @@ import {
 
 /** What each cloud kind runs, under its name in the picker. */
 export const CLOUD_MACHINE_PLATFORMS: Readonly<Record<ProvisionProvider, string>> = {
-  e2b: "Linux",
-  modal: "Linux",
-  namespace: "macOS, for Apple builds",
+  e2b: msg("Linux"),
+  modal: msg("Linux"),
+  namespace: msg("macOS, for Apple builds"),
 };
 
 export interface CloudMachineRepositoryOption {
@@ -110,8 +113,13 @@ export function defaultCloudMachineAccount(
 }
 
 /** The usage line under an account row, or null when the account reports none. */
-export function cloudMachineAccountDetail(option: CloudMachineAccountOption): string | null {
-  return option.usedPercent === null ? null : `${Math.round(option.usedPercent)}% used`;
+export function cloudMachineAccountDetail(
+  option: CloudMachineAccountOption,
+  resolve: MessageResolver = m,
+): string | null {
+  return option.usedPercent === null
+    ? null
+    : resolve(msg("{percent}% used", { percent: Math.round(option.usedPercent) }));
 }
 
 /**
@@ -135,9 +143,13 @@ export interface CloudMachineSelection {
  * Why the Create button is disabled, or null when it is not. A repository is required: an empty
  * machine has nothing to work on, and the phone has no way to put a checkout on it afterwards.
  */
-export function cloudMachineBlockReason(selection: CloudMachineSelection): string | null {
-  if (selection.provider === null) return "This manager has no cloud platform set up.";
-  if (selection.account === null) return "Connect a provider account first.";
-  if (selection.repository === null) return "Choose a repository to clone.";
+export function cloudMachineBlockReason(
+  selection: CloudMachineSelection,
+  resolve: MessageResolver = m,
+): string | null {
+  if (selection.provider === null)
+    return resolve(msg("This manager has no cloud platform set up."));
+  if (selection.account === null) return resolve(msg("Connect a provider account first."));
+  if (selection.repository === null) return resolve(msg("Choose a repository to clone."));
   return null;
 }

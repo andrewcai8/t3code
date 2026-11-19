@@ -1,3 +1,4 @@
+import type { MarkedText } from "../errors/translatable.ts";
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentMachineKind,
@@ -251,6 +252,8 @@ export interface EnvironmentConnectionSummary {
   readonly isEnabled: boolean;
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
+  /** `connectionError` as marked text; display sites resolve it with `resolveMarkedText`. */
+  readonly i18nConnectionError?: MarkedText;
   readonly connectionErrorTraceId: string | null;
 }
 
@@ -266,6 +269,9 @@ export function projectEnvironmentConnectionSummary(
     isEnabled: environment.entry.enabled,
     connectionState: environment.connection.phase,
     connectionError: environment.connection.error,
+    ...(environment.connection.i18nError === undefined
+      ? {}
+      : { i18nConnectionError: environment.connection.i18nError }),
     connectionErrorTraceId: environment.connection.traceId,
   };
 }

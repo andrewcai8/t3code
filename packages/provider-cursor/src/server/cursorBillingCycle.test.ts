@@ -1,6 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
-import { limitsNotice } from "@t3tools/shared/usageLimits";
+import { limitsNotice } from "@t3tools/shared/usageLimitsCopy";
 import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import cursorPeriod from "./testFixtures/cursorPeriod.json" with { type: "json" };
