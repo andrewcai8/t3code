@@ -471,6 +471,8 @@ function makeLocalCommandHarness(input: {
   readonly previousMessages?: ReadonlyArray<string>;
   /** Automated messages that joined this queued turn when it started. */
   readonly riders?: ReadonlyArray<string>;
+  readonly createdBy?: "agent" | "system";
+  readonly scheduledTaskId?: ScheduledTaskId;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
@@ -580,8 +582,9 @@ function makeLocalCommandHarness(input: {
     text: input.text,
     attachments: [],
     streaming: false,
-    createdBy: "user",
-    creationSource: "web",
+    createdBy: input.createdBy ?? "user",
+    creationSource: input.createdBy === undefined ? "web" : "mcp",
+    ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
     createdAt: now,
     updatedAt: now,
   };
@@ -3524,8 +3527,10 @@ effectIt.effect("sends the automated messages that joined a queued turn with its
     yield* harness.start;
 
     expect(harness.deliveredTexts).toHaveLength(1);
-    expect(harness.deliveredTexts[0]).toMatch(
-      /Check the deploy\n\nDelegated task finished\n\nALARM: queue depth high$/,
+    const toolNote =
+      "[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]";
+    expect(harness.deliveredTexts[0]).toContain(
+      `Check the deploy\n\n${toolNote}\n\nDelegated task finished\n\n${toolNote}\n\nALARM: queue depth high`,
     );
   }),
 );
@@ -3552,6 +3557,7 @@ effectIt.effect.each(["not_loaded", "error"] as const)(
         instanceId: harness.oldInstanceId,
         text: "/logout",
         hasAttachments: false,
+        sentByPerson: true,
       });
       expect(harness.open).not.toHaveBeenCalled();
       expect(harness.startRootRun).not.toHaveBeenCalled();
@@ -3573,6 +3579,26 @@ effectIt.effect.each(["not_loaded", "error"] as const)(
         projection.providerThreads.find((thread) => thread.id === "new-provider-thread")?.status,
       ).toBe(providerThreadStatus);
     }),
+);
+
+effectIt.effect.each([
+  { name: "an agent", createdBy: "agent" as const },
+  // A scheduled delivery keeps its task author's createdBy.
+  { name: "a scheduled task", scheduledTaskId: ScheduledTaskId.make("task") },
+])("does not let $name sign a provider out", ({ name: _name, ...sender }) =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "/logout",
+      ...sender,
+      previousNativeSession: true,
+    });
+
+    yield* harness.start;
+
+    expect(harness.tryHandlePromptCommand).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ sentByPerson: false }),
+    );
+  }),
 );
 
 for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {

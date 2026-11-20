@@ -6,11 +6,10 @@ import {
   type OrchestrationV2ThreadShell,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
-import * as Option from "effect/Option";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
+import { Atom, type AtomRegistry } from "effect/reactivity";
 
 import { ConnectionBlockedError } from "../connection/model.ts";
 
@@ -239,20 +238,19 @@ export function recoverOfflineThreadLifecycle<
 ): AtomCommand<W, OrchestrationV2DispatchCommandResult, E> {
   return {
     label: command.label,
-    run: async (registry, target) => {
-      const result = await command.run(registry, target);
-      if (!AsyncResult.isFailure(result)) return result;
-      const error = Cause.findErrorOption(result.cause);
-      if (Option.isNone(error) || !isThreadLifecycleOfflineFailure(error.value)) return result;
-      queueOfflineThreadLifecycleOverlay(
-        registry,
-        { environmentId: target.environmentId, threadId: target.input.threadId },
-        kind,
-      );
-      return AsyncResult.success<OrchestrationV2DispatchCommandResult, E>(
-        OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT,
-      );
-    },
+    run: (registry, target) =>
+      command.run(registry, target).pipe(
+        Effect.catchIf(isThreadLifecycleOfflineFailure, () =>
+          Effect.sync(() => {
+            queueOfflineThreadLifecycleOverlay(
+              registry,
+              { environmentId: target.environmentId, threadId: target.input.threadId },
+              kind,
+            );
+            return OFFLINE_THREAD_LIFECYCLE_DISPATCH_RESULT;
+          }),
+        ),
+      ),
   };
 }
 

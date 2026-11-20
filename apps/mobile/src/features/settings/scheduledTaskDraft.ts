@@ -333,7 +333,7 @@ export function createDraft(
     target: "local",
     threadMode: "new_thread",
     workspace: "worktree",
-    baseRef: "main",
+    baseRef: "",
     checkoutPath: "",
     enabled: true,
     startFromOrigin: true,
@@ -358,7 +358,7 @@ export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
     baseRef:
       task.workspaceStrategy.type === "worktree"
         ? task.workspaceStrategy.baseRef
-        : (task.workspaceStrategy.branch ?? "main"),
+        : (task.workspaceStrategy.branch ?? ""),
     checkoutPath:
       task.workspaceStrategy.type === "existing_worktree"
         ? task.workspaceStrategy.worktreePath
