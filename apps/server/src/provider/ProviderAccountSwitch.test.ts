@@ -51,6 +51,7 @@ import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderRepl
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ServerSettingsModule from "../serverSettings.ts";
+import * as ModelManifest from "./ModelManifest.ts";
 import * as ProviderAccountSwitch from "./ProviderAccountSwitch.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryHydration from "./ProviderInstanceRegistryHydration.ts";
@@ -169,6 +170,8 @@ const claudeDriver = (
           },
           displayName: undefined,
           enabled,
+          // No version, so the registry's broken-runtime check passes.
+          snapshot: { getSnapshot: Effect.succeed({}) },
           orchestrationAdapter,
         } as unknown as ProviderInstance;
       }),
@@ -213,7 +216,10 @@ const boxRuntime = (
   );
   const runtime = ProviderReplayHarness.layerWithRegistry(
     { name: "provider-account-switch" },
-    ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(Layer.provide(instancesLayer)),
+    ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(
+      Layer.provide(instancesLayer),
+      Layer.provide(ModelManifest.layerTest),
+    ),
   );
   return ProviderAccountSwitch.layer.pipe(
     Layer.provideMerge(runtime),

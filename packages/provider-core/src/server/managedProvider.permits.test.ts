@@ -32,6 +32,7 @@ const snapshot = (status: ServerProvider["status"]): ServerProvider => ({
 });
 
 const host = ProviderHost.ProviderHost.of({
+  compatibility: () => Effect.undefined,
   paths: {
     cwd: process.cwd(),
     baseDir: "/t3",

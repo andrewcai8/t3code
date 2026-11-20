@@ -131,6 +131,8 @@ export interface DraftState {
   readonly projectId: string;
   readonly threadId: string;
   readonly target: ScheduledTaskTarget;
+  /** The thread the form opened with, so a save can tell a cleared destination from an unbound one. */
+  readonly savedThreadId: string;
   readonly threadMode: ScheduledTaskThreadMode;
   readonly workspaceMode: WorkspaceMode;
   readonly baseRef: string;
@@ -333,13 +335,14 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     projectId: task.projectId,
     threadId: task.threadId ?? "",
     target: task.target,
+    savedThreadId: task.threadId ?? "",
     threadMode: scheduledTaskThreadMode(task),
     workspaceMode: task.workspaceStrategy.type,
     // A cloud box clones a non-worktree strategy's branch, so that is the base branch to edit.
     baseRef:
       task.workspaceStrategy.type === "worktree"
         ? task.workspaceStrategy.baseRef
-        : (task.workspaceStrategy.branch ?? "main"),
+        : (task.workspaceStrategy.branch ?? ""),
     startFromOrigin:
       task.workspaceStrategy.type === "worktree"
         ? (task.workspaceStrategy.startFromOrigin ?? false)

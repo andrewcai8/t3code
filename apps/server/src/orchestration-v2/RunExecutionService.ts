@@ -1,6 +1,7 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
+  isDelegatedAppThread,
   isOrchestrationV2WorkActive,
   CommandId,
   type EventId,
@@ -1982,6 +1983,7 @@ export const layer: Layer.Layer<
               return yield* shouldStopProviderEventIngestion;
             }),
             Ref.get(rootTerminalSeen).pipe(Effect.map((seen) => !seen)),
+            { threadId: input.run.threadId, delegated: isDelegatedAppThread(input.appThread) },
           )
           .pipe(
             Effect.ensuring(closeIdleFlush),
@@ -2049,7 +2051,11 @@ export const layer: Layer.Layer<
                           ).pipe(Effect.as(false)),
                       ),
                     );
-                    if (handedOff) return;
+                    if (handedOff) {
+                      // Its tool calls, the handoff's own among them, died with that process.
+                      yield* endWorkLostAfterRootRun(completedAt);
+                      return;
+                    }
                   }
                   yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
                     runId: input.run.id,
