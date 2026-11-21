@@ -19,7 +19,9 @@ import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
   deriveLogicalProjectKeyFromSettings,
   getProjectOrderKey,
+  resolveGroupDefaultProject,
   selectProjectGroupingSettings,
+  type ProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -45,7 +47,7 @@ import { environmentSummaries } from "../state/presentation";
 import { environmentServerConfigsAtom, primaryServerConfigAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { getClientSettings } from "./useSettings";
+import { getClientSettings, useClientSettings } from "./useSettings";
 import { getLocalStorageItem, useLocalStorage } from "./useLocalStorage";
 import * as Schema from "effect/Schema";
 import { defaultProjectFallbackReadyAtom } from "../state/projects";
@@ -479,6 +481,7 @@ export function resolveDefaultProjectRef(
   lastUsedProjectKey: string | null,
   fallbackReady: boolean,
   home: Parameters<typeof defaultNewThreadProjectRef>[1],
+  groupingSettings?: ProjectGroupingSettings,
 ): ScopedProjectRef | null {
   const lastUsed = projects.find(
     (project) =>
@@ -488,8 +491,9 @@ export function resolveDefaultProjectRef(
   const lastUsedRef = lastUsed ? defaultNewThreadProjectRef([lastUsed], home) : null;
   if (lastUsedRef) return lastUsedRef;
   if (!fallbackReady) return null;
+  const liveProjects = projects.filter((project) => project.archivedAt == null);
   const orderedProjects = orderItemsByPreferredIds({
-    items: projects.filter((project) => project.archivedAt == null),
+    items: liveProjects,
     preferredIds: projectOrder,
     getId: getProjectOrderKey,
     getPreferenceIds: (project) => [
@@ -497,7 +501,15 @@ export function resolveDefaultProjectRef(
       legacyProjectCwdPreferenceKey(project.workspaceRoot),
     ],
   });
-  return defaultNewThreadProjectRef(orderedProjects, home);
+  const firstRef = defaultNewThreadProjectRef(orderedProjects, home);
+  if (!firstRef || !groupingSettings) return firstRef;
+  const firstProject = liveProjects.find(
+    (project) =>
+      project.environmentId === firstRef.environmentId && project.id === firstRef.projectId,
+  );
+  if (!firstProject) return firstRef;
+  const defaultProject = resolveGroupDefaultProject(firstProject, liveProjects, groupingSettings);
+  return scopeProjectRef(defaultProject.environmentId, defaultProject.id);
 }
 
 export function useHandleNewThread() {
@@ -532,12 +544,14 @@ export function useHandleNewThread() {
     primaryServerConfigAtom,
     (config) => config?.homeWorkspaceRoot ?? null,
   );
+  const groupingSettings = useClientSettings(selectProjectGroupingSettings);
   const defaultProjectRef = resolveDefaultProjectRef(
     projects,
     projectOrder,
     lastUsedProjectKey,
     defaultProjectFallbackReady,
     { primaryEnvironmentId, homeWorkspaceRoot },
+    groupingSettings,
   );
 
   return {
