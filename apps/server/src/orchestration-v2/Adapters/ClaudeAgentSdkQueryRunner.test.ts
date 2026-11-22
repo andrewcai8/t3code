@@ -36,6 +36,7 @@ import {
 } from "./ClaudeAdapterV2.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
+vi.mock("node:child_process", { spy: true });
 
 const FORK_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -950,6 +951,68 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
       // A dying server's descriptors close; the kernel would do this for it.
       for (const pipe of child.stdio) pipe?.destroy();
       yield* Effect.promise(() => turnStopped);
+    }),
+  );
+
+  // Node emits a failed spawn's 'error' on a later tick; with no listener that kills the server.
+  const uncaughtAfterNextTick = Effect.fnUntraced(function* (run: () => unknown) {
+    const uncaught: Array<unknown> = [];
+    const record = (error: unknown) => uncaught.push(error);
+    process.on("uncaughtException", record);
+    yield* Effect.addFinalizer(() => Effect.sync(() => process.off("uncaughtException", record)));
+    run();
+    yield* Effect.promise(() => new Promise((resolve) => process.nextTick(resolve)));
+    return uncaught;
+  });
+
+  it.effect("a spawn that fails throws its error code and leaves no unhandled 'error' event", () =>
+    Effect.gen(function* () {
+      const { spawn } = yield* Effect.promise(() =>
+        vi.importActual<typeof NodeChildProcess>("node:child_process"),
+      );
+      // ENFILE and EMFILE fail the same way: no pid, no stdio, an 'error' event on the next tick.
+      const spawnMock = vi
+        .spyOn(NodeChildProcess, "spawn")
+        .mockImplementationOnce((_command, _args, options) =>
+          spawn("/nonexistent/t3-shell", [], options as NodeChildProcess.SpawnOptions),
+        );
+      yield* Effect.addFinalizer(() => Effect.sync(() => spawnMock.mockRestore()));
+      let thrown: unknown;
+      const uncaught = yield* uncaughtAfterNextTick(() => {
+        try {
+          spawnClaudeProcessGroup({
+            command: "claude",
+            args: [],
+            env: process.env,
+            signal: new AbortController().signal,
+          });
+        } catch (error) {
+          thrown = error;
+        }
+      });
+      assert.deepEqual(uncaught, []);
+      assert.instanceOf(thrown, Error);
+      assert.equal((thrown as NodeJS.ErrnoException).code, "ENOENT");
+    }),
+  );
+
+  it.effect("an already-aborted signal leaves no unhandled 'error' event", () =>
+    Effect.gen(function* () {
+      const cli = fakeClaudeCli("exit 0");
+      const dir = NodePath.dirname(cli);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
+      );
+      const uncaught = yield* uncaughtAfterNextTick(() =>
+        spawnClaudeProcessGroup({
+          command: cli,
+          args: [],
+          cwd: dir,
+          env: process.env,
+          signal: AbortSignal.abort(),
+        }),
+      );
+      assert.deepEqual(uncaught, []);
     }),
   );
 
