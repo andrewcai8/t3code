@@ -71,6 +71,12 @@ export function spawnNsc(
           child.stderr.destroy();
         };
         deadline?.addEventListener("abort", expire, { once: true });
+        child.once("error", (error) => {
+          deadline?.removeEventListener("abort", expire);
+          reject(error);
+        });
+        // A failed spawn has no stdio; its error event rejects this call.
+        if (child.pid === undefined) return;
         let stdout = "";
         let stderr = "";
         child.stdout.setEncoding("utf8").on("data", (data: string) => {
@@ -78,10 +84,6 @@ export function spawnNsc(
         });
         child.stderr.setEncoding("utf8").on("data", (data: string) => {
           stderr += data;
-        });
-        child.once("error", (error) => {
-          deadline?.removeEventListener("abort", expire);
-          reject(error);
         });
         child.once("close", (code) => {
           deadline?.removeEventListener("abort", expire);

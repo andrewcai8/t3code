@@ -1224,8 +1224,9 @@ export class Launcher {
           ? ["inherit", appendStdout ? "pipe" : "inherit", appendStderr ? "pipe" : "inherit", "ipc"]
           : ["ignore", this.#output, this.#output, "ipc"],
     });
-    if (child.stdout !== null) appendOutput(child.stdout, 1);
-    if (child.stderr !== null) appendOutput(child.stderr, 2);
+    // A failed spawn leaves these undefined and reports through its 'error' event below.
+    if (child.stdout) appendOutput(child.stdout, 1);
+    if (child.stderr) appendOutput(child.stderr, 2);
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error);
       child.once("error", onError);
