@@ -252,13 +252,16 @@ export function spawnClaudeProbeThroughEnv({
   signal,
 }: ClaudeSpawnOptions) {
   const launch = envTrampoline(command, args, cwd) ?? { command, args, cwd };
-  return NodeChildProcess.spawn(launch.command, launch.args, {
+  const child = NodeChildProcess.spawn(launch.command, launch.args, {
     ...("cwd" in launch ? { cwd: launch.cwd } : {}),
     env,
     signal,
     // The probe ignores stderr.
     stdio: ["pipe", "pipe", "ignore"],
   });
+  // A failed spawn has no stdin, so the SDK throws before it listens; its 'error' must not go unhandled.
+  child.on("error", () => {});
+  return child;
 }
 
 /** Windows runs CreateProcess on the calling thread, so the probe launches from a launcher thread. */

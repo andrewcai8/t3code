@@ -68,6 +68,9 @@ function executeCli(binary: string, command: CliCommand): Promise<CliResult> {
       env: command.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    child.once("error", reject);
+    // A failed spawn has no stdio; its error event rejects this call.
+    if (child.pid === undefined) return;
     let aborted = false;
     const abort = () => {
       if (aborted || child.exitCode !== null || child.signalCode !== null) return;
@@ -86,7 +89,6 @@ function executeCli(binary: string, command: CliCommand): Promise<CliResult> {
     child.stderr.setEncoding("utf8").on("data", (data: string) => {
       stderr += data;
     });
-    child.once("error", reject);
     child.once("close", (code) => {
       command.signal?.removeEventListener("abort", abort);
       if (aborted) reject(new Error("Namespace CLI command aborted or timed out"));
