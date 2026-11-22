@@ -431,6 +431,18 @@ export function spawnClaudeProcessGroup(
       detached: true,
     },
   );
+  // Node emits a failed spawn's 'error' on the next tick, and with no listener that kills the server.
+  let spawnFailure: Error | undefined;
+  child.on("error", (error: NodeJS.ErrnoException) => {
+    if (spawnFailure !== undefined) Object.assign(spawnFailure, { code: error.code, cause: error });
+  });
+  if (child.pid === undefined) {
+    // EMFILE and ENFILE leave no stdio either. The errno only arrives with the event above.
+    spawnFailure = new Error(
+      "Failed to start the Claude CLI: the operating system refused to spawn it.",
+    );
+    throw spawnFailure;
+  }
   let forget: (() => void) | undefined;
   // Always drained, so a chatty CLI never blocks on a full stderr pipe.
   child.stderr?.setEncoding("utf8").on("data", onStderr).once("close", onStderrClose);
