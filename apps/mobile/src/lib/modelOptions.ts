@@ -66,7 +66,7 @@ export type ModelOption = {
 
 type ProviderUpdateRequired = Pick<
   T3ServerConfig["providers"][number],
-  "driver" | "updateRequiredModels"
+  "driver" | "updateRequiredModels" | "versionAdvisory"
 >;
 
 export type ProviderGroup = {
@@ -424,7 +424,11 @@ export function buildModelOptions(
     // A stand-in is the driver, not one of its accounts.
     const providerBadge = standIn === undefined ? providerBadgeFor(provider.instanceId) : undefined;
     const updateRequired = provider.updateRequiredModels?.length
-      ? { driver: provider.driver, updateRequiredModels: provider.updateRequiredModels }
+      ? {
+          driver: provider.driver,
+          updateRequiredModels: provider.updateRequiredModels,
+          ...(provider.versionAdvisory ? { versionAdvisory: provider.versionAdvisory } : {}),
+        }
       : undefined;
     const preferences = config?.settings?.providerModelPreferences?.[provider.instanceId];
     const hiddenModels = new Set(preferences?.hiddenModels ?? []);

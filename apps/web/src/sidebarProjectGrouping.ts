@@ -10,6 +10,7 @@ import {
   derivePhysicalProjectKey,
   isPickableProjectMember,
   resolveScratchProjectScopeKey,
+  selectGroupDefaultProject,
   type ProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { msg } from "gt-react";
@@ -239,7 +240,10 @@ export function buildSidebarProjectPickerEntries(input: {
           (project) =>
             project.environmentId === preferredProjectRef.environmentId &&
             project.id === preferredProjectRef.projectId,
-        ) ?? members.find((project) => project.environmentId === preferredProjectRef.environmentId))
+        ) ??
+        selectGroupDefaultProject(
+          members.filter((project) => project.environmentId === preferredProjectRef.environmentId),
+        ))
       : null;
     const requestedProject =
       preferredProject ??

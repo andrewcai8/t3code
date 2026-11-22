@@ -97,6 +97,7 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
           primaryEnvironmentId: primaryConfig?.environment.environmentId ?? null,
           homeWorkspaceRoot: primaryConfig?.homeWorkspaceRoot ?? null,
         },
+        selectProjectGroupingSettings(getClientSettings()),
       ),
       handleNewThread,
     };

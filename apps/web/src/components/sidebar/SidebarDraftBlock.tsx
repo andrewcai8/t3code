@@ -24,7 +24,12 @@ import {
   type ComposerThreadDraftState,
   type DraftSessionState,
 } from "../../composerDraftStore";
-import { draftPenClassName, draftSurfaceClassName } from "./SidebarThreadRow";
+import {
+  draftPenClassName,
+  draftSurfaceClassName,
+  JUMP_HINT_SLOT_CLASS_NAME,
+  JumpHintBadge,
+} from "./SidebarThreadRow";
 
 const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   draftId: DraftId;
@@ -33,6 +38,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   project: ProjectFaviconProject | null;
   projectDisplayName: string | null;
   isActive: boolean;
+  jumpLabel: string | null;
   onNavigate: (draftId: DraftId) => void;
   onDiscard: (draftId: DraftId) => void;
   onContextMenu: (
@@ -121,7 +127,12 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
             <span className="min-w-0 flex-1 truncate text-xs font-medium text-secondary-label">
               {props.projectDisplayName}
             </span>
-            <span className="ml-auto flex h-5 min-w-5 shrink-0 items-center justify-end">
+            <span
+              className={cn(
+                "ml-auto flex h-5 min-w-5 shrink-0 items-center justify-end",
+                props.jumpLabel && JUMP_HINT_SLOT_CLASS_NAME,
+              )}
+            >
               <Tooltip>
                 <TooltipTrigger
                   render={
@@ -139,6 +150,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
                   <T>Discard draft</T>
                 </TooltipPopup>
               </Tooltip>
+              {props.jumpLabel ? <JumpHintBadge label={props.jumpLabel} /> : null}
             </span>
           </div>
           <div className="mt-0.5 truncate text-sm font-medium text-foreground/90">{preview}</div>
@@ -148,16 +160,75 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   );
 });
 
-interface SidebarDraftRowData {
-  draftId: DraftId;
-  session: DraftSessionState;
-  composer: ComposerThreadDraftState;
+function listedDraftComposer(draftId: string | null): ComposerThreadDraftState | null {
+  if (draftId === null) return null;
+  const store = useComposerDraftStore.getState();
+  const session = store.draftThreadsByThreadKey[draftId];
+  const composer = store.draftsByThreadKey[draftId];
+  return session &&
+    session.promotedTo == null &&
+    SidebarCloud.draftSessionHasInvestedWork(session, composer)
+    ? (composer ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER)
+    : null;
+}
+
+/**
+ * Unsent drafts listed above the threads, newest first. The open draft keeps the
+ * row it had on arrival (frozen content), so its row and jump number stay put.
+ */
+export function useSidebarDrafts(
+  scopedProjectKeys: ReadonlySet<string> | null,
+  routeDraftId: string | null,
+): { draftIds: readonly DraftId[]; routeDraftComposer: ComposerThreadDraftState | null } {
+  const [frozenRoute, setFrozenRoute] = useState<{
+    routeDraftId: string | null;
+    composer: ComposerThreadDraftState | null;
+  }>({ routeDraftId: null, composer: null });
+  if (frozenRoute.routeDraftId !== routeDraftId) {
+    setFrozenRoute({ routeDraftId, composer: listedDraftComposer(routeDraftId) });
+  }
+  const routeDraftComposer =
+    frozenRoute.routeDraftId === routeDraftId ? frozenRoute.composer : null;
+  // Membership-only subscription: the refs array keeps its identity until a
+  // thread is added or removed, so thread activity never re-renders the block.
+  const threadRefs = SidebarCloud.useThreadRefs();
+  const knownThreadKeys = new Set(threadRefs.map(scopedThreadKey));
+  const draftIds = useComposerDraftStore(
+    useShallow((store) => {
+      const listed: [string, DraftSessionState][] = [];
+      for (const [draftKey, session] of Object.entries(store.draftThreadsByThreadKey)) {
+        if (
+          session.promotedTo != null ||
+          SidebarCloud.isCloudSendThreadListed(session, knownThreadKeys)
+        ) {
+          continue;
+        }
+        if (
+          scopedProjectKeys !== null &&
+          !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+        ) {
+          continue;
+        }
+        // A started first send has a row even before the draft was ever left.
+        const isListed =
+          draftKey === routeDraftId
+            ? routeDraftComposer !== null || session.pendingEnvironmentSend != null
+            : SidebarCloud.draftSessionHasInvestedWork(session, store.draftsByThreadKey[draftKey]);
+        if (isListed) listed.push([draftKey, session]);
+      }
+      listed.sort(([, left], [, right]) => right.createdAt.localeCompare(left.createdAt));
+      return listed.map(([draftKey]) => DraftId.make(draftKey));
+    }),
+  );
+  return { draftIds, routeDraftComposer };
 }
 
 export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+  draftIds: readonly DraftId[];
+  routeDraftComposer: ComposerThreadDraftState | null;
+  jumpLabelByDraftId: ReadonlyMap<DraftId, string> | null;
   projectByKey: ReadonlyMap<string, EnvironmentProject>;
   projectDisplayNameByKey: ReadonlyMap<string, string>;
-  scopedProjectKeys: ReadonlySet<string> | null;
   routeDraftId: string | null;
   onNavigateToDraft: (draftId: DraftId) => void;
   onDraftContextMenu: (
@@ -170,74 +241,19 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   const draftsByThreadKey = useComposerDraftStore(
     useShallow((store) =>
       Object.fromEntries(
-        Object.keys(store.draftThreadsByThreadKey).map(
-          (key) => [key, store.draftsByThreadKey[key]] as const,
-        ),
+        props.draftIds.map((draftId) => [draftId, store.draftsByThreadKey[draftId]] as const),
       ),
     ),
   );
-  // Membership-only subscription: the refs array keeps its identity until a
-  // thread is added or removed, so thread activity never re-renders the block.
-  const threadRefs = SidebarCloud.useThreadRefs();
-  const knownThreadKeys = new Set(threadRefs.map(scopedThreadKey));
-  const [frozenActive, setFrozenActive] = useState<{
-    routeDraftId: string | null;
-    row: SidebarDraftRowData | null;
-  }>({ routeDraftId: null, row: null });
-  if (frozenActive.routeDraftId !== props.routeDraftId) {
-    let row: SidebarDraftRowData | null = null;
-    if (props.routeDraftId !== null) {
-      const draftId = DraftId.make(props.routeDraftId);
-      const session = draftThreadsByThreadKey[draftId];
-      const composer = draftsByThreadKey[draftId];
-      row =
-        session &&
-        session.promotedTo == null &&
-        SidebarCloud.draftSessionHasInvestedWork(session, composer)
-          ? { draftId, session, composer: composer ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER }
-          : null;
-    }
-    setFrozenActive({ routeDraftId: props.routeDraftId, row });
-  }
-  const drafts = (() => {
-    const rows: SidebarDraftRowData[] = [];
-    for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (
-        session.promotedTo != null ||
-        SidebarCloud.isCloudSendThreadListed(session, knownThreadKeys)
-      ) {
-        continue;
-      }
-      if (
-        props.scopedProjectKeys !== null &&
-        !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
-      ) {
-        continue;
-      }
-      if (draftKey === props.routeDraftId) {
-        // Only the composer is frozen; the live session shows a started first send's status,
-        // and a started first send has a row even before the draft was ever left.
-        if (frozenActive.routeDraftId === draftKey && frozenActive.row !== null) {
-          rows.push({ ...frozenActive.row, session });
-        } else if (session.pendingEnvironmentSend != null) {
-          const composer = draftsByThreadKey[draftKey] ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER;
-          rows.push({ draftId: DraftId.make(draftKey), session, composer });
-        }
-        continue;
-      }
-      const composer = draftsByThreadKey[draftKey];
-      if (!SidebarCloud.draftSessionHasInvestedWork(session, composer)) {
-        continue;
-      }
-      rows.push({
-        draftId: DraftId.make(draftKey),
-        session,
-        composer: composer ?? SidebarCloud.EMPTY_SIDEBAR_COMPOSER,
-      });
-    }
-    rows.sort((left, right) => right.session.createdAt.localeCompare(left.session.createdAt));
-    return rows;
-  })();
+  // Only the composer is frozen; the live session shows a started first send's status.
+  const drafts = props.draftIds.flatMap((draftId) => {
+    const session = draftThreadsByThreadKey[draftId];
+    const composer =
+      (draftId === props.routeDraftId ? props.routeDraftComposer : null) ??
+      draftsByThreadKey[draftId] ??
+      SidebarCloud.EMPTY_SIDEBAR_COMPOSER;
+    return session ? [{ draftId, session, composer }] : [];
+  });
   if (drafts.length === 0) {
     return null;
   }
@@ -254,6 +270,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
             project={props.projectByKey.get(projectKey) ?? null}
             projectDisplayName={props.projectDisplayNameByKey.get(projectKey) ?? null}
             isActive={draftId === props.routeDraftId}
+            jumpLabel={props.jumpLabelByDraftId?.get(draftId) ?? null}
             onNavigate={props.onNavigateToDraft}
             onDiscard={SidebarCloud.discardDraftRow}
             onContextMenu={props.onDraftContextMenu}

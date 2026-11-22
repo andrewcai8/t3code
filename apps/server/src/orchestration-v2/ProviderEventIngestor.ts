@@ -699,7 +699,18 @@ export const layer: Layer.Layer<
                         usageLimitResets.resetAt(input.event.driver, endpoint, model),
                       ),
                     );
-              const failure = hubResetAt === null ? reported : { ...reported, resetAt: hubResetAt };
+              // Fork: a Claude 429 with no reset from the CLI or a hub assumes one 30 minutes out,
+              // so routing skips the account and limit recovery moves the chat.
+              const assumedResetAt =
+                hubResetAt === null &&
+                reported.resetAt == null &&
+                input.event.driver === "claudeAgent" &&
+                reported.class === "usage_limit" &&
+                reported.code === "api_error_429"
+                  ? DateTime.formatIso(DateTime.add(occurredAt, { minutes: 30 }))
+                  : null;
+              const resetAt = hubResetAt ?? assumedResetAt;
+              const failure = resetAt === null ? reported : { ...reported, resetAt };
               return [
                 ...dismissed,
                 yield* makeDomainEvent(input, {

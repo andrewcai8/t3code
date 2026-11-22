@@ -18,6 +18,7 @@ import { FleetBroker } from "../home/FleetBroker.ts";
 import { FleetService } from "../home/FleetService.ts";
 import { HomeService } from "../home/HomeService.ts";
 import { WorktreeForks } from "../home/WorktreeForks.ts";
+import { TaskFolders } from "../workspace/TaskFolders.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import { PreviewAutomationBroker } from "../mcp/PreviewAutomationBroker.ts";
 import {
@@ -66,6 +67,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(GitVcsDriver)({}),
   Layer.mock(GitWorkflowService)({}),
   Layer.mock(HomeService)({ available: false }),
+  Layer.mock(TaskFolders)({}),
   Layer.mock(IssueService)({}),
   Layer.mock(ManagedProjectFolders)({ namedProjectsRoot: "" }),
   Layer.mock(McpProviderSessions)({}),
