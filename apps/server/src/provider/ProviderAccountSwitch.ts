@@ -17,7 +17,6 @@ import {
   type ProviderInstanceEnvironmentVariable,
   ProviderDriverKind,
   type ProviderInstanceId,
-  type ServerSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -42,6 +41,7 @@ import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
+import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
 
 export class ProviderAccountSwitchError extends Schema.TaggedError<ProviderAccountSwitchError>()(
@@ -81,6 +81,7 @@ const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
 const make = Effect.gen(function* () {
   const settings = yield* ServerSettingsModule.ServerSettingsService;
   const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+  const registryMutator = yield* ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const fs = yield* FileSystem.FileSystem;
@@ -229,8 +230,18 @@ const make = Effect.gen(function* () {
             (cause) => new ProviderAccountSwitchError({ stage: "write-login", cause }),
           ),
         );
-    if (previous !== undefined && !sameInstance(before, after, instanceId))
+    const instanceBefore = deriveProviderInstanceConfigMap(before)[instanceId];
+    const instanceAfter = deriveProviderInstanceConfigMap(after)[instanceId];
+    if (previous !== undefined && !Equal.equals(instanceBefore, instanceAfter)) {
+      // The registry keeps the live instance through a rename, and its processes hold the old login.
+      if (
+        instanceBefore !== undefined &&
+        instanceAfter !== undefined &&
+        ProviderInstanceRegistry.runtimeEqual(instanceBefore, instanceAfter)
+      )
+        yield* registryMutator.rebuild([instanceId]);
       yield* awaitRebuilt(instanceId, previous);
+    }
     // A turn may have started once the instance rebuilt. Releasing its session would cut it, so
     // the chat keeps it and runs on the new login from its next session.
     const latest = yield* readThread(input.threadId);
@@ -301,16 +312,5 @@ const withAccountEmail = (config: unknown, accountEmail: string | undefined) => 
     : {};
   return accountEmail ? { ...rest, accountEmail } : rest;
 };
-
-/** Whether a settings write left the instance as the registry builds it unchanged. */
-const sameInstance = (
-  before: ServerSettings,
-  after: ServerSettings,
-  instanceId: ProviderInstanceId,
-) =>
-  Equal.equals(
-    deriveProviderInstanceConfigMap(before)[instanceId],
-    deriveProviderInstanceConfigMap(after)[instanceId],
-  );
 
 export const layer = Layer.effect(ProviderAccountSwitch, make);

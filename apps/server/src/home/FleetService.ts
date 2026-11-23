@@ -290,7 +290,6 @@ const make = Effect.gen(function* () {
           "contextTransfers",
         ])
         .pipe(Effect.mapError(threadManagementFailure));
-      // Only Home's agent tools read through the fleet, so pages run newest first.
       return (yield* readThreadPage(
         { environmentId, client: undefined },
         threads,
@@ -298,7 +297,6 @@ const make = Effect.gen(function* () {
         shell,
         target.runs.length,
         input,
-        true,
       )).result;
     }),
 
@@ -344,6 +342,7 @@ const make = Effect.gen(function* () {
           threadId: input.threadId ?? ThreadId.make(id),
           projectId,
           title: input.title,
+          titleRenamed: true,
           modelSelection,
           runtimeMode: input.runtimeMode ?? current.defaultRuntimeMode,
           interactionMode: input.interactionMode ?? "default",
