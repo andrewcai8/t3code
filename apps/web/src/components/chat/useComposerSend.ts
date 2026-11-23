@@ -561,7 +561,9 @@ export function useComposerSend(input: ComposerSendInput) {
       );
       return;
     }
-    const heldForImages = directAnnotation ? null : holdComposerSend(composerDraftTarget);
+    // A resumed cloud send already carries its prompt; re-reading the live draft would mix in newer attachments.
+    const heldForImages =
+      directAnnotation || heldCloudSend !== null ? null : holdComposerSend(composerDraftTarget);
     if (heldForImages) {
       if ((await heldForImages).status === "cancelled") return;
       const draftAfterHold = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
