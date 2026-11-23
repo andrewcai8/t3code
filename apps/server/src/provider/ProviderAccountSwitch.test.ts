@@ -774,6 +774,44 @@ it.layer(NodeServices.layer)("ProviderAccountSwitch", (it) => {
       ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
+  it.effect("rebuilds the instance when a file login changes only its name", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("provider-account-switch-rename");
+        const opened = yield* Ref.make<ReadonlyArray<OpenedQuery>>([]);
+        const fs = yield* FileSystem.FileSystem;
+        const configDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-home-" });
+
+        yield* Effect.gen(function* () {
+          const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+          const accounts = yield* ProviderAccountSwitch.ProviderAccountSwitch;
+          yield* saveInstance(claudeInstanceId, {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            displayName: "First account",
+            config: {},
+            environment: [{ name: "CLAUDE_CONFIG_DIR", value: configDir, sensitive: false }],
+          });
+          yield* createThread(cwd);
+          const previous = yield* instances.getInstance(claudeInstanceId);
+
+          const switched = yield* accounts.switchAccount({
+            driver: "claudeAgent",
+            displayName: "Second account",
+            credential: {
+              kind: "file",
+              contentsBase64: Buffer.from('{"claudeAiOauth":{}}').toString("base64"),
+            },
+            threadId,
+          });
+
+          assert.deepEqual(switched, { kind: "switched", continued: false });
+          // A rename alone keeps the live instance, whose processes still hold the old login.
+          assert.notStrictEqual(yield* instances.getInstance(claudeInstanceId), previous);
+        }).pipe(Effect.provide(boxRuntime(opened, cwd)));
+      }),
+    ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect("writes a Codex login into the instance's home, beside its sessions", () =>
     Effect.scoped(
       Effect.gen(function* () {

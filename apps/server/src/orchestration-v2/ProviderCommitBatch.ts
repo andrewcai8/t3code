@@ -171,8 +171,8 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
   const pending = new Set<Job>();
   let closed = false;
   let servings = 0;
-  // Writes in `barrier` that have not finished; they wait on the batch or the writer it holds.
-  let waitingWriters = 0;
+  // The snapshots each unfinished `barrier` write waits on.
+  const waitingWrites = new Set<ReadonlySet<Job>>();
   // Writes in `barrier` that wait on a queued snapshot; they end the linger.
   let blockedWriters = 0;
   let linger: Deferred.Deferred<void> | undefined;
@@ -351,10 +351,18 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           taken = 0;
           const startedAt = yield* Clock.monotonicTimeNanos;
           for (const { job, superseded } of units) {
+            // Cutting only helps a write that needs none of the units still to run.
             if (
               taken > 0 &&
-              waitingWriters > 0 &&
-              (yield* Clock.monotonicTimeNanos) - startedAt >= MAX_HOLD_NANOS
+              waitingWrites.size > 0 &&
+              (yield* Clock.monotonicTimeNanos) - startedAt >= MAX_HOLD_NANOS &&
+              Array.from(waitingWrites).some((jobs) =>
+                units
+                  .slice(taken)
+                  .every(
+                    (unit) => !jobs.has(unit.job) && !unit.superseded.some((j) => jobs.has(j)),
+                  ),
+              )
             )
               return;
             taken++;
@@ -426,26 +434,28 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
   ) {
     if (closed) return yield* Effect.interrupt;
     if (!enabled || (yield* CurrentWorker) === (yield* Effect.fiberId)) return yield* effect;
-    return yield* Effect.uninterruptibleMask((restore) => {
-      waitingWriters++;
-      const blocking = Array.from(pending).filter(
+    const jobs: ReadonlySet<Job> = new Set(
+      Array.from(pending).filter(
         (job) => threadIds === undefined || threadIds.includes(job.threadId),
-      );
-      if (blocking.length > 0) {
+      ),
+    );
+    return yield* Effect.uninterruptibleMask((restore) => {
+      waitingWrites.add(jobs);
+      if (jobs.size > 0) {
         blockedWriters++;
         endLingerIfOver();
       }
       return restore(
         Effect.gen(function* () {
-          for (const job of blocking) yield* job.settled;
+          for (const job of jobs) yield* job.settled;
           if (closed) return yield* Effect.interrupt;
           return yield* effect;
         }),
       ).pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            waitingWriters--;
-            if (blocking.length > 0) blockedWriters--;
+            waitingWrites.delete(jobs);
+            if (jobs.size > 0) blockedWriters--;
           }),
         ),
       );

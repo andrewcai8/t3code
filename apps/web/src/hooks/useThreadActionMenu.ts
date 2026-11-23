@@ -157,6 +157,7 @@ export function useThreadActionMenu(input: {
         hasProvisionedCloudMachine: SidebarCloud.provisionedSandboxFor(threadRef) !== null,
         isRegeneratingTitle,
         isRunning: !threadRuntimeCanArchive(thread.runtime),
+        hasCompletedRun: thread.latestRun?.completedAt != null,
         supports,
         snoozePresets,
         canShareWithGuest,

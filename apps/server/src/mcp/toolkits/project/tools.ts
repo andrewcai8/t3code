@@ -7,6 +7,7 @@ import {
   ModelSelection,
   TrimmedNonEmptyString,
   OrchestrationV2DelegatedFrom,
+  OrchestrationV2WorkflowOrigin,
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
   RuntimeMode,
   ProviderInteractionMode,
@@ -166,6 +167,8 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    /** Set by a linked environment whose workflow run this thread is a step of; ignored otherwise. */
+    workflowRun: Schema.optional(OrchestrationV2WorkflowOrigin),
   }),
   success: FleetThreadLaunchResult,
   dependencies: [
