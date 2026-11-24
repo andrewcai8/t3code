@@ -1,5 +1,6 @@
 {
   "default": "claudeAgent/claude-opus-5-5 effort=xhigh",
-  "strongest": "claudeAgent/claude-opus-5-5 effort=xhigh",
-  "panel": ["claudeAgent/claude-opus-5-5 effort=xhigh", "codex/gpt-6.1-sol reasoningEffort=xhigh"]
+  "fast": "claudeAgent/claude-opus-5-5 effort=high",
+  "panel": ["claudeAgent/claude-opus-5-5 effort=xhigh", "codex/gpt-6.1-sol reasoningEffort=xhigh"],
+  "judges": ["claudeAgent/claude-opus-5-5 effort=xhigh", "codex/gpt-6.1-sol reasoningEffort=xhigh"]
 }
