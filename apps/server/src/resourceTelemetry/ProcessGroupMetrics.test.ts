@@ -68,10 +68,10 @@ describe("groupProcesses", () => {
     });
   });
 
-  it("groups the spawn host's children as the server's own, and the host as the server", () => {
+  it("groups the process launcher's children as the server's own, and the launcher as the server", () => {
     const totals = groupProcesses([
       process(10, 1, "node", "server"),
-      process(11, 10, "node", "server-child", "node /opt/t3/dist/bin.mjs __spawn-host"),
+      process(11, 10, "node", "server-child", "node /opt/t3/dist/process-launcher.mjs"),
       process(30, 11, "codex"),
       process(31, 30, "bash"),
       process(40, 11, "git"),
