@@ -106,6 +106,9 @@ import {
   TaskFolder,
   TaskFolderError,
   WorkspaceAddTaskFolderRepositoryInput,
+  WorkspaceApproveLayoutCommandsInput,
+  WorkspaceLayoutCommandsInput,
+  WorkspaceLayoutCommandsResult,
   WorkspaceListFoldersInput,
   WorkspaceListFoldersResult,
   WorkspaceScanFoldersInput,
@@ -450,8 +453,10 @@ import {
   WorkflowRunDetail,
   WorkflowRunGetInput,
   WorkflowRunResumeInput,
+  WorkflowRunsAbout,
+  WorkflowRunsAboutInput,
   WorkflowCounts,
-  WorkflowRunsSnapshot,
+  WorkflowRunsUpdate,
   WorkflowRunsSubscribeInput,
 } from "./workflow.ts";
 import {
@@ -520,6 +525,8 @@ export const WS_METHODS = {
   workspaceScanFolders: "workspace.scanFolders",
   workspaceTaskFolder: "workspace.taskFolder",
   workspaceAddTaskFolderRepository: "workspace.addTaskFolderRepository",
+  workspaceLayoutCommands: "workspace.layoutCommands",
+  workspaceApproveLayoutCommands: "workspace.approveLayoutCommands",
   filesystemGetMetadata: "filesystem.getMetadata",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
@@ -667,6 +674,7 @@ export const WS_METHODS = {
   workflowsSubscribe: "workflows.subscribe",
   workflowsCounts: "workflows.counts",
   workflowsGet: "workflows.get",
+  workflowsAbout: "workflows.about",
   workflowsAnswer: "workflows.answer",
   workflowsResume: "workflows.resume",
   workflowsCancel: "workflows.cancel",
@@ -1789,6 +1797,18 @@ const WsWorkspaceAddTaskFolderRepositoryRpc = Rpc.make(
   },
 );
 
+const WsWorkspaceLayoutCommandsRpc = Rpc.make(WS_METHODS.workspaceLayoutCommands, {
+  payload: WorkspaceLayoutCommandsInput,
+  success: WorkspaceLayoutCommandsResult,
+  error: Schema.Union([TaskFolderError, EnvironmentAuthorizationError]),
+});
+
+const WsWorkspaceApproveLayoutCommandsRpc = Rpc.make(WS_METHODS.workspaceApproveLayoutCommands, {
+  payload: WorkspaceApproveLayoutCommandsInput,
+  success: WorkspaceLayoutCommandsResult,
+  error: Schema.Union([TaskFolderError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -2417,7 +2437,7 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
 
 const WsWorkflowsSubscribeRpc = Rpc.make(WS_METHODS.workflowsSubscribe, {
   payload: WorkflowRunsSubscribeInput,
-  success: WorkflowRunsSnapshot,
+  success: WorkflowRunsUpdate,
   error: EnvironmentAuthorizationError,
   stream: true,
 });
@@ -2432,6 +2452,12 @@ const WsWorkflowsCountsRpc = Rpc.make(WS_METHODS.workflowsCounts, {
 const WsWorkflowsGetRpc = Rpc.make(WS_METHODS.workflowsGet, {
   payload: WorkflowRunGetInput,
   success: WorkflowRunDetail,
+  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsWorkflowsAboutRpc = Rpc.make(WS_METHODS.workflowsAbout, {
+  payload: WorkflowRunsAboutInput,
+  success: WorkflowRunsAbout,
   error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError]),
 });
 
@@ -2651,6 +2677,7 @@ export const CoreWsRpcGroup = RpcGroup.make(
   WsWorkflowsSubscribeRpc,
   WsWorkflowsCountsRpc,
   WsWorkflowsGetRpc,
+  WsWorkflowsAboutRpc,
   WsWorkflowsAnswerRpc,
   WsWorkflowsResumeRpc,
   WsWorkflowsCancelRpc,
@@ -2734,6 +2761,8 @@ export const CoreWsRpcGroup = RpcGroup.make(
   WsWorkspaceScanFoldersRpc,
   WsWorkspaceTaskFolderRpc,
   WsWorkspaceAddTaskFolderRepositoryRpc,
+  WsWorkspaceLayoutCommandsRpc,
+  WsWorkspaceApproveLayoutCommandsRpc,
   WsFilesystemGetMetadataRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,

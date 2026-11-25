@@ -145,6 +145,14 @@ const expectedUpstreamAbove51: ReadonlyArray<readonly [number, string]> = [
   [109, "IssueTrackerAccounts"],
   [110, "Workflows"],
   [111, "SupersededRunAttemptIndex"],
+  [112, "LayoutCommandApprovals"],
+  [113, "WorkflowSkippedRuns"],
+  [114, "WorkflowRunIndexes"],
+  [115, "WorkflowRunTags"],
+  [116, "ForkHistoryMembership"],
+  [117, "WorkflowMailSender"],
+  [118, "WorkflowPools"],
+  [119, "WorkflowRunSubject"],
 ];
 /** Upstream migrations newer than any fork-era ledger, which a moved ledger still runs. */
 const upstreamAfterForkEra = expectedUpstreamAbove51.filter(([id]) => id > 56);

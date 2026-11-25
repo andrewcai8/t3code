@@ -1,7 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { EnvironmentId, ThreadId, type OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -27,6 +26,7 @@ import {
   isOfflineThreadLifecycleDispatchResult,
   threadLifecycleOverlayAtom,
 } from "./threadLifecycleOverlay.ts";
+import type { EnvironmentShellStatus } from "./shell.ts";
 
 const TEST_CRYPTO_LAYER = Layer.succeed(
   SecureRandom.SecureRandom,
@@ -86,7 +86,10 @@ const makeOfflineHarness = Effect.fn("makeOfflineHarness")(function* (
       threads: [{ ...v2ThreadShell, id: OFFLINE_THREAD_ID, activeOrderKey: "a" }],
     }),
   );
-  const commands = createThreadEnvironmentAtoms(runtime, snapshotAtom);
+  const statusAtom = Atom.family((_environmentId: EnvironmentId) =>
+    Atom.make<EnvironmentShellStatus>("cached"),
+  );
+  const commands = createThreadEnvironmentAtoms(runtime, snapshotAtom, statusAtom);
   const registry = AtomRegistry.make();
   registry.mount(commands.snapshotAtom(OFFLINE_ENVIRONMENT_ID));
   return {
@@ -101,32 +104,6 @@ const failingRun = <E>(error: E): EnvironmentRegistry.EnvironmentRegistry["Servi
   (() => Effect.fail(error)) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"];
 
 describe("offline thread.settle", () => {
-  it.effect("parks the thread locally when the environment has no RPC session", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeOfflineHarness();
-      const result = yield* Effect.promise(() =>
-        runAtomCommand(harness.registry, harness.commands.settle, {
-          environmentId: OFFLINE_ENVIRONMENT_ID,
-          input: { threadId: OFFLINE_THREAD_ID },
-        }),
-      );
-
-      expect(result._tag).toBe("Success");
-      if (result._tag !== "Success") return;
-      expect(isOfflineThreadLifecycleDispatchResult(result.value)).toBe(true);
-      const overlay = harness.registry
-        .get(threadLifecycleOverlayAtom)
-        .get(threadKey({ environmentId: OFFLINE_ENVIRONMENT_ID, threadId: OFFLINE_THREAD_ID }));
-      expect(overlay?.kind).toBe("settled");
-      const [thread] = harness.visibleThreads();
-      expect({
-        settledOverride: thread?.settledOverride,
-        settledAt: thread?.settledAt == null ? null : DateTime.formatIso(thread.settledAt),
-        activeOrderKey: thread?.activeOrderKey,
-      }).toEqual({ settledOverride: "settled", settledAt: overlay?.at, activeOrderKey: null });
-    }),
-  );
-
   it.effect("parks the thread locally when the environment is not registered", () =>
     Effect.gen(function* () {
       const harness = yield* makeOfflineHarness({

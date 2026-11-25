@@ -16,7 +16,12 @@ import { threadSelectionDeferral } from "./deferred-navigation";
 import { uuidv4 } from "../../lib/uuid";
 import { EnvironmentId, ThreadId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { NavigationContext, NavigationRouteContext, useNavigation } from "@react-navigation/native";
+import {
+  CommonActions,
+  NavigationContext,
+  NavigationRouteContext,
+  useNavigation,
+} from "@react-navigation/native";
 import {
   use,
   useEffect,
@@ -657,14 +662,16 @@ function AdaptiveWorkspaceLayoutContent(
       lastProject: saved?.lastThreadProject,
     });
     const { draft } = destination;
-    const project =
-      "projectId" in draft
-        ? projects.find(
-            (candidate) =>
-              String(candidate.environmentId) === draft.environmentId &&
-              String(candidate.id) === draft.projectId,
-          )
-        : undefined;
+    // Without a project the draft would only push the picker over itself a frame later; open it directly.
+    if (draft.projectId === undefined) {
+      navigation.dispatch(CommonActions.navigate("NewTaskProject"));
+      return;
+    }
+    const project = projects.find(
+      (candidate) =>
+        String(candidate.environmentId) === draft.environmentId &&
+        String(candidate.id) === draft.projectId,
+    );
     // Moves the draft off another chat's box, or starts a cloud machine on a host that runs no
     // agents. A project only boxes hold opens as is, and the draft leaves the box itself.
     if (project && handleNewThreadInProject(project)) return;
