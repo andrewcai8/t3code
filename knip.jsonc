@@ -85,7 +85,6 @@
       "ignoreDependencies": [
         "@effect/platform-node-shared",
         "@t3tools/web",
-        "@napi-rs/keyring",
         "ffi-rs",
         "@connectrpc/connect-web",
         "undici",

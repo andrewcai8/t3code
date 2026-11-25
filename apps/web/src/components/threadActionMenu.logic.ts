@@ -99,6 +99,8 @@ export interface ThreadActionMenuState {
   readonly canOperate: boolean;
   /** The thread's machine is gone for good; it can still be settled or deleted on this device. */
   readonly machineGone: boolean;
+  /** Settle, snooze and their undo stay available until the host denies the operate scope. */
+  readonly canTriage?: boolean;
   readonly canFind?: boolean;
   /** False where no inline title editor is rendered, such as sidebar search results. */
   readonly canRename?: boolean;
@@ -151,6 +153,16 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
 /** What still applies on this device after a thread's machine is gone for good. */
 export function threadActionWorksWithoutMachine(action: ThreadActionMenuId): boolean {
   return action === "settle" || action === "unsettle" || action === "delete";
+}
+
+export function isThreadTriageAction(action: string): boolean {
+  return (
+    action === "settle" ||
+    action === "unsettle" ||
+    action === "snooze" ||
+    action === "unsnooze" ||
+    action.startsWith("snooze:")
+  );
 }
 
 export function buildThreadActionMenuItems(
@@ -327,7 +339,8 @@ export function buildThreadActionMenuItems(
     ? items
     : items.map((item) =>
         threadActionRequiresOperate(item.id) &&
-        !(state.machineGone && threadActionWorksWithoutMachine(item.id))
+        !(state.machineGone && threadActionWorksWithoutMachine(item.id)) &&
+        !(state.canTriage === true && isThreadTriageAction(item.id))
           ? {
               ...item,
               disabled: true,

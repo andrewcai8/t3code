@@ -254,6 +254,30 @@ export function recoverOfflineThreadLifecycle<
   };
 }
 
+/** A settle that went through (or was queued) cancels an un-settle still waiting on this device. */
+export function dropPendingUnsettle<
+  W extends {
+    readonly environmentId: EnvironmentId;
+    readonly input: { readonly threadId: ThreadId };
+  },
+  A,
+  E,
+>(command: AtomCommand<W, A, E>): AtomCommand<W, A, E> {
+  return {
+    label: command.label,
+    run: (registry, target) =>
+      command.run(registry, target).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            const ref = { environmentId: target.environmentId, threadId: target.input.threadId };
+            const existing = registry.get(threadLifecycleOverlayAtom).get(threadKey(ref));
+            if (existing?.kind === "unsettled") setThreadLifecycleOverlay(registry, ref, undefined);
+          }),
+        ),
+      ),
+  };
+}
+
 export interface ThreadLifecycleOverlayFlushJob {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
