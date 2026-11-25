@@ -24,6 +24,7 @@ import { runAtomCommand } from "./runtime.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 import {
   isOfflineThreadLifecycleDispatchResult,
+  setThreadLifecycleOverlay,
   threadLifecycleOverlayAtom,
 } from "./threadLifecycleOverlay.ts";
 import type { EnvironmentShellStatus } from "./shell.ts";
@@ -104,6 +105,27 @@ const failingRun = <E>(error: E): EnvironmentRegistry.EnvironmentRegistry["Servi
   (() => Effect.fail(error)) as EnvironmentRegistry.EnvironmentRegistry["Service"]["run"];
 
 describe("offline thread.settle", () => {
+  it.effect("a settle the outbox queues drops an un-settle still waiting on this device", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeOfflineHarness();
+      const ref = { environmentId: OFFLINE_ENVIRONMENT_ID, threadId: OFFLINE_THREAD_ID };
+      setThreadLifecycleOverlay(harness.registry, ref, {
+        kind: "unsettled",
+        at: "2026-11-25T00:00:00.000Z",
+      });
+      const result = yield* Effect.promise(() =>
+        runAtomCommand(harness.registry, harness.commands.settle, {
+          environmentId: OFFLINE_ENVIRONMENT_ID,
+          input: { threadId: OFFLINE_THREAD_ID },
+        }),
+      );
+
+      expect(result._tag).toBe("Success");
+      expect(harness.registry.get(threadLifecycleOverlayAtom).get(threadKey(ref))).toBeUndefined();
+      expect(harness.visibleThreads()[0]?.settledOverride).toBe("settled");
+    }),
+  );
+
   it.effect("parks the thread locally when the environment is not registered", () =>
     Effect.gen(function* () {
       const harness = yield* makeOfflineHarness({

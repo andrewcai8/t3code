@@ -72,6 +72,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 import {
+  dropPendingUnsettle,
   recoverOfflineThreadLifecycle,
   withThreadLifecycleOverlays,
 } from "./threadLifecycleOverlay.ts";
@@ -611,7 +612,9 @@ export function createThreadEnvironmentAtoms<R, E>(
     settle: optimistic.wrap(
       recoverOfflineThreadLifecycle(
         "settled",
-        triage.queueWhenOffline(commands.settle, () => ({ type: "settle" as const })),
+        dropPendingUnsettle(
+          triage.queueWhenOffline(commands.settle, () => ({ type: "settle" as const })),
+        ),
       ),
       (thread, _input, now, accepted) => applySettle(thread, now, accepted),
     ),
