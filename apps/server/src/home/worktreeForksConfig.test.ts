@@ -52,6 +52,7 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       defaultSize: "default",
       maxConcurrent: 8,
       e2bRoom: 95,
+      localFirst: null,
       maxJobMs: 120 * 60_000,
       maxCopyBackBytes: 100 * 1024 * 1024,
       bunShim: { skipWhenSet: [], minTestFiles: 20 },
@@ -195,5 +196,22 @@ it.effect("a copy reserves its size's requests and may burst to its limits", () 
       memoryMiB: 8 * 1024,
       memoryLimitMiB: 16 * 1024,
     });
+  }),
+);
+
+it.effect("local-first admission is off unless configured, with defaults when it is", () =>
+  Effect.gen(function* () {
+    const hostWith = (extra: object) =>
+      readWorktreeForksConfig(stateDirWith({ modal, repositories: [megpt], ...extra }));
+    expect((yield* hostWith({}))!.localFirst).toBeNull();
+    expect((yield* hostWith({ localFirst: {} }))!.localFirst).toEqual({
+      cpuBelow: 30,
+      ioBelow: 10,
+      memoryBelow: 5,
+      maxPerMinute: 6,
+    });
+    expect(
+      (yield* hostWith({ localFirst: { cpuBelow: 50, maxPerMinute: 3 } }))!.localFirst,
+    ).toEqual({ cpuBelow: 50, ioBelow: 10, memoryBelow: 5, maxPerMinute: 3 });
   }),
 );

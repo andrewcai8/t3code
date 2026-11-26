@@ -29,6 +29,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import type { ForkExecRequest } from "./forkExecProtocol.ts";
+import type { Pressure } from "./localFirst.ts";
 import * as WorktreeForks from "./WorktreeForks.ts";
 import {
   claimCopyBack,
@@ -43,6 +44,7 @@ import {
   type E2bPlatform,
   type ForkPlatform,
   type ForkRepository,
+  type LocalFirstSettings,
   type ModalPlatform,
   SandboxesBusy,
   type WorktreeForksHost,
@@ -88,6 +90,7 @@ const setup = (
   options: {
     readonly maxConcurrent?: number;
     readonly e2bRoom?: number;
+    readonly localFirst?: LocalFirstSettings;
     readonly services?: ReadonlyArray<string>;
     readonly e2b?: true;
   } = {},
@@ -121,6 +124,7 @@ const setup = (
     defaultSize: "default",
     maxConcurrent: options.maxConcurrent ?? 8,
     e2bRoom: options.e2bRoom ?? 95,
+    localFirst: options.localFirst ?? null,
     maxJobMs: 120 * 60_000,
     maxCopyBackBytes: 100 * 1024 * 1024,
     repositories: new Map([[repository.repository, repository]]),
@@ -165,10 +169,14 @@ const setup = (
       Layer.succeed(HostProcess.Environment, { PATH: "/usr/bin", SERVER_ONLY: "yes" }),
     ),
   );
-  const start = WorktreeForks.make(host, (platform: ForkPlatform) =>
-    platform.kind === "modal" ? fake.port : e2bFake.port,
+  /** What the host's pressure reads as; null is a host that does not report it. */
+  const pressure: { reading: Pressure | null } = { reading: { cpu: 0, io: 0, memory: 0 } };
+  const start = WorktreeForks.make(
+    host,
+    (platform: ForkPlatform) => (platform.kind === "modal" ? fake.port : e2bFake.port),
+    Effect.sync(() => pressure.reading),
   );
-  return { root, stateDir, fake, e2bFake, layer, start };
+  return { root, stateDir, fake, e2bFake, layer, start, pressure };
 };
 
 const request = (root: string, overrides: Partial<ForkExecRequest> = {}): ForkExecRequest => ({
@@ -1484,5 +1492,88 @@ it.effect("a copy E2B refuses for want of room is retried instead of refused", (
     expect(yield* Fiber.join(job)).toMatchObject({ _tag: "Exited", exitCode: 0 });
     expect(e2bFake.calls.filter((call) => call.op === "create")).toHaveLength(2);
     expect(e2bFake.running().size).toBe(0);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+const localFirst = { cpuBelow: 30, ioBelow: 10, memoryBelow: 5, maxPerMinute: 2 };
+
+/** A call from the bun shim, which is the only caller that is local-first. */
+const shimRequest = (root: string, overrides: Partial<ForkExecRequest> = {}) =>
+  request(root, {
+    ...overrides,
+    environment: { ...request(root).environment, T3CODE_FORK_CALLER: "bun-shim" },
+  });
+
+it.effect("a shim job stays local while the host is under every pressure ceiling", () => {
+  const { root, fake, layer, start, pressure } = setup({ localFirst });
+  return Effect.gen(function* () {
+    pressure.reading = { cpu: 29.9, io: 9.9, memory: 4.9 };
+    const forks = yield* start;
+    expect(yield* forks.exec(shimRequest(root), watcher().observer)).toEqual({
+      _tag: "NotStarted",
+      message: "This host has room, so the command runs here.",
+    });
+    expect(fake.calls).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a shim job goes to a copy once any one pressure reaches its ceiling", () => {
+  const { root, fake, layer, start, pressure } = setup({
+    localFirst: { ...localFirst, maxPerMinute: 100 },
+  });
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    for (const busy of [
+      { cpu: 30, io: 0, memory: 0 },
+      { cpu: 0, io: 10, memory: 0 },
+      { cpu: 0, io: 0, memory: 5 },
+    ]) {
+      pressure.reading = busy;
+      expect(yield* forks.exec(shimRequest(root), watcher().observer)).toMatchObject({
+        _tag: "Exited",
+      });
+    }
+    expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(3);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a burst of shim jobs is held to the per-minute budget, which refills", () => {
+  const { root, fake, layer, start } = setup({ localFirst });
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    const outcome = () => forks.exec(shimRequest(root), watcher().observer);
+    expect((yield* outcome())._tag).toBe("NotStarted");
+    yield* TestClock.adjust("30 seconds");
+    expect((yield* outcome())._tag).toBe("NotStarted");
+    expect((yield* outcome())._tag).toBe("Exited");
+    yield* TestClock.adjust("30 seconds");
+    expect((yield* outcome())._tag).toBe("NotStarted");
+    expect((yield* outcome())._tag).toBe("Exited");
+    expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(2);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("only the bun shim without a named platform is local-first", () => {
+  const { root, fake, e2bFake, layer, start } = setup({ localFirst, e2b: true });
+  return Effect.gen(function* () {
+    const forks = yield* start;
+    expect(yield* forks.exec(request(root), watcher().observer)).toMatchObject({ _tag: "Exited" });
+    expect(
+      yield* forks.exec(shimRequest(root, { platform: "e2b" }), watcher().observer),
+    ).toMatchObject({ _tag: "Exited" });
+    expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(1);
+    expect(e2bFake.calls.filter((call) => call.op === "create")).toHaveLength(1);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a shim job goes to a copy when the host's pressure cannot be read", () => {
+  const { root, fake, layer, start, pressure } = setup({ localFirst });
+  return Effect.gen(function* () {
+    pressure.reading = null;
+    const forks = yield* start;
+    expect(yield* forks.exec(shimRequest(root), watcher().observer)).toMatchObject({
+      _tag: "Exited",
+    });
+    expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(1);
   }).pipe(Effect.scoped, Effect.provide(layer));
 });

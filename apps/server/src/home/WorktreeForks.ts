@@ -42,6 +42,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { type ForkExecRequest, portableEnvironment } from "./forkExecProtocol.ts";
 import { makeE2bForkSandboxes } from "./e2bForkSandboxes.ts";
+import { makeLocalAdmission, type ReadPressure, readLinuxPressure } from "./localFirst.ts";
 import { makeModalForkSandboxes } from "./modalForkSandboxes.ts";
 import { type Bases, type ForkBase, makeBases } from "./worktreeForkBases.ts";
 import {
@@ -480,6 +481,7 @@ const disabled = WorktreeForks.of({
 export const make = Effect.fn("WorktreeForks.make")(function* (
   host: WorktreeForksHost,
   sandboxesOf: (platform: ForkPlatform) => ForkSandboxes,
+  readPressure: ReadPressure = readLinuxPressure,
 ) {
   const { stateDir, baseDir: t3Home } = yield* ServerConfig;
   const hostTag = (yield* (yield* ServerEnvironment.ServerEnvironment).getDescriptor).environmentId;
@@ -537,6 +539,8 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     });
   }
   const defaultLane = lanes.get(host.platforms[0].kind)!;
+  const localAdmission =
+    host.localFirst === null ? null : makeLocalAdmission(host.localFirst, readPressure);
   /** Runs `effect` once the lane's copy fits: at once where copies share no limit, else in its turn for an E2B slot. */
   const withRoom = <A, E, R>(lane: Lane, effect: Effect.Effect<A, E, R>) =>
     withSharedRoom(
@@ -978,6 +982,26 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
 
   const exec: WorktreeForks["Service"]["exec"] = Effect.fn("WorktreeForks.exec")(
     function* (request, observer) {
+      // Only the bun shim is local-first; a caller that names a platform or runs fork-exec itself
+      // asked for a copy.
+      if (
+        localAdmission !== null &&
+        request.platform === undefined &&
+        callerOf(request) === "bun-shim"
+      ) {
+        const admission = yield* localAdmission;
+        if (admission.local) {
+          yield* Effect.logInfo("worktree fork job kept local", {
+            cwd: request.cwd,
+            command: commandSummary(request.command),
+            ...admission.pressure,
+          });
+          return {
+            _tag: "NotStarted",
+            message: "This host has room, so the command runs here.",
+          } satisfies ExecOutcome;
+        }
+      }
       const lane = lanes.get(request.platform ?? defaultLane.kind);
       if (lane === undefined) {
         const message = `This host has no ${request.platform} platform for fork jobs; it has ${[...lanes.keys()].join(", ")}.`;

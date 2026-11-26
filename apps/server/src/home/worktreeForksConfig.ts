@@ -22,6 +22,8 @@ import {
 } from "../environmentControl/config.ts";
 import type { BunShimSettings } from "./bunShim.ts";
 
+const Percent = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
+
 const Bounded = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum }));
 
 /**
@@ -64,6 +66,18 @@ const WorktreeForksFile = Schema.Struct({
   /** Of it, how many E2B copies always leave free for other sandboxes to start. Default 5. */
   e2bChatReserve: Schema.optional(
     Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10_000 })),
+  ),
+  /**
+   * Send a bun shim job to a copy only while this host is busy: it runs locally while each Linux
+   * pressure reading is under its ceiling and fewer than `maxPerMinute` jobs went local in the last minute.
+   */
+  localFirst: Schema.optional(
+    Schema.Struct({
+      cpuBelow: Schema.optional(Percent),
+      ioBelow: Schema.optional(Percent),
+      memoryBelow: Schema.optional(Percent),
+      maxPerMinute: Schema.optional(Bounded(10_000)),
+    }),
   ),
   maxJobMinutes: Schema.optional(Bounded(1440)),
   maxCopyBackMiB: Schema.optional(Bounded(4096)),
@@ -174,6 +188,14 @@ export const baseKey = (platform: ForkPlatform, repository: ForkRepository) =>
     )
     .digest("hex");
 
+/** Ceilings are percentages of the last ten seconds that tasks stalled on the resource. */
+export interface LocalFirstSettings {
+  readonly cpuBelow: number;
+  readonly ioBelow: number;
+  readonly memoryBelow: number;
+  readonly maxPerMinute: number;
+}
+
 /** worktree-forks.json with defaults applied: the only shape the rest of the backend reads. */
 export interface WorktreeForksHost {
   /** Every configured platform, the default first. */
@@ -185,6 +207,8 @@ export interface WorktreeForksHost {
   readonly maxConcurrent: number;
   /** Running sandboxes E2B copies may take on the account, other hosts' and chats' included. */
   readonly e2bRoom: number;
+  /** Null keeps every job's copy decision as it was: none runs locally by choice. */
+  readonly localFirst: LocalFirstSettings | null;
   readonly maxJobMs: number;
   readonly maxCopyBackBytes: number;
   /** By canonical owner/name. */
@@ -363,6 +387,15 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
     defaultSize,
     maxConcurrent: file.maxConcurrent ?? 8,
     e2bRoom: (file.e2bConcurrency ?? 100) - (file.e2bChatReserve ?? 5),
+    localFirst:
+      file.localFirst === undefined
+        ? null
+        : {
+            cpuBelow: file.localFirst.cpuBelow ?? 30,
+            ioBelow: file.localFirst.ioBelow ?? 10,
+            memoryBelow: file.localFirst.memoryBelow ?? 5,
+            maxPerMinute: file.localFirst.maxPerMinute ?? 6,
+          },
     maxJobMs: (file.maxJobMinutes ?? 120) * 60_000,
     maxCopyBackBytes: (file.maxCopyBackMiB ?? 100) * 1024 * 1024,
     repositories,
