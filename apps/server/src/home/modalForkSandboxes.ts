@@ -44,6 +44,7 @@ export const makeModalForkSandboxes = (platform: ModalPlatform): ForkSandboxes =
     pruneImages: async () => undefined,
     terminate: boxes.terminate,
     list: (tags) => boxes.list(platform.app, platform.environment, tags),
+    accountRunning: null,
     directoryImages: { save: boxes.saveDirectory, mount: boxes.mountImage },
   };
 };

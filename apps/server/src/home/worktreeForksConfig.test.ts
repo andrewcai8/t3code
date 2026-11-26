@@ -51,6 +51,7 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       platforms: [{ kind: "modal", ...modal, app: "t3-worktree-forks" }],
       defaultSize: "default",
       maxConcurrent: 8,
+      e2bRoom: 95,
       maxJobMs: 120 * 60_000,
       maxCopyBackBytes: 100 * 1024 * 1024,
       bunShim: { skipWhenSet: [], minTestFiles: 20 },

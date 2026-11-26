@@ -392,9 +392,12 @@ export const e2bBusy = (cause: unknown) =>
   cause instanceof ServiceBusyError ||
   (cause instanceof SandboxError && (cause.statusCode === 429 || (cause.statusCode ?? 0) >= 500));
 
-/** Running sandboxes on the account, from their metadata, that are not `host`'s copies. */
-export const othersOf = (host: string, running: ReadonlyArray<Record<string, string>>) =>
-  running.filter((metadata) => metadata.purpose !== COPY_PURPOSE || metadata.host !== host).length;
+/** Running sandboxes on the account, from their metadata, that are not `host`'s copies made for `purpose`. */
+export const othersOf = (
+  host: string,
+  running: ReadonlyArray<Readonly<Record<string, string>>>,
+  purpose = COPY_PURPOSE,
+) => running.filter((metadata) => metadata.purpose !== purpose || metadata.host !== host).length;
 
 /** Runs a step's command, with a non-zero exit as the step's failure. */
 async function exec(sandbox: Sandbox, command: string, timeoutMs: number) {

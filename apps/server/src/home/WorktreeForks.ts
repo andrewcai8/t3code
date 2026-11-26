@@ -35,7 +35,8 @@ import * as Scope from "effect/Scope";
 
 import { ServerConfig } from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { makeSlots } from "../environmentControl/forkSlots.ts";
+import { othersOf } from "../environmentControl/ForkMachines.ts";
+import { makeSlots, NO_ROOM_RETRY, withSharedRoom } from "../environmentControl/forkSlots.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -49,6 +50,7 @@ import {
   type ForkSandboxes,
   platformLabel,
   readWorktreeForksConfig,
+  SandboxesBusy,
   type SandboxSize,
   type WorktreeForksHost,
 } from "./worktreeForksConfig.ts";
@@ -178,6 +180,8 @@ export class WorktreeForks extends Context.Service<
 class NotStarted extends Schema.TaggedError<NotStarted>()("NotStarted", {
   reason: Schema.String,
   cause: Schema.optional(Schema.Defect()),
+  /** The platform had no room for the copy for now, which created nothing, so starting it may be retried. */
+  busy: Schema.optional(Schema.Boolean),
 }) {
   override get message(): string {
     return this.reason;
@@ -194,12 +198,15 @@ class Lost extends Schema.TaggedError<Lost>()("Lost", {
   }
 }
 
+const isBusy = Schema.is(SandboxesBusy);
+
 /** A call to this host's own disk or sandbox platform that is logged or swallowed, never matched on. */
 class ForkHostCallError extends Schema.TaggedError<ForkHostCallError>()("ForkHostCallError", {
   operation: Schema.Literals([
     "save batch",
     "copy outputs back",
     "list sandboxes",
+    "count sandboxes",
     "end sandbox",
     "prune images",
   ]),
@@ -232,6 +239,8 @@ const commandSummary = (command: string) => {
 interface Lane {
   readonly kind: ForkPlatform["kind"];
   readonly sandboxes: ForkSandboxes;
+  /** The account's running sandboxes that are not this host's copies; null where copies share no limit. */
+  readonly othersRunning: Effect.Effect<number, ForkHostCallError> | null;
   readonly bases: Bases;
   readonly cache: Effect.Success<ReturnType<typeof makeUploadCache>>;
 }
@@ -494,6 +503,12 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     Effect.sync(() => (closing = true)).pipe(Effect.andThen(Scope.close(jobsScope, exit))),
   );
   const slots = makeSlots(host.maxConcurrent);
+  /**
+   * This host's E2B copies, held from before their start until they end. Its size is the room every
+   * other running sandbox on the account leaves, so a copy starting now is counted once, by its slot,
+   * however the account's listing lags.
+   */
+  const e2bSlots = makeSlots(Math.min(host.maxConcurrent, Math.max(0, host.e2bRoom)));
   /** Job tags whose sandboxes are this run's to keep; the sweep ends every other one. */
   const live = new Set<string>();
   /** Jobs with a record on disk, which a shutdown leaves running for the next run. */
@@ -502,14 +517,34 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   const lanes = new Map<ForkPlatform["kind"], Lane>();
   for (const platform of host.platforms) {
     const sandboxes = sandboxesOf(platform);
+    const { accountRunning } = sandboxes;
     lanes.set(platform.kind, {
       kind: platform.kind,
       sandboxes,
+      // Every job waiting for room asks; one listing answers all of them for a few seconds.
+      othersRunning:
+        accountRunning === null
+          ? null
+          : yield* Effect.cachedWithTTL(
+              Effect.tryPromise({
+                try: accountRunning,
+                catch: (cause) => new ForkHostCallError({ operation: "count sandboxes", cause }),
+              }).pipe(Effect.map((running) => othersOf(hostTag, running, COPY_PURPOSE))),
+              "10 seconds",
+            ),
       bases: yield* makeBases(host, platform, sandboxes, hostTag, live),
       cache: yield* makeUploadCache(platform, sandboxes, stateDir, memoryRoot),
     });
   }
   const defaultLane = lanes.get(host.platforms[0].kind)!;
+  /** Runs `effect` once the lane's copy fits: at once where copies share no limit, else in its turn for an E2B slot. */
+  const withRoom = <A, E, R>(lane: Lane, effect: Effect.Effect<A, E, R>) =>
+    withSharedRoom(
+      e2bSlots,
+      (others) => Math.min(host.maxConcurrent, Math.max(0, host.e2bRoom - others)),
+      lane.othersRunning ?? Effect.succeed(null),
+      effect,
+    );
   /** A record from before records named their platform ran on the host's only one. */
   const kindOf = (record: JobRecord) => record.platform ?? defaultLane.kind;
   const batches = new Map<string, Batch>();
@@ -624,6 +659,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
           new NotStarted({
             reason: `${platformLabel(lane.kind)} could not start a copy.`,
             cause,
+            ...(isBusy(cause) ? { busy: true } : {}),
           }),
       }),
       (id, exit) => endSandbox(lane, job.id, id, exit),
@@ -854,41 +890,51 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     observer: JobObserver,
   ) {
     const queuedAt = yield* Clock.currentTimeMillis;
-    return yield* slots.withSlot(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const setupAt = yield* Clock.currentTimeMillis;
-          const prepared = yield* prepare(job, shipment, base.imageId);
-          const record = yield* launch(
-            prepared.sandboxId,
-            job,
-            shipment.checkout.repository.repository,
-          );
-          yield* observer.started(job.id);
-          const commandAt = yield* Clock.currentTimeMillis;
-          const exited = yield* finish(job.lane, record, observer.output);
-          // Before the copy and record end, so a restart from here on cannot lose the result.
-          if (observer.exited) yield* observer.exited(exited);
-          // One line per finished copy, so this host's offload use can be read from its log.
-          yield* Effect.logInfo("worktree fork job finished", {
-            job: job.id,
-            caller: job.caller,
-            platform: job.lane.kind,
-            command: commandSummary(job.command),
-            repository: shipment.checkout.repository.repository,
-            cpu: job.size.cpu,
-            memoryMiB: job.size.memoryMiB,
-            shippedBytes: prepared.shippedBytes,
-            inputBytes: prepared.inputBytes,
-            uploadedBytes: prepared.uploadedBytes,
-            exitCode: exited.exitCode,
-            timedOut: exited.timedOut,
-            queuedMs: setupAt - queuedAt,
-            setupMs: commandAt - setupAt,
-            commandMs: exited.durationMs,
-          });
-          return exited;
-        }),
+    return yield* withRoom(
+      job.lane,
+      slots.withSlot(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const setupAt = yield* Clock.currentTimeMillis;
+            // A refused start created nothing, so only it is retried, and cancelling the job or
+            // shutting down the host interrupts the wait.
+            const prepared = yield* prepare(job, shipment, base.imageId).pipe(
+              Effect.retry({
+                while: (error) => error._tag === "NotStarted" && error.busy === true,
+                schedule: NO_ROOM_RETRY,
+              }),
+            );
+            const record = yield* launch(
+              prepared.sandboxId,
+              job,
+              shipment.checkout.repository.repository,
+            );
+            yield* observer.started(job.id);
+            const commandAt = yield* Clock.currentTimeMillis;
+            const exited = yield* finish(job.lane, record, observer.output);
+            // Before the copy and record end, so a restart from here on cannot lose the result.
+            if (observer.exited) yield* observer.exited(exited);
+            // One line per finished copy, so this host's offload use can be read from its log.
+            yield* Effect.logInfo("worktree fork job finished", {
+              job: job.id,
+              caller: job.caller,
+              platform: job.lane.kind,
+              command: commandSummary(job.command),
+              repository: shipment.checkout.repository.repository,
+              cpu: job.size.cpu,
+              memoryMiB: job.size.memoryMiB,
+              shippedBytes: prepared.shippedBytes,
+              inputBytes: prepared.inputBytes,
+              uploadedBytes: prepared.uploadedBytes,
+              exitCode: exited.exitCode,
+              timedOut: exited.timedOut,
+              queuedMs: setupAt - queuedAt,
+              setupMs: commandAt - setupAt,
+              commandMs: exited.durationMs,
+            });
+            return exited;
+          }),
+        ),
       ),
     );
   });
@@ -1262,28 +1308,33 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   ) {
     live.add(record.id);
     recorded.add(record.id);
-    return yield* slots.withSlot(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* Effect.addFinalizer((exit) => endSandbox(lane, record.id, record.sandboxId, exit));
-          yield* Effect.addFinalizer((exit) => endRecord(record.id, exit));
-          const exited = yield* finish(lane, record, observer.output);
-          if (observer.exited) yield* observer.exited(exited);
-          yield* Effect.logInfo("worktree fork job finished", {
-            job: record.id,
-            caller: record.caller,
-            platform: lane.kind,
-            command: commandSummary(record.command),
-            repository: record.repository,
-            cpu: record.size.cpu,
-            memoryMiB: record.size.memoryMiB,
-            exitCode: exited.exitCode,
-            timedOut: exited.timedOut,
-            commandMs: exited.durationMs,
-            adopted: true,
-          });
-          return exited;
-        }),
+    return yield* withRoom(
+      lane,
+      slots.withSlot(
+        Effect.scoped(
+          Effect.gen(function* () {
+            yield* Effect.addFinalizer((exit) =>
+              endSandbox(lane, record.id, record.sandboxId, exit),
+            );
+            yield* Effect.addFinalizer((exit) => endRecord(record.id, exit));
+            const exited = yield* finish(lane, record, observer.output);
+            if (observer.exited) yield* observer.exited(exited);
+            yield* Effect.logInfo("worktree fork job finished", {
+              job: record.id,
+              caller: record.caller,
+              platform: lane.kind,
+              command: commandSummary(record.command),
+              repository: record.repository,
+              cpu: record.size.cpu,
+              memoryMiB: record.size.memoryMiB,
+              exitCode: exited.exitCode,
+              timedOut: exited.timedOut,
+              commandMs: exited.durationMs,
+              adopted: true,
+            });
+            return exited;
+          }),
+        ),
       ),
     );
   });

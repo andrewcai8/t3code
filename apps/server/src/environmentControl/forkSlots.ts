@@ -1,5 +1,19 @@
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
+
+/**
+ * How long a job keeps its place while E2B refuses its copy for want of room: an account at its
+ * running-sandbox limit, or a placement that failed for the moment. Each refusal leaves nothing
+ * running, and the waits grow to a minute apart.
+ */
+export const NO_ROOM_RETRY = Schedule.min([
+  Schedule.exponential("5 seconds"),
+  Schedule.spaced("1 minute"),
+]).pipe(Schedule.upTo({ duration: "15 minutes" }));
+/** Machines wake and pause without telling this host, so a job waiting for E2B room counts again. */
+const E2B_RECOUNT = Duration.seconds(30);
 
 /**
  * Slots handed out first come, first served. Effect's Semaphore wakes its waiters on a later tick,
@@ -53,4 +67,40 @@ export const makeSlots = (initial: number) => {
         }).pipe(Effect.andThen(restore(effect).pipe(Effect.ensuring(Effect.sync(free))))),
       ),
   };
+};
+
+export type Slots = ReturnType<typeof makeSlots>;
+
+/**
+ * Runs `effect` in its turn for one of `slots`, sized to what the E2B account has left once every
+ * sandbox that is not this host's copy is counted (`sizeFor`), and counted again while it waits.
+ * Null from `countOthers` is a provider whose copies share no limit, so `effect` runs at once; a
+ * count that fails leaves the size as it was.
+ */
+export const withSharedRoom = <A, E, R>(
+  slots: Slots,
+  sizeFor: (others: number) => number,
+  countOthers: Effect.Effect<number | null, { readonly cause: unknown }>,
+  effect: Effect.Effect<A, E, R>,
+) => {
+  const recount = countOthers.pipe(
+    Effect.flatMap((others) =>
+      others === null ? Effect.succeed(false) : slots.resize(sizeFor(others)).pipe(Effect.as(true)),
+    ),
+    Effect.catch((error) =>
+      Effect.logWarning("could not count the E2B account's running sandboxes", {
+        cause: error.cause,
+      }).pipe(Effect.as(true)),
+    ),
+  );
+  return recount.pipe(
+    Effect.flatMap((shared) =>
+      shared
+        ? slots.withSlot(
+            effect,
+            Effect.forever(Effect.sleep(E2B_RECOUNT).pipe(Effect.andThen(recount))),
+          )
+        : effect,
+    ),
+  );
 };

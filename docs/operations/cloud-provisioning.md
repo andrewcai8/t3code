@@ -135,7 +135,7 @@ A self-hosted server that is not a cloud box, such as a home Linux machine, can 
 
 A size's `cpu` and `memoryGiB` cap a copy, and its requests are what Modal reserves. A copy bursts past them while its host has room, and Modal bills the larger of the request and the use. On the vm runtime a megpt-mono test shard peaked near 3 GiB and burst to all 8 cores from a one-core request, at the same speed as a full reservation and about 30% cheaper per job with the default requests. E2B copies of the same size ran the shard about 1.5 times slower, so Modal is the faster backend and E2B the one that spends free credits. An E2B copy has its template's size, 8 vCPU and 16 GiB, whatever size a job names.
 
-Write `<state dir>/worktree-forks.json` (the directory holding `settings.json`, normally `~/.t3/userdata`), mode 0600, since it holds the token or key, and restart the server; it is read once at start, and a file that does not decode is logged and leaves the backend off. Configure `modal`, `e2b` or both. With both, `platform` (`"modal"` or `"e2b"`) picks the default and a job can name the other with `t3 fork-exec --platform <modal|e2b>`; `t3_fork_run` batches use the default. A job naming a platform the host does not configure is refused with exit 78, which the caller must not answer by running the command itself. Neither block, or both without `platform`, does not decode. Each platform keeps its own bases, base records and upload index, so a build or prune on one never deletes the other's images; `maxConcurrent` stays host-wide.
+Write `<state dir>/worktree-forks.json` (the directory holding `settings.json`, normally `~/.t3/userdata`), mode 0600, since it holds the token or key, and restart the server; it is read once at start, and a file that does not decode is logged and leaves the backend off. Configure `modal`, `e2b` or both. With both, `platform` (`"modal"` or `"e2b"`) picks the default and a job can name the other with `t3 fork-exec --platform <modal|e2b>`; `t3_fork_run` batches use the default. A job naming a platform the host does not configure is refused with exit 78, which the caller must not answer by running the command itself. Neither block, or both without `platform`, does not decode. Each platform keeps its own bases, base records and upload index, so a build or prune on one never deletes the other's images; `maxConcurrent` stays host-wide E2B copies also share the account's running-sandbox limit with every other host and chat on the same key: they run only in the room `e2bConcurrency` (100, the account's limit) less `e2bChatReserve` (5) leaves after every running sandbox that is not this host's copy is counted, capped by `maxConcurrent`. The count is retaken when a job wants a copy and every 30 seconds while it waits, and a copy E2B refuses anyway (429 or 5xx) is retried for up to fifteen minutes before the job is refused. Modal copies are held only to `maxConcurrent`.
 
 ```jsonc
 {
@@ -144,7 +144,9 @@ Write `<state dir>/worktree-forks.json` (the directory holding `settings.json`, 
   "platform": "e2b", // the default; needed only when both are configured
   "defaultSize": "default",
   "sizes": { "huge": { "cpu": 64, "memoryGiB": 128 } }, // merged over default 8/16, large 16/32, xlarge 32/64; "cpuRequest"/"memoryRequestGiB" default to a quarter and half of those
-  "maxConcurrent": 8,
+  "maxConcurrent": 8, // this host's cap
+  "e2bConcurrency": 100, // the E2B account's limit, shared with its other hosts
+  "e2bChatReserve": 5,
   "maxJobMinutes": 120,
   "maxCopyBackMiB": 100,
   "repositories": [

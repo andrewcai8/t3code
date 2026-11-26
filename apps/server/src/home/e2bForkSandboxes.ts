@@ -9,9 +9,9 @@ import type * as NodeStreamWeb from "node:stream/web";
 import { CommandExitError, E2B, SandboxNotFoundError, type Sandbox } from "e2b";
 
 import { uploadFile } from "../environmentControl/E2bProvisionRuntime.ts";
-import { captureDisk } from "../environmentControl/ForkMachines.ts";
+import { captureDisk, e2bBusy } from "../environmentControl/ForkMachines.ts";
 import { shellQuote } from "./forkExecProtocol.ts";
-import type { E2bPlatform, ForkSandboxes } from "./worktreeForksConfig.ts";
+import { type E2bPlatform, type ForkSandboxes, SandboxesBusy } from "./worktreeForksConfig.ts";
 
 /** What a sandbox's login shell would otherwise reset: the template's tools, for root. */
 const GUEST_PATH =
@@ -115,6 +115,8 @@ export const makeE2bForkSandboxes = (platform: E2bPlatform, hostTag: string): Fo
         timeoutMs: lifetimeMs,
         metadata: { ...tags },
         requestTimeoutMs: TRANSFER_TIMEOUT_MS,
+      }).catch((error: unknown) => {
+        throw e2bBusy(error) ? new SandboxesBusy({ cause: error }) : error;
       });
       known.set(sandbox.sandboxId, sandbox);
       await ensureSwap(sandbox);
@@ -199,6 +201,13 @@ export const makeE2bForkSandboxes = (platform: E2bPlatform, hostTag: string): Fo
       while (listed.hasNext)
         for (const sandbox of await listed.nextItems())
           found.push({ sandboxId: sandbox.sandboxId, tags: { ...sandbox.metadata } });
+      return found;
+    },
+    accountRunning: async () => {
+      const found: Array<Record<string, string>> = [];
+      const listed = e2b.Sandbox.list({ query: { state: ["running"] }, limit: 100 });
+      while (listed.hasNext)
+        for (const sandbox of await listed.nextItems()) found.push({ ...sandbox.metadata });
       return found;
     },
     directoryImages: null,

@@ -109,6 +109,7 @@ const setup = () => {
     ]),
     defaultSize: "default",
     maxConcurrent: 8,
+    e2bRoom: 95,
     maxJobMs: 120 * 60_000,
     maxCopyBackBytes: 100 * 1024 * 1024,
     repositories: new Map([[repository.repository, repository]]),

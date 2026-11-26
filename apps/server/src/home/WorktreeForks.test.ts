@@ -44,6 +44,7 @@ import {
   type ForkPlatform,
   type ForkRepository,
   type ModalPlatform,
+  SandboxesBusy,
   type WorktreeForksHost,
 } from "./worktreeForksConfig.ts";
 import { gate, isCommand, isStep, makeFakeSandboxes } from "./worktreeForksTestkit.ts";
@@ -86,6 +87,7 @@ const e2b: E2bPlatform = { kind: "e2b", apiKey: "e2b-key", templateId: "tpl" };
 const setup = (
   options: {
     readonly maxConcurrent?: number;
+    readonly e2bRoom?: number;
     readonly services?: ReadonlyArray<string>;
     readonly e2b?: true;
   } = {},
@@ -118,6 +120,7 @@ const setup = (
     ]),
     defaultSize: "default",
     maxConcurrent: options.maxConcurrent ?? 8,
+    e2bRoom: options.e2bRoom ?? 95,
     maxJobMs: 120 * 60_000,
     maxCopyBackBytes: 100 * 1024 * 1024,
     repositories: new Map([[repository.repository, repository]]),
@@ -1402,4 +1405,84 @@ it.effect("a job waiting for a copy runs the worktree as it was sent, not as it 
 
     expect(applied).toEqual(["edited\n", "as sent\n"]);
   }).pipe(Effect.scoped, Effect.provide(watching.pipe(Layer.provideMerge(layer))));
+});
+
+/** Two other sandboxes on the E2B account: a chat's and another home host's copy. */
+const plantOthers = (e2bFake: ReturnType<typeof makeFakeSandboxes>) => [
+  e2bFake.plant({ purpose: "t3-chat" }),
+  e2bFake.plant({ purpose: "t3-worktree-fork", host: "env-other", job: "j" }),
+];
+
+it.effect("E2B copies take only the room other sandboxes on the account leave", () => {
+  const { root, e2bFake, layer, start } = setup({ e2b: true, e2bRoom: 3 });
+  return Effect.gen(function* () {
+    const [chat] = plantOthers(e2bFake);
+    const first = gate<number>();
+    e2bFake.onExec(isCommand("bun test"), { exitCode: first.value });
+    const forks = yield* start;
+    const e2bJob = () => forks.exec(request(root, { platform: "e2b" }), watcher().observer);
+    const running = watcher();
+    yield* forks.exec(request(root, { platform: "e2b" }), running.observer).pipe(Effect.forkChild);
+    yield* Deferred.await(running.started);
+    const created = () => e2bFake.calls.filter((call) => call.op === "create").length;
+    yield* TestClock.adjust("11 seconds");
+    const counted = e2bFake.next("count");
+    const second = yield* e2bJob().pipe(Effect.forkChild);
+    yield* Effect.promise(() => counted);
+    yield* TestClock.adjust("30 seconds");
+    expect(created()).toBe(1);
+
+    yield* Effect.promise(() => e2bFake.port.terminate(chat!));
+    yield* TestClock.adjust("30 seconds");
+    first.open(0);
+    expect(yield* Fiber.join(second)).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(created()).toBe(2);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a count that fails leaves the room as it was until a count succeeds", () => {
+  const { root, e2bFake, layer, start } = setup({ e2b: true, e2bRoom: 3 });
+  return Effect.gen(function* () {
+    const [chat] = plantOthers(e2bFake);
+    const first = gate<number>();
+    e2bFake.onExec(isCommand("bun test"), { exitCode: first.value });
+    const forks = yield* start;
+    const running = watcher();
+    yield* forks.exec(request(root, { platform: "e2b" }), running.observer).pipe(Effect.forkChild);
+    yield* Deferred.await(running.started);
+    const created = () => e2bFake.calls.filter((call) => call.op === "create").length;
+    yield* TestClock.adjust("11 seconds");
+    const counted = e2bFake.next("count");
+    const second = yield* forks
+      .exec(request(root, { platform: "e2b" }), watcher().observer)
+      .pipe(Effect.forkChild);
+    yield* Effect.promise(() => counted);
+
+    yield* Effect.promise(() => e2bFake.port.terminate(chat!));
+    e2bFake.failNext("count", new Error("E2B is down"));
+    yield* TestClock.adjust("30 seconds");
+    expect(created()).toBe(1);
+
+    yield* TestClock.adjust("30 seconds");
+    first.open(0);
+    expect(yield* Fiber.join(second)).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(created()).toBe(2);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a copy E2B refuses for want of room is retried instead of refused", () => {
+  const { root, e2bFake, layer, start } = setup({ e2b: true });
+  return Effect.gen(function* () {
+    e2bFake.failNext("create", new SandboxesBusy({ cause: new Error("429") }));
+    const forks = yield* start;
+    const refused = e2bFake.next("create");
+    const job = yield* forks
+      .exec(request(root, { platform: "e2b" }), watcher().observer)
+      .pipe(Effect.forkChild);
+    yield* Effect.promise(() => refused);
+    yield* TestClock.adjust("5 seconds");
+    expect(yield* Fiber.join(job)).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(e2bFake.calls.filter((call) => call.op === "create")).toHaveLength(2);
+    expect(e2bFake.running().size).toBe(0);
+  }).pipe(Effect.scoped, Effect.provide(layer));
 });
