@@ -43,10 +43,24 @@ export const makeSlots = (initial: number) => {
         size = next;
         handOut();
       }),
-    /** `whileWaiting` runs only until the slot is handed over, as a way to learn of a resize. */
-    withSlot: <A, E, R>(
+    /**
+     * Runs `effect` at once in a slot over capacity, so what already runs is counted whatever the
+     * size is now; waiters get a slot only once the count falls below it.
+     */
+    withSlotNow: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.suspend(() => {
+          used += 1;
+          return restore(effect).pipe(Effect.ensuring(Effect.sync(free)));
+        }),
+      ),
+    /**
+     * `whileWaiting` runs only until the slot is handed over, as a way to learn of a resize, or
+     * to give up by failing.
+     */
+    withSlot: <A, E, R, EW = never>(
       effect: Effect.Effect<A, E, R>,
-      whileWaiting: Effect.Effect<never> = Effect.never,
+      whileWaiting: Effect.Effect<never, EW> = Effect.never,
     ) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.suspend(() => {
@@ -58,7 +72,7 @@ export const makeSlots = (initial: number) => {
           waiting.add(turn);
           // A slot handed over just as the wait is interrupted goes to the next waiter.
           return Effect.interruptible(Effect.raceFirst(Deferred.await(turn), whileWaiting)).pipe(
-            Effect.onInterrupt(() =>
+            Effect.onError(() =>
               Effect.sync(() => {
                 if (!waiting.delete(turn)) free();
               }),
@@ -77,30 +91,28 @@ export type Slots = ReturnType<typeof makeSlots>;
  * Null from `countOthers` is a provider whose copies share no limit, so `effect` runs at once; a
  * count that fails leaves the size as it was.
  */
-export const withSharedRoom = <A, E, R>(
+export const withSharedRoom = <A, E, R, CE, ET = never>(
   slots: Slots,
   sizeFor: (others: number) => number,
-  countOthers: Effect.Effect<number | null, { readonly cause: unknown }>,
+  countOthers: Effect.Effect<number | null, CE>,
   effect: Effect.Effect<A, E, R>,
+  limit?: { readonly after: Duration.Input; readonly fail: ET },
 ) => {
+  // The count logs its own failure, once per listing rather than once per waiter.
   const recount = countOthers.pipe(
     Effect.flatMap((others) =>
       others === null ? Effect.succeed(false) : slots.resize(sizeFor(others)).pipe(Effect.as(true)),
     ),
-    Effect.catch((error) =>
-      Effect.logWarning("could not count the E2B account's running sandboxes", {
-        cause: error.cause,
-      }).pipe(Effect.as(true)),
-    ),
+    Effect.orElseSucceed(() => true),
   );
+  const recounting = Effect.forever(Effect.sleep(E2B_RECOUNT).pipe(Effect.andThen(recount)));
+  const waiting: Effect.Effect<never, ET> =
+    limit === undefined
+      ? recounting
+      : recounting.pipe(
+          Effect.timeoutOrElse({ duration: limit.after, orElse: () => Effect.fail(limit.fail) }),
+        );
   return recount.pipe(
-    Effect.flatMap((shared) =>
-      shared
-        ? slots.withSlot(
-            effect,
-            Effect.forever(Effect.sleep(E2B_RECOUNT).pipe(Effect.andThen(recount))),
-          )
-        : effect,
-    ),
+    Effect.flatMap((shared) => (shared ? slots.withSlot(effect, waiting) : effect)),
   );
 };

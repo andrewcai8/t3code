@@ -86,6 +86,8 @@ export const ForkExecEvent = Schema.Union([
   }),
   /** No copy started, so the caller may run the command here instead. */
   Schema.Struct({ kind: Schema.Literal("unavailable"), message: Schema.String }),
+  /** This host has room, so the caller runs the command here; nothing is reported. */
+  Schema.Struct({ kind: Schema.Literal("local") }),
   /** A copy started and was lost, so the command may have run partly. */
   Schema.Struct({ kind: Schema.Literal("failed"), message: Schema.String }),
   /** The request cannot be met on this host, and the caller must not run it here instead. */

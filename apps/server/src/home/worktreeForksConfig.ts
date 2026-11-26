@@ -372,6 +372,12 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
       sandboxSize(size),
     ]),
   );
+  const e2bConcurrency = file.e2bConcurrency ?? 100;
+  const e2bChatReserve = file.e2bChatReserve ?? 5;
+  if (e2bChatReserve >= e2bConcurrency)
+    throw new Error(
+      `e2bChatReserve (${e2bChatReserve}) must be less than e2bConcurrency (${e2bConcurrency}), or no E2B copy would ever have room`,
+    );
   const defaultSize = file.defaultSize ?? "default";
   if (!sizes.has(defaultSize)) throw new Error(`defaultSize names no size: ${defaultSize}`);
   const repositories = new Map(
@@ -386,7 +392,7 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
     sizes,
     defaultSize,
     maxConcurrent: file.maxConcurrent ?? 8,
-    e2bRoom: (file.e2bConcurrency ?? 100) - (file.e2bChatReserve ?? 5),
+    e2bRoom: e2bConcurrency - e2bChatReserve,
     localFirst:
       file.localFirst === undefined
         ? null

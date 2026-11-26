@@ -719,7 +719,13 @@ export const layer = Layer.effect(
         while (listed.hasNext)
           for (const sandbox of await listed.nextItems({ signal })) found.push(sandbox.metadata);
         return found;
-      }),
+      }).pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning("could not count the E2B account's running sandboxes", {
+            cause: error.cause,
+          }),
+        ),
+      ),
       "10 seconds",
     );
 

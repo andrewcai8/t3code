@@ -127,6 +127,8 @@ export type ExecOutcome =
     }
   /** Nothing of the command ran: the caller may run it itself. */
   | { readonly _tag: "NotStarted"; readonly message: string }
+  /** This host kept the command for the caller to run itself, which is no failure to report. */
+  | { readonly _tag: "Local" }
   /** Nothing of the command ran, and the caller must not run it itself. */
   | { readonly _tag: "Refused"; readonly message: string }
   /** The command started and its copy was lost: it may have run partly. */
@@ -200,6 +202,9 @@ class Lost extends Schema.TaggedError<Lost>()("Lost", {
 }
 
 const isBusy = Schema.is(SandboxesBusy);
+
+const SHIM_ROOM_WAIT = Duration.seconds(60);
+const ROOM_WAIT = Duration.minutes(30);
 
 /** A call to this host's own disk or sandbox platform that is logged or swallowed, never matched on. */
 class ForkHostCallError extends Schema.TaggedError<ForkHostCallError>()("ForkHostCallError", {
@@ -541,14 +546,27 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   const defaultLane = lanes.get(host.platforms[0].kind)!;
   const localAdmission =
     host.localFirst === null ? null : makeLocalAdmission(host.localFirst, readPressure);
-  /** Runs `effect` once the lane's copy fits: at once where copies share no limit, else in its turn for an E2B slot. */
-  const withRoom = <A, E, R>(lane: Lane, effect: Effect.Effect<A, E, R>) =>
+  /**
+   * Runs `effect` once the lane's copy fits: at once where copies share no limit, else in its turn
+   * for an E2B slot. The wait is bounded, so a bun shim, which can run its command here, gives up
+   * quickly and a job that can only run in a copy waits much longer.
+   */
+  const withRoom = <A, E, R>(lane: Lane, caller: ForkCaller, effect: Effect.Effect<A, E, R>) =>
     withSharedRoom(
       e2bSlots,
       (others) => Math.min(host.maxConcurrent, Math.max(0, host.e2bRoom - others)),
       lane.othersRunning ?? Effect.succeed(null),
       effect,
+      {
+        after: caller === "bun-shim" ? SHIM_ROOM_WAIT : ROOM_WAIT,
+        fail: new NotStarted({
+          reason: `${platformLabel(lane.kind)} has no room for another copy right now.`,
+        }),
+      },
     );
+  /** What a copy already running holds in the pool, however full it is. */
+  const holdRoom = <A, E, R>(lane: Lane, effect: Effect.Effect<A, E, R>) =>
+    lane.othersRunning === null ? effect : e2bSlots.withSlotNow(effect);
   /** A record from before records named their platform ran on the host's only one. */
   const kindOf = (record: JobRecord) => record.platform ?? defaultLane.kind;
   const batches = new Map<string, Batch>();
@@ -896,50 +914,54 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
     const queuedAt = yield* Clock.currentTimeMillis;
     return yield* withRoom(
       job.lane,
-      slots.withSlot(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const setupAt = yield* Clock.currentTimeMillis;
-            // A refused start created nothing, so only it is retried, and cancelling the job or
-            // shutting down the host interrupts the wait.
-            const prepared = yield* prepare(job, shipment, base.imageId).pipe(
-              Effect.retry({
-                while: (error) => error._tag === "NotStarted" && error.busy === true,
-                schedule: NO_ROOM_RETRY,
-              }),
-            );
-            const record = yield* launch(
-              prepared.sandboxId,
-              job,
-              shipment.checkout.repository.repository,
-            );
-            yield* observer.started(job.id);
-            const commandAt = yield* Clock.currentTimeMillis;
-            const exited = yield* finish(job.lane, record, observer.output);
-            // Before the copy and record end, so a restart from here on cannot lose the result.
-            if (observer.exited) yield* observer.exited(exited);
-            // One line per finished copy, so this host's offload use can be read from its log.
-            yield* Effect.logInfo("worktree fork job finished", {
-              job: job.id,
-              caller: job.caller,
-              platform: job.lane.kind,
-              command: commandSummary(job.command),
-              repository: shipment.checkout.repository.repository,
-              cpu: job.size.cpu,
-              memoryMiB: job.size.memoryMiB,
-              shippedBytes: prepared.shippedBytes,
-              inputBytes: prepared.inputBytes,
-              uploadedBytes: prepared.uploadedBytes,
-              exitCode: exited.exitCode,
-              timedOut: exited.timedOut,
-              queuedMs: setupAt - queuedAt,
-              setupMs: commandAt - setupAt,
-              commandMs: exited.durationMs,
-            });
-            return exited;
+      job.caller,
+      slots
+        .withSlot(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const setupAt = yield* Clock.currentTimeMillis;
+              const prepared = yield* prepare(job, shipment, base.imageId);
+              const record = yield* launch(
+                prepared.sandboxId,
+                job,
+                shipment.checkout.repository.repository,
+              );
+              yield* observer.started(job.id);
+              const commandAt = yield* Clock.currentTimeMillis;
+              const exited = yield* finish(job.lane, record, observer.output);
+              // Before the copy and record end, so a restart from here on cannot lose the result.
+              if (observer.exited) yield* observer.exited(exited);
+              // One line per finished copy, so this host's offload use can be read from its log.
+              yield* Effect.logInfo("worktree fork job finished", {
+                job: job.id,
+                caller: job.caller,
+                platform: job.lane.kind,
+                command: commandSummary(job.command),
+                repository: shipment.checkout.repository.repository,
+                cpu: job.size.cpu,
+                memoryMiB: job.size.memoryMiB,
+                shippedBytes: prepared.shippedBytes,
+                inputBytes: prepared.inputBytes,
+                uploadedBytes: prepared.uploadedBytes,
+                exitCode: exited.exitCode,
+                timedOut: exited.timedOut,
+                queuedMs: setupAt - queuedAt,
+                setupMs: commandAt - setupAt,
+                commandMs: exited.durationMs,
+              });
+              return exited;
+            }),
+          ),
+        )
+        .pipe(
+          // A refused start created nothing, so only it is retried, and the retry gives up the
+          // host-wide slot while it waits, which Modal jobs share. Cancelling the job or shutting
+          // down the host interrupts the wait.
+          Effect.retry({
+            while: (error) => error._tag === "NotStarted" && error.busy === true,
+            schedule: NO_ROOM_RETRY,
           }),
         ),
-      ),
     );
   });
 
@@ -996,10 +1018,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
             command: commandSummary(request.command),
             ...admission.pressure,
           });
-          return {
-            _tag: "NotStarted",
-            message: "This host has room, so the command runs here.",
-          } satisfies ExecOutcome;
+          return { _tag: "Local" } satisfies ExecOutcome;
         }
       }
       const lane = lanes.get(request.platform ?? defaultLane.kind);
@@ -1332,7 +1351,7 @@ export const make = Effect.fn("WorktreeForks.make")(function* (
   ) {
     live.add(record.id);
     recorded.add(record.id);
-    return yield* withRoom(
+    return yield* holdRoom(
       lane,
       slots.withSlot(
         Effect.scoped(

@@ -1510,8 +1510,7 @@ it.effect("a shim job stays local while the host is under every pressure ceiling
     pressure.reading = { cpu: 29.9, io: 9.9, memory: 4.9 };
     const forks = yield* start;
     expect(yield* forks.exec(shimRequest(root), watcher().observer)).toEqual({
-      _tag: "NotStarted",
-      message: "This host has room, so the command runs here.",
+      _tag: "Local",
     });
     expect(fake.calls).toEqual([]);
   }).pipe(Effect.scoped, Effect.provide(layer));
@@ -1542,12 +1541,12 @@ it.effect("a burst of shim jobs is held to the per-minute budget, which refills"
   return Effect.gen(function* () {
     const forks = yield* start;
     const outcome = () => forks.exec(shimRequest(root), watcher().observer);
-    expect((yield* outcome())._tag).toBe("NotStarted");
+    expect((yield* outcome())._tag).toBe("Local");
     yield* TestClock.adjust("30 seconds");
-    expect((yield* outcome())._tag).toBe("NotStarted");
+    expect((yield* outcome())._tag).toBe("Local");
     expect((yield* outcome())._tag).toBe("Exited");
     yield* TestClock.adjust("30 seconds");
-    expect((yield* outcome())._tag).toBe("NotStarted");
+    expect((yield* outcome())._tag).toBe("Local");
     expect((yield* outcome())._tag).toBe("Exited");
     expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(2);
   }).pipe(Effect.scoped, Effect.provide(layer));
@@ -1575,5 +1574,77 @@ it.effect("a shim job goes to a copy when the host's pressure cannot be read", (
       _tag: "Exited",
     });
     expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(1);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect(
+  "a job waiting for E2B room gives up after a minute for the bun shim, half an hour otherwise",
+  () => {
+    const { root, e2bFake, layer, start } = setup({ e2b: true, e2bRoom: 3 });
+    return Effect.gen(function* () {
+      plantOthers(e2bFake);
+      e2bFake.plant({ purpose: "t3-chat" });
+      const forks = yield* start;
+      const noRoom = {
+        _tag: "NotStarted",
+        message: "E2B has no room for another copy right now.",
+      };
+      const counted = e2bFake.next("count");
+      const shim = yield* forks
+        .exec(shimRequest(root, { platform: "e2b" }), watcher().observer)
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => counted);
+      yield* TestClock.adjust("60 seconds");
+      expect(yield* Fiber.join(shim)).toEqual(noRoom);
+
+      const recounted = e2bFake.next("count");
+      const other = yield* forks
+        .exec(request(root, { platform: "e2b" }), watcher().observer)
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => recounted);
+      yield* TestClock.adjust("60 seconds");
+      expect(other.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust("30 minutes");
+      expect(yield* Fiber.join(other)).toEqual(noRoom);
+      expect(e2bFake.calls.filter((call) => call.op === "create")).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  },
+);
+
+it.effect("a copy retrying a busy start gives up the host-wide slot while it waits", () => {
+  const { root, fake, e2bFake, layer, start } = setup({ e2b: true, maxConcurrent: 1 });
+  return Effect.gen(function* () {
+    e2bFake.failNext("create", new SandboxesBusy({ cause: new Error("429") }));
+    const forks = yield* start;
+    const refused = e2bFake.next("create");
+    const waiting = yield* forks
+      .exec(request(root, { platform: "e2b" }), watcher().observer)
+      .pipe(Effect.forkChild);
+    yield* Effect.promise(() => refused);
+    expect(yield* forks.exec(request(root), watcher().observer)).toMatchObject({
+      _tag: "Exited",
+    });
+    expect(fake.calls.filter((call) => call.op === "create")).toHaveLength(1);
+    expect(e2bFake.calls.filter((call) => call.op === "create")).toHaveLength(1);
+    yield* TestClock.adjust("5 seconds");
+    expect(yield* Fiber.join(waiting)).toMatchObject({ _tag: "Exited", exitCode: 0 });
+    expect(e2bFake.calls.filter((call) => call.op === "create")).toHaveLength(2);
+  }).pipe(Effect.scoped, Effect.provide(layer));
+});
+
+it.effect("a job adopted into a full E2B pool does not wait for room", () => {
+  const { stateDir, e2bFake, layer, start } = setup({ e2b: true, e2bRoom: 1 });
+  return Effect.gen(function* () {
+    plantOthers(e2bFake);
+    const sandboxId = e2bFake.plant(
+      { purpose: "t3-worktree-fork", host: "env-host", job: "job-e2b" },
+      { exitCode: 4, chunks: [["stdout", "on e2b\n"]] },
+    );
+    leftRecord(stateDir, { id: "job-e2b", sandboxId, platform: "e2b" });
+    const forks = yield* start;
+    const { sent, output } = rejoiner();
+    const outcome = yield* forks.attach("job-e2b", { stdout: 0, stderr: 0 }, output);
+    expect(outcome).toMatchObject({ _tag: "Exited", exitCode: 4 });
+    expect(sent.stdout).toBe("on e2b\n");
   }).pipe(Effect.scoped, Effect.provide(layer));
 });

@@ -318,6 +318,18 @@ it.effect("a copy that never started is unavailable, and one lost after starting
   }).pipe(Effect.scoped),
 );
 
+it.effect("a command the host keeps for its caller is answered with no message", () =>
+  Effect.gen(function* () {
+    const { socketPath } = yield* onSelfHostedServer({
+      enabled: true,
+      exec: () => Effect.succeed({ _tag: "Local" } as const),
+    });
+    const { lines, closed } = yield* send(socketPath);
+    yield* Deferred.await(closed);
+    expect(yield* answered(lines)).toEqual([{ kind: "local" }]);
+  }).pipe(Effect.scoped),
+);
+
 it.effect("a caller rejoining after a restart gets the rest of the output and the outcome", () =>
   Effect.gen(function* () {
     const asked: Array<unknown> = [];

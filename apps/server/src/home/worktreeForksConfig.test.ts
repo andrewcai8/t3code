@@ -215,3 +215,24 @@ it.effect("local-first admission is off unless configured, with defaults when it
     ).toEqual({ cpuBelow: 50, ioBelow: 10, memoryBelow: 5, maxPerMinute: 3 });
   }),
 );
+
+it.effect("a chat reserve that leaves no E2B room is refused", () =>
+  Effect.gen(function* () {
+    const failure = (extra: object) =>
+      readWorktreeForksConfig(stateDirWith({ e2b, repositories: [megpt], ...extra })).pipe(
+        Effect.flip,
+      );
+    for (const extra of [
+      { e2bConcurrency: 10, e2bChatReserve: 10 },
+      { e2bConcurrency: 3 },
+      { e2bChatReserve: 100 },
+    ])
+      expect((yield* failure(extra)).cause).toEqual(
+        expect.objectContaining({ message: expect.stringContaining("e2bChatReserve") }),
+      );
+    const host = yield* readWorktreeForksConfig(
+      stateDirWith({ e2b, repositories: [megpt], e2bConcurrency: 10, e2bChatReserve: 9 }),
+    );
+    expect(host!.e2bRoom).toBe(1);
+  }),
+);

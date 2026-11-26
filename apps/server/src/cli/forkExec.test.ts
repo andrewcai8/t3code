@@ -257,3 +257,18 @@ it("lists --platform in its help, and exits 78, never 75, when the host refuses 
     "[t3] This host has no modal platform for fork jobs; it has e2b.\n",
   );
 });
+
+it("exits 75 and prints nothing when the host keeps the command for the caller to run", async () => {
+  const cli = cliHarness();
+  try {
+    await cli.listen((socket) => {
+      cli.send(socket, [{ kind: "local" }]);
+      socket.end();
+    });
+    expect(await runForkExec(["--", "bun", "test"])).toBe(75);
+  } finally {
+    cli.close();
+  }
+  expect(cli.stderr).toEqual([]);
+  expect(cli.stdout).toEqual([]);
+});
