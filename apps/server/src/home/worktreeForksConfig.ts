@@ -22,6 +22,8 @@ import {
 } from "../environmentControl/config.ts";
 import type { BunShimSettings } from "./bunShim.ts";
 
+const Percent = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
+
 const Bounded = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum }));
 
 /**
@@ -59,6 +61,24 @@ const WorktreeForksFile = Schema.Struct({
   /** Merged over the built-in sizes. */
   sizes: Schema.optional(Schema.Record(TrimmedNonEmptyString, ForkSize)),
   maxConcurrent: Schema.optional(Bounded(256)),
+  /** The E2B account's running-sandbox limit, shared with every other host on the key. Default 100. */
+  e2bConcurrency: Schema.optional(Bounded(10_000)),
+  /** Of it, how many E2B copies always leave free for other sandboxes to start. Default 5. */
+  e2bChatReserve: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10_000 })),
+  ),
+  /**
+   * Send a bun shim job to a copy only while this host is busy: it runs locally while each Linux
+   * pressure reading is under its ceiling and fewer than `maxPerMinute` jobs went local in the last minute.
+   */
+  localFirst: Schema.optional(
+    Schema.Struct({
+      cpuBelow: Schema.optional(Percent),
+      ioBelow: Schema.optional(Percent),
+      memoryBelow: Schema.optional(Percent),
+      maxPerMinute: Schema.optional(Bounded(10_000)),
+    }),
+  ),
   maxJobMinutes: Schema.optional(Bounded(1440)),
   maxCopyBackMiB: Schema.optional(Bounded(4096)),
   repositories: Schema.Array(
@@ -168,6 +188,14 @@ export const baseKey = (platform: ForkPlatform, repository: ForkRepository) =>
     )
     .digest("hex");
 
+/** Ceilings are percentages of the last ten seconds that tasks stalled on the resource. */
+export interface LocalFirstSettings {
+  readonly cpuBelow: number;
+  readonly ioBelow: number;
+  readonly memoryBelow: number;
+  readonly maxPerMinute: number;
+}
+
 /** worktree-forks.json with defaults applied: the only shape the rest of the backend reads. */
 export interface WorktreeForksHost {
   /** Every configured platform, the default first. */
@@ -175,7 +203,12 @@ export interface WorktreeForksHost {
   /** Always holds `defaultSize`. */
   readonly sizes: ReadonlyMap<string, SandboxSize>;
   readonly defaultSize: string;
+  /** This host's own cap on copies. */
   readonly maxConcurrent: number;
+  /** Running sandboxes E2B copies may take on the account, other hosts' and chats' included. */
+  readonly e2bRoom: number;
+  /** Null keeps every job's copy decision as it was: none runs locally by choice. */
+  readonly localFirst: LocalFirstSettings | null;
   readonly maxJobMs: number;
   readonly maxCopyBackBytes: number;
   /** By canonical owner/name. */
@@ -244,6 +277,11 @@ export interface ForkSandboxes {
   ) => Promise<
     ReadonlyArray<{ readonly sandboxId: string; readonly tags: Readonly<Record<string, string>> }>
   >;
+  /**
+   * The metadata of every running sandbox on the account, whoever made it, for a platform whose
+   * copies share one running-sandbox limit with the rest of the account; null where they share none.
+   */
+  readonly accountRunning: (() => Promise<ReadonlyArray<Readonly<Record<string, string>>>>) | null;
   /** Images of one directory, shown in other sandboxes; null where the platform has none. */
   readonly directoryImages: {
     readonly save: (sandboxId: string, path: string, ttlMs: number) => Promise<string>;
@@ -253,6 +291,11 @@ export interface ForkSandboxes {
 
 /** Every sandbox of this backend carries it, with the host and job, for the sweep. */
 export const COPY_PURPOSE = "t3-worktree-fork";
+
+/** `createCopy` made nothing because the platform has no room for one for now, so it may be retried. */
+export class SandboxesBusy extends Schema.TaggedError<SandboxesBusy>()("SandboxesBusy", {
+  cause: Schema.Defect(),
+}) {}
 
 export class WorktreeForksConfigError extends Schema.TaggedError<WorktreeForksConfigError>()(
   "WorktreeForksConfigError",
@@ -329,6 +372,12 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
       sandboxSize(size),
     ]),
   );
+  const e2bConcurrency = file.e2bConcurrency ?? 100;
+  const e2bChatReserve = file.e2bChatReserve ?? 5;
+  if (e2bChatReserve >= e2bConcurrency)
+    throw new Error(
+      `e2bChatReserve (${e2bChatReserve}) must be less than e2bConcurrency (${e2bConcurrency}), or no E2B copy would ever have room`,
+    );
   const defaultSize = file.defaultSize ?? "default";
   if (!sizes.has(defaultSize)) throw new Error(`defaultSize names no size: ${defaultSize}`);
   const repositories = new Map(
@@ -343,6 +392,16 @@ const hostOf = (file: typeof WorktreeForksFile.Type): WorktreeForksHost => {
     sizes,
     defaultSize,
     maxConcurrent: file.maxConcurrent ?? 8,
+    e2bRoom: e2bConcurrency - e2bChatReserve,
+    localFirst:
+      file.localFirst === undefined
+        ? null
+        : {
+            cpuBelow: file.localFirst.cpuBelow ?? 30,
+            ioBelow: file.localFirst.ioBelow ?? 10,
+            memoryBelow: file.localFirst.memoryBelow ?? 5,
+            maxPerMinute: file.localFirst.maxPerMinute ?? 6,
+          },
     maxJobMs: (file.maxJobMinutes ?? 120) * 60_000,
     maxCopyBackBytes: (file.maxCopyBackMiB ?? 100) * 1024 * 1024,
     repositories,

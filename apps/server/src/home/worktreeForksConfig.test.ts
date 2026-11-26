@@ -51,6 +51,8 @@ it.effect("applies defaults and merges sizes over the built-in ones", () =>
       platforms: [{ kind: "modal", ...modal, app: "t3-worktree-forks" }],
       defaultSize: "default",
       maxConcurrent: 8,
+      e2bRoom: 95,
+      localFirst: null,
       maxJobMs: 120 * 60_000,
       maxCopyBackBytes: 100 * 1024 * 1024,
       bunShim: { skipWhenSet: [], minTestFiles: 20 },
@@ -194,5 +196,43 @@ it.effect("a copy reserves its size's requests and may burst to its limits", () 
       memoryMiB: 8 * 1024,
       memoryLimitMiB: 16 * 1024,
     });
+  }),
+);
+
+it.effect("local-first admission is off unless configured, with defaults when it is", () =>
+  Effect.gen(function* () {
+    const hostWith = (extra: object) =>
+      readWorktreeForksConfig(stateDirWith({ modal, repositories: [megpt], ...extra }));
+    expect((yield* hostWith({}))!.localFirst).toBeNull();
+    expect((yield* hostWith({ localFirst: {} }))!.localFirst).toEqual({
+      cpuBelow: 30,
+      ioBelow: 10,
+      memoryBelow: 5,
+      maxPerMinute: 6,
+    });
+    expect(
+      (yield* hostWith({ localFirst: { cpuBelow: 50, maxPerMinute: 3 } }))!.localFirst,
+    ).toEqual({ cpuBelow: 50, ioBelow: 10, memoryBelow: 5, maxPerMinute: 3 });
+  }),
+);
+
+it.effect("a chat reserve that leaves no E2B room is refused", () =>
+  Effect.gen(function* () {
+    const failure = (extra: object) =>
+      readWorktreeForksConfig(stateDirWith({ e2b, repositories: [megpt], ...extra })).pipe(
+        Effect.flip,
+      );
+    for (const extra of [
+      { e2bConcurrency: 10, e2bChatReserve: 10 },
+      { e2bConcurrency: 3 },
+      { e2bChatReserve: 100 },
+    ])
+      expect((yield* failure(extra)).cause).toEqual(
+        expect.objectContaining({ message: expect.stringContaining("e2bChatReserve") }),
+      );
+    const host = yield* readWorktreeForksConfig(
+      stateDirWith({ e2b, repositories: [megpt], e2bConcurrency: 10, e2bChatReserve: 9 }),
+    );
+    expect(host!.e2bRoom).toBe(1);
   }),
 );

@@ -117,6 +117,8 @@ const report = (event: ForkExecEvent): number => {
     case "unavailable":
       process.stderr.write(`[t3] No copy of this machine could start: ${event.message}\n`);
       return FORK_UNAVAILABLE_EXIT;
+    case "local":
+      return FORK_UNAVAILABLE_EXIT;
     case "failed":
       process.stderr.write(`[t3] The copy running the command was lost: ${event.message}\n`);
       return FORK_LOST_EXIT;

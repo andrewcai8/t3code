@@ -49,7 +49,7 @@ export const gate = <A>() => {
   return { value, open, reached, reach };
 };
 
-/** `directoryImages: false` is a platform with none, as E2B is. */
+/** `directoryImages: false` is a platform with none and one account-wide sandbox limit, as E2B is. */
 export const makeFakeSandboxes = (options: { readonly directoryImages?: boolean } = {}) => {
   const calls: Array<FakeCall> = [];
   const prunes: Array<(kept: ReadonlyArray<string>) => void> = [];
@@ -202,6 +202,15 @@ export const makeFakeSandboxes = (options: { readonly directoryImages?: boolean 
           Object.entries(tags).every(([name, value]) => sandbox.tags[name] === value),
         )
         .map(([sandboxId, sandbox]) => ({ sandboxId, tags: { ...sandbox.tags } })),
+    accountRunning:
+      options.directoryImages === false
+        ? async () => {
+            record({ op: "count" });
+            const listed = [...sandboxes.values()].map((sandbox) => ({ ...sandbox.tags }));
+            await step("count");
+            return listed;
+          }
+        : null,
     directoryImages:
       options.directoryImages === false
         ? null
@@ -242,7 +251,7 @@ export const makeFakeSandboxes = (options: { readonly directoryImages?: boolean 
     onExec: (match: (argv: ReadonlyArray<string>) => boolean, reply: FakeExecReply) =>
       void rules.unshift({ match, reply }),
     failNext: (
-      op: "create" | "upload" | "saveDisk" | "stream" | "saveDirectory" | "mount",
+      op: "create" | "upload" | "saveDisk" | "stream" | "saveDirectory" | "mount" | "count",
       error: Error,
     ) => void failures.set(op, error),
     /** The next upload lands cut short, as a broken stream that resumed wrongly would leave it. */

@@ -215,6 +215,8 @@ const writeOutcome = (
       });
     case "NotStarted":
       return write({ kind: "unavailable", message: outcome.message });
+    case "Local":
+      return write({ kind: "local" });
     case "Refused":
       return write({ kind: "refused", message: outcome.message });
     case "Lost":

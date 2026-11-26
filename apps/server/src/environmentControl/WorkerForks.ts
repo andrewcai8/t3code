@@ -24,11 +24,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as Schedule from "effect/Schedule";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ForkMachines from "./ForkMachines.ts";
-import { makeSlots } from "./forkSlots.ts";
+import { makeSlots, NO_ROOM_RETRY, withSharedRoom } from "./forkSlots.ts";
 
 type Box = DiscoveredProvisionedEnvironment;
 
@@ -42,17 +41,6 @@ const FINISHED_BATCH_TTL_MS = 6 * 3_600_000;
 const MAX_RUNNING_BATCHES_PER_CHAT = 4;
 /** E2B keeps no sandbox longer than a day. */
 const MAX_LIFETIME_MS = 86_400_000;
-/**
- * How long a job keeps its place while its provider refuses its copy for want of room: an E2B
- * account at its running-sandbox limit, or a placement that failed for the moment. Each refusal
- * leaves nothing running, and the waits grow to a minute apart.
- */
-const NO_ROOM_RETRY = Schedule.min([
-  Schedule.exponential("5 seconds"),
-  Schedule.spaced("1 minute"),
-]).pipe(Schedule.upTo({ duration: "15 minutes" }));
-/** Chats wake and pause without telling this host, so a job waiting for E2B room counts again. */
-const E2B_RECOUNT = Duration.seconds(30);
 
 interface ForkLimits {
   readonly maxPerChat: number;
@@ -195,30 +183,13 @@ const make = Effect.gen(function* () {
     captureId: string,
     limits: ForkLimits,
     effect: Effect.Effect<A, E, R>,
-  ) => {
-    const recount = machines.othersRunning(captureId, host).pipe(
-      Effect.flatMap((others) =>
-        others === null
-          ? Effect.succeed(false)
-          : e2bSlots.resize(Math.max(0, limits.e2bRoom - others)).pipe(Effect.as(true)),
-      ),
-      Effect.catch((error) =>
-        Effect.logWarning("could not count the E2B account's running sandboxes", {
-          cause: error.cause,
-        }).pipe(Effect.as(true)),
-      ),
+  ) =>
+    withSharedRoom(
+      e2bSlots,
+      (others) => Math.max(0, limits.e2bRoom - others),
+      machines.othersRunning(captureId, host),
+      effect,
     );
-    return recount.pipe(
-      Effect.flatMap((shared) =>
-        shared
-          ? e2bSlots.withSlot(
-              effect,
-              Effect.forever(Effect.sleep(E2B_RECOUNT).pipe(Effect.andThen(recount))),
-            )
-          : effect,
-      ),
-    );
-  };
 
   const runJob = Effect.fn("runJob")(function (
     batch: Batch,
