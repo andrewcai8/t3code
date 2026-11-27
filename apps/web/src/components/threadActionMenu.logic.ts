@@ -155,6 +155,16 @@ export function threadActionWorksWithoutMachine(action: ThreadActionMenuId): boo
   return action === "settle" || action === "unsettle" || action === "delete";
 }
 
+/**
+ * The server marks unread against the latest run's completion, and a stopped run never reads as
+ * unread, so only a run that finished on its own can be marked unread.
+ */
+export function canMarkLatestRunUnread(
+  run: { readonly status: string; readonly completedAt?: string | null } | null | undefined,
+): boolean {
+  return run?.completedAt != null && run.status !== "interrupted" && run.status !== "cancelled";
+}
+
 export function isThreadTriageAction(action: string): boolean {
   return (
     action === "settle" ||
