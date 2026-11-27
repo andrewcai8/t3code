@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - The disk read goes through node:fs/promises.
 import { assert, describe, it } from "@effect/vitest";
+import type * as NodeFSP from "node:fs/promises";
 import type * as NodeOS from "node:os";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
@@ -10,10 +12,27 @@ import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vite-plus/test";
 
+import * as ServerConfig from "../config.ts";
 import * as HostResources from "./HostResources.ts";
 
 // An 8-CPU host; every cpus() call advances each CPU by 100 ms at `host.busy` utilization.
-const host = vi.hoisted(() => ({ busy: 0, reads: 0 }));
+const host = vi.hoisted(() => ({
+  busy: 0,
+  reads: 0,
+  statfsPaths: [] as Array<string>,
+  statfs: undefined as { blocks: number; bfree: number; bavail: number; bsize: number } | undefined,
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFSP>();
+  return {
+    ...actual,
+    statfs: async (path: string) => {
+      host.statfsPaths.push(path);
+      if (!host.statfs) throw new Error("ENOENT");
+      return host.statfs;
+    },
+  };
+});
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeOS>();
   return {
@@ -35,6 +54,8 @@ vi.mock("node:os", async (importOriginal) => {
 const setup = (busy = 0) => {
   host.busy = busy;
   host.reads = 0;
+  host.statfsPaths = [];
+  host.statfs = undefined;
 };
 
 const GiB = 1024 ** 3;
@@ -74,6 +95,10 @@ const linuxHost = (files: Record<string, ReadonlyArray<string>>) => {
             return Effect.succeed(values[Math.min(index, values.length - 1)]!);
           },
         }),
+        // HostResources reads only baseDir from the config.
+        Layer.succeed(ServerConfig.ServerConfig, {
+          baseDir: "/home/t3",
+        } as ServerConfig.ServerConfig["Service"]),
         Layer.succeed(HostProcess.Platform, "linux"),
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
@@ -223,5 +248,30 @@ describe("HostResources.layer", () => {
         }),
       ),
     ),
+  );
+
+  it.effect("reports the disk holding the base directory, net of root-reserved blocks", () =>
+    Effect.gen(function* () {
+      setup();
+      // 1000 blocks of 1 MiB; 100 free, of which 50 are reserved for root.
+      host.statfs = { blocks: 1000, bfree: 100, bavail: 50, bsize: MiB };
+      const snapshot = yield* read;
+
+      assert.deepStrictEqual(host.statfsPaths, ["/home/t3"]);
+      assert.strictEqual(snapshot.diskAvailableBytes, 50 * MiB);
+      // Used matches df: 900 MiB.
+      assert.strictEqual(snapshot.diskTotalBytes, 950 * MiB);
+    }).pipe(Effect.provide(linuxHost(unlimitedCgroup))),
+  );
+
+  it.effect("omits disk fields when the file system cannot be read", () =>
+    Effect.gen(function* () {
+      setup();
+      const snapshot = yield* read;
+
+      assert.notProperty(snapshot, "diskTotalBytes");
+      assert.notProperty(snapshot, "diskAvailableBytes");
+      assert.strictEqual(snapshot.totalMemoryBytes, 4 * GiB);
+    }).pipe(Effect.provide(linuxHost(unlimitedCgroup))),
   );
 });

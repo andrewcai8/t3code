@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Effect has no free-space query.
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import type { HostResourcesSnapshot } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -8,7 +10,14 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
+import * as ServerConfig from "../config.ts";
+
+class DiskStatError extends Schema.TaggedError<DiskStatError>()("DiskStatError", {
+  cause: Schema.Defect(),
+}) {}
 
 export class HostResources extends Context.Service<
   HostResources,
@@ -72,6 +81,7 @@ function cgroupNumber(text: string, pattern: RegExp): number | null {
 
 const make = Effect.fn("makeHostResources")(function* () {
   const fs = yield* FileSystem.FileSystem;
+  const { baseDir } = yield* ServerConfig.ServerConfig;
   const platform = yield* HostProcess.Platform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -172,12 +182,32 @@ const make = Effect.fn("makeHostResources")(function* () {
         memoryMax - (memoryCurrent - reclaimable),
       );
     }
+    // Capacity the server can use: used + available, so total - available matches `df`'s Used
+    // (blocks reserved for root count in neither).
+    const disk = yield* Effect.tryPromise({
+      try: () => NodeFSP.statfs(baseDir),
+      catch: (cause) => new DiskStatError({ cause }),
+    }).pipe(
+      Effect.map(({ blocks, bfree, bavail, bsize }) => ({
+        diskTotalBytes: (blocks - bfree + bavail) * bsize,
+        diskAvailableBytes: bavail * bsize,
+      })),
+      Effect.filterOrFail(
+        ({ diskTotalBytes, diskAvailableBytes }) =>
+          Number.isSafeInteger(diskTotalBytes) &&
+          Number.isSafeInteger(diskAvailableBytes) &&
+          diskAvailableBytes >= 0 &&
+          diskTotalBytes >= diskAvailableBytes,
+      ),
+      Effect.orElseSucceed(() => ({})),
+    );
     return {
       sampledAt: DateTime.toEpochMillis(yield* DateTime.now),
       cpuUtilization,
       cpuCount,
       availableMemoryBytes: Math.min(totalMemoryBytes, Math.max(0, availableMemoryBytes)),
       totalMemoryBytes,
+      ...disk,
     };
   });
 
