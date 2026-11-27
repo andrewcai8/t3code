@@ -1,15 +1,17 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import { connectionBox } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { useContext, useState } from "react";
 
 import { useVisibleInterval } from "../../hooks/useVisibleInterval";
-import { useEnvironments } from "../../state/environments";
+import { type EnvironmentPresentation, useEnvironments } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
 import { buildMachineRows, type MachineSample } from "./machines.logic";
 
 const MACHINES_POLL_MS = 3_000;
+const readClock = () => Date.now();
 
 // Keyed by content: the id list is derived every render.
 const hostResourcesAtom = Atom.family((environmentIdsKey: string) =>
@@ -35,23 +37,28 @@ const hostResourcesAtom = Atom.family((environmentIdsKey: string) =>
   ),
 );
 
+// Cloud boxes belong to their chats, which already show each box's state.
+const isHostEnvironment = (environment: EnvironmentPresentation) =>
+  connectionBox(environment.entry.target) === null;
+
 /**
  * Mount only while the Machines view is open: it polls every connected environment, and unmounting
  * releases the host-resources atoms so nothing is read in the background.
  */
 export function useMachineRows() {
   const registry = useContext(RegistryContext);
-  const { environments } = useEnvironments();
+  const { environments: allEnvironments } = useEnvironments();
+  const environments = allEnvironments.filter(isHostEnvironment);
   const connectedIds = environments
     .filter((environment) => environment.connection.phase === "connected")
     .map((environment) => environment.environmentId)
     .toSorted();
   const polled = useAtomValue(hostResourcesAtom(connectedIds.join("\n")));
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState(readClock);
 
   useVisibleInterval(
     () => {
-      setNow(Date.now());
+      setNow(readClock());
       for (const environmentId of connectedIds) {
         registry.refresh(serverEnvironment.hostResources({ environmentId, input: {} }));
       }
