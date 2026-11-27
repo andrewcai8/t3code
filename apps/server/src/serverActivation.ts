@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import type * as Fiber from "effect/Fiber";
 import * as FiberSet from "effect/FiberSet";
 import type * as Scope from "effect/Scope";
+import * as Tracer from "effect/Tracer";
 
 export class ServerActivation extends Context.Reference<Effect.Effect<void> | undefined>(
   "t3/serverActivation",
@@ -20,9 +21,20 @@ export class ParkedWork extends Context.Reference<FiberSet.FiberSet<unknown, unk
   { defaultValue: () => undefined },
 ) {}
 
-export const forkParkedFiber = Effect.fn("serverActivation.forkParkedFiber")(function* <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
+// Background work outlives its caller's span; parenting to it puts every run in one endless trace.
+export const withoutParentSpan = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    // ParentSpan is optional to every reader, so removing it leaves R satisfied.
+    Effect.updateContext(
+      (context: Context.Context<R>) =>
+        Context.omit(Tracer.ParentSpan)(context) as Context.Context<R>,
+    ),
+  );
+
+export const forkParkedFiber = Effect.fnUntraced(function* <A, E, R>(
+  input: Effect.Effect<A, E, R>,
 ): Effect.fn.Return<Fiber.Fiber<A, E>, never, Scope.Scope | R> {
+  const effect = withoutParentSpan(input);
   const activation = yield* ServerActivation;
   const parkedWork = yield* ParkedWork;
   if (activation === undefined) {
