@@ -21,6 +21,12 @@ Open **Settings → Maintenance → Diagnostics** (select an environment) to ins
 - Running child processes (with controls to signal or stop them)
 - **OpenTelemetry export** (OTLP HTTP endpoints; see [Export diagnostics](./telemetry.md#export-diagnostics-to-your-own-opentelemetry-receiver))
 
+## Machines at a glance
+
+Click the **Machines** button (the chip icon) at the bottom of the sidebar to see every connected environment side by side: CPU use and core count, memory in use, and disk in use for the file system that holds that server's T3 Code data. Click a machine's name to open its Diagnostics. A machine that is offline, still being sampled, or has not reported for more than 15 seconds is dimmed. Disk appears for servers that report it, so an older server shows CPU and memory only.
+
+The view reads each machine only while it is open, about every 3 seconds, and stops when you close it.
+
 On mobile, startup crashes from the last 7 days are recorded under **Settings → Diagnostics** for bug reports.
 
 ## Inspect local trace files (`t3 trace`)
