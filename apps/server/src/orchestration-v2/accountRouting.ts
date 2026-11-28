@@ -57,11 +57,6 @@ export function routeSelection(
   if (driver === undefined || !ROUTED_ACCOUNT_DRIVERS.has(driver)) return selection;
   const pick = (instanceId: ProviderInstanceId) =>
     instanceId === selection.instanceId ? selection : { ...selection, instanceId };
-  const current = providers.find(
-    (provider) => provider.instanceId === input.current && provider.driver === driver,
-  );
-  if (current !== undefined && !isAccountSpent(driver, current.usageLimits, input.now))
-    return pick(current.instanceId);
   const accounts = providers.filter(
     (provider) =>
       provider.driver === driver &&
@@ -72,6 +67,10 @@ export function routeSelection(
       (provider.models.length === 0 ||
         provider.models.some((model) => model.slug === selection.model)),
   );
+  // An account the thread can no longer run on, such as one disabled for the project, is not kept.
+  const current = accounts.find((provider) => provider.instanceId === input.current);
+  if (current !== undefined && !isAccountSpent(driver, current.usageLimits, input.now))
+    return pick(current.instanceId);
   const ranked = rankAccounts(
     accounts.map((provider) => ({
       instanceId: provider.instanceId,

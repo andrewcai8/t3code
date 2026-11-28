@@ -140,6 +140,16 @@ describe("routeSelection", () => {
         },
       ),
     ).toBe("claudeAgent");
+    expect(
+      route("claudeAgent", [provider("claudeAgent", 10), provider("claude_work", 60)], {
+        current: "claudeAgent",
+        settings: settings({
+          projectSettingsOverrides: {
+            [projectId]: { providerInstances: { claudeAgent: { enabled: false } } },
+          },
+        }),
+      }),
+    ).toBe("claude_work");
   });
 
   it("keeps a thread on its account when a follow-up names another account of the driver", () => {
